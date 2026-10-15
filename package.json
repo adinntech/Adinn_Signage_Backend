@@ -1,0 +1,52 @@
+{
+    "name": "signage-recce-backend",
+    "version": "1.0.0",
+    "description": "Adinn Signage Recce CRM API",
+    "main": "dist/server.js",
+    "scripts": {
+        "dev": "tsx watch src/server.ts",
+        "build": "tsc -p tsconfig.json",
+        "start": "node dist/server.js",
+        "typecheck": "tsc -p tsconfig.check.json",
+        "test": "vitest run",
+        "seed": "tsx src/scripts/seed.ts",
+        "create-user": "tsx src/scripts/create-user.ts",
+        "reset-mpin": "tsx src/scripts/reset-mpin.ts",
+        "format": "prettier --write src tests"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "commonjs",
+    "dependencies": {
+        "bcryptjs": "^3.0.3",
+        "cookie-parser": "^1.4.7",
+        "cors": "^2.8.6",
+        "dotenv": "^18.0.6",
+        "exceljs": "^4.4.0",
+        "express": "^5.2.1",
+        "express-rate-limit": "^8.7.1",
+        "helmet": "^8.3.0",
+        "jsonwebtoken": "^9.0.3",
+        "mongoose": "^9.11.1",
+        "morgan": "^1.12.1",
+        "multer": "^2.4.0",
+        "zod": "^4.6.5"
+    },
+    "devDependencies": {
+        "@types/cookie-parser": "^1.4.10",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.6",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/morgan": "^1.9.10",
+        "@types/multer": "^2.3.0",
+        "@types/node": "^26.6.4",
+        "@types/supertest": "^7.2.1",
+        "mongodb-memory-server": "^11.3.0",
+        "prettier": "^3.9.9",
+        "supertest": "^7.3.1",
+        "tsx": "^4.23.15",
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.3"
+    }
+}
