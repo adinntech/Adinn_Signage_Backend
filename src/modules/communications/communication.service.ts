@@ -135,7 +135,7 @@ export async function createProjectFromMail(id: string, b: z.infer<typeof create
   if (m.project) throw AppError.conflict('This mail is already linked to a project');
   return createProject(
     {
-      clientId: b.clientId, campaign: b.campaign, priority: b.priority, targetDate: b.targetDate, coordinatorId: b.coordinatorId,
+      clientId: b.clientId, campaign: b.campaign, priority: b.priority, targetDate: b.targetDate, coordinatorId: b.coordinatorId, status: 'NEW',
       description: m.body.slice(0, 5000), sourceMessageId: String(m._id),
       requirement: {
         source: 'EMAIL', contact: { name: m.from?.name ?? undefined, email: m.from?.email ?? undefined },

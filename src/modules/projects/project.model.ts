@@ -1,11 +1,34 @@
 import { Schema, model } from 'mongoose';
 
-export const PROJECT_STATUSES = ['NEW', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED'] as const;
+/**
+ * NEW/ACTIVE are the original statuses. The BD -> Operations pipeline adds
+ * DRAFT -> ENQUIRY -> RECCE_ASSIGNED -> PLANNING -> IN_PROGRESS -> CLIENT_APPROVAL -> COMPLETED.
+ */
+export const PROJECT_STATUSES = [
+  'NEW', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED',
+  'DRAFT', 'ENQUIRY', 'RECCE_ASSIGNED', 'PLANNING', 'IN_PROGRESS', 'CLIENT_APPROVAL',
+] as const;
 export const PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
+export const REQUIREMENT_TYPES = ['ASO', 'SHOP_DETAILS', 'SHOP_MEASUREMENT'] as const;
+export type RequirementType = (typeof REQUIREMENT_TYPES)[number];
+
+const contactSchema = new Schema(
+  { name: { type: String, required: true, trim: true }, email: { type: String, lowercase: true, trim: true }, phone: String },
+  { _id: true },
+);
 
 const projectSchema = new Schema(
   {
-    code: { type: String, required: true, unique: true }, // SGN-<CLIENT>-<YEAR>-<NNN>
+    code: { type: String, required: true, unique: true }, // SGN-<CLIENT>-<YEAR>-<NNN>, or a BD-supplied code (e.g. 22070277)
+    requirementType: { type: String, enum: REQUIREMENT_TYPES },
+    startDate: Date,
+    district: { type: String, trim: true },
+    instructions: String,
+    /** Expected number of shops (null for ASO surveys where the count is unknown). */
+    expectedShops: Number,
+    contacts: [contactSchema],
+    assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    assignedAt: Date,
     name: { type: String, required: true, trim: true },
     client: { type: Schema.Types.ObjectId, ref: 'Client', required: true, index: true },
     campaign: { type: String, trim: true },

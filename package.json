@@ -12,13 +12,16 @@
         "seed": "tsx src/scripts/seed.ts",
         "create-user": "tsx src/scripts/create-user.ts",
         "reset-mpin": "tsx src/scripts/reset-mpin.ts",
-        "format": "prettier --write src tests"
+        "format": "prettier --write src tests",
+        "e2e:server": "tsx scripts/e2e-server.ts"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
     "type": "commonjs",
     "dependencies": {
+        "@aws-sdk/client-s3": "^3.1152.0",
+        "@aws-sdk/s3-request-presigner": "^3.1152.0",
         "bcryptjs": "^3.0.3",
         "cookie-parser": "^1.4.7",
         "cors": "^2.8.6",
@@ -31,6 +34,7 @@
         "mongoose": "^9.11.1",
         "morgan": "^1.12.1",
         "multer": "^2.4.0",
+        "nodemailer": "^10.1.7",
         "zod": "^4.6.5"
     },
     "devDependencies": {
@@ -41,6 +45,7 @@
         "@types/morgan": "^1.9.10",
         "@types/multer": "^2.3.0",
         "@types/node": "^26.6.4",
+        "@types/nodemailer": "^8.0.2",
         "@types/supertest": "^7.2.1",
         "mongodb-memory-server": "^11.3.0",
         "prettier": "^3.9.9",

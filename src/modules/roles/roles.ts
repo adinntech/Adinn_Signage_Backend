@@ -40,7 +40,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   ],
   RECCE_EXECUTIVE: ['dashboard:view', 'sites:read', 'field:execute'],
   VENDOR: ['dashboard:view', 'sites:read', 'field:execute'],
-  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'verification:manage', 'vendors:manage', 'reports:read'],
+  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read'],
   FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read'],
   MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read'],
 };
@@ -49,14 +49,14 @@ export const permissionsFor = (role: Role): readonly Permission[] => ROLE_PERMIS
 
 // Where each role lands after login (web).
 export const ROLE_HOME: Record<Role, string> = {
-  SUPER_ADMIN: '/dashboard',
-  BD: '/dashboard',
-  RECCE_COORDINATOR: '/recce/requests',
-  RECCE_EXECUTIVE: '/dashboard',
-  VENDOR: '/dashboard',
-  OPERATIONS: '/dashboard',
-  FINANCE: '/dashboard',
-  MANAGEMENT: '/dashboard',
+  SUPER_ADMIN: '/admin/dashboard',
+  BD: '/bd/dashboard',
+  RECCE_COORDINATOR: '/operations/dashboard',
+  RECCE_EXECUTIVE: '/dashboard', // mobile-only; the Flutter app routes it to /recce
+  VENDOR: '/dashboard', // mobile-only; the Flutter app routes it to /vendor
+  OPERATIONS: '/operations/dashboard',
+  FINANCE: '/finance/dashboard',
+  MANAGEMENT: '/admin/dashboard',
 };
 
 

@@ -1,21 +1,27 @@
 import { z } from 'zod';
 import { listQuery } from '../../common/query';
+import { optionalEmail, optionalMobile, rejectDuplicateContacts } from '../../common/validators/contact';
 
-const phone = z.string().trim().regex(/^[+\d][\d\s-]{6,15}$/, 'Invalid phone number');
 const gstin = z.string().trim().toUpperCase().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/, 'Invalid GSTIN');
 
 const contact = z.object({
-  name: z.string().trim().min(1),
+  name: z.string().trim().min(1, 'Enter the contact name'),
   designation: z.string().trim().optional(),
-  phone: phone.optional().or(z.literal('').transform(() => undefined)),
-  email: z.string().trim().toLowerCase().email().optional().or(z.literal('').transform(() => undefined)),
+  phone: optionalMobile,
+  email: optionalEmail,
   isPrimary: z.boolean().default(false),
 });
+
+export const contactList = z
+  .array(contact)
+  .max(20)
+  .default([])
+  .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, []));
 
 export const clientBody = z.object({
   name: z.string().trim().min(2).max(120),
   code: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{2,8}$/, '2-8 letters/digits'),
-  contacts: z.array(contact).max(20).default([]),
+  contacts: contactList,
   address: z.string().trim().max(500).optional(),
   city: z.string().trim().max(80).optional(),
   state: z.string().trim().max(80).optional(),

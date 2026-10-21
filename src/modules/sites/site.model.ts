@@ -2,6 +2,8 @@ import { Schema, model } from 'mongoose';
 import { SCENARIOS, UNITS } from './site.fields';
 
 export const SITE_STATUSES = ['PENDING'] as const; // recce lifecycle statuses are added in later phases
+export const APPROVAL_STATES = ['PENDING', 'APPROVED', 'CORRECTION'] as const;
+export type ApprovalState = (typeof APPROVAL_STATES)[number];
 
 const siteSchema = new Schema(
   {
@@ -31,6 +33,12 @@ const siteSchema = new Schema(
     extra: { type: Schema.Types.Mixed }, // any other client columns, original header -> value
     dupKey: { type: String, index: true },
     status: { type: String, enum: SITE_STATUSES, default: 'PENDING' },
+    /** Two independent pre-recce approvals of the shop details / board measurement. */
+    opsApproval: { type: String, enum: APPROVAL_STATES, default: 'PENDING' },
+    bdApproval: { type: String, enum: APPROVAL_STATES, default: 'PENDING' },
+    approvalNote: String,
+    approvalUpdatedAt: Date,
+    approvalUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     importBatch: { type: Schema.Types.ObjectId, ref: 'ImportBatch' },
     sourceRow: Number,
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },

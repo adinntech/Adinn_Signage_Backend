@@ -55,7 +55,7 @@ describe('auth', () => {
     const res = await request(app).post(`${API}/login`).send({ identifier: 'Emp001', password: creds.password });
     expect(res.status).toBe(200);
     expect(res.body.data.user.employeeId).toBe('EMP001');
-    expect(res.body.data.user.home).toBe('/dashboard');
+    expect(res.body.data.user.home).toBe('/bd/dashboard');
     const bad = await request(app).post(`${API}/login`).send({ identifier: 'EMP999', password: creds.password });
     expect(bad.status).toBe(401);
   });

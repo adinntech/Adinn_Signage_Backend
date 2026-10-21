@@ -115,7 +115,19 @@ export async function updateSite(id: string, patch: Raw, actor: Actor) {
   const scenario = (patch.scenario as Scenario | undefined) ?? (before.scenario as Scenario) ?? 'MEASUREMENT_REQUIRED';
   const n = prepare(merged as Raw, scenario);
   if (n.errors.length) fail(n.errors);
+  // Editing must not silently create a duplicate of another shop in the same project.
+  if (n.doc.dupKey && n.doc.dupKey !== before.dupKey && (await Site.exists({ project: before.project, dupKey: n.doc.dupKey, deletedAt: null, _id: { $ne: id } }))) {
+    throw AppError.conflict('Another site with the same shop, dealer and district already exists');
+  }
   const set = { ...n.doc, scenario, updatedBy: actor.id } as Record<string, unknown>;
+  // A changed size or board type must be re-verified, so both approvals start again.
+  const num = (v: unknown) => (v == null ? null : Number(v));
+  if (num(n.doc.width) !== num(before.width) || num(n.doc.height) !== num(before.height) || (n.doc.boardType ?? null) !== (before.boardType ?? null) || (n.doc.unit ?? null) !== (before.unit ?? null)) {
+    if (before.opsApproval !== 'PENDING' || before.bdApproval !== 'PENDING') {
+      set.opsApproval = 'PENDING';
+      set.bdApproval = 'PENDING';
+    }
+  }
   const unset: Record<string, 1> = {};
   for (const f of AUDIT_FIELDS) if (f !== 'scenario' && !(f in n.doc) && (before as never)[f] != null) unset[f] = 1;
   const after = await Site.findByIdAndUpdate(id, { $set: set, ...(Object.keys(unset).length ? { $unset: unset } : {}) }, { returnDocument: 'after' }).lean();

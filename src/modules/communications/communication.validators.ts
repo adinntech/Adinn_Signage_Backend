@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { listQuery, objectId } from '../../common/query';
+import { optionalMobile } from '../../common/validators/contact';
 import { attachmentSchema } from '../projects/project.validators';
 import { MESSAGE_TYPES } from './communication.model';
 
@@ -45,7 +46,7 @@ export const approvalDecisionBody = z.object({ status: z.enum(['APPROVED', 'REJE
 export const participantSchema = z.object({
   name: z.string().trim().min(1).max(120),
   role: z.string().trim().max(60).optional(),
-  phone: z.string().trim().regex(/^[+\d][\d\s-]{6,15}$/, 'Invalid phone number').optional().or(z.literal('').transform(() => undefined)),
+  phone: optionalMobile,
   email: z.string().trim().toLowerCase().email().optional().or(z.literal('').transform(() => undefined)),
   userId: objectId.optional(),
   included: z.boolean().default(true),

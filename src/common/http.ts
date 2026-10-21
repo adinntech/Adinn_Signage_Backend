@@ -30,7 +30,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if ((err as { name?: string })?.name === 'MulterError') {
     const code = (err as { code?: string }).code;
-    return res.status(code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ success: false, error: { code: code ?? 'UPLOAD_ERROR', message: code === 'LIMIT_FILE_SIZE' ? 'File is too large (max 10 MB)' : 'Invalid upload' } });
+    return res.status(code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ success: false, error: { code: code ?? 'UPLOAD_ERROR', message: code === 'LIMIT_FILE_SIZE' ? 'File is too large' : code === 'LIMIT_FILE_COUNT' ? 'Too many files in one upload (max 10)' : 'Invalid upload' } });
+  }
+  if ((err as { code?: number })?.code === 11000) {
+    return res.status(409).json({ success: false, error: { code: 'CONFLICT', message: 'A record with the same unique value already exists' } });
   }
   if ((err as { name?: string })?.name === 'CastError') {
     return res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Invalid identifier' } });

@@ -2,3 +2,10 @@ node_modules
 dist
 .env
 *.log
+
+# per-environment files (examples are committed)
+.env.*
+!.env.example
+!.env.*.example
+# local file storage
+public/uploads

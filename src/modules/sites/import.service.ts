@@ -4,6 +4,7 @@ import { AppError } from '../../common/errors';
 import { nextSeqBlock } from '../../common/counter.model';
 import { pageMeta, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
+import { notifyProjectParty } from '../notifications/notification.service';
 import { Requirement } from '../projects/project.model';
 import { parseWorkbook } from './excel.service';
 import {
@@ -197,6 +198,9 @@ export async function commitImport(projectId: string, batchId: string, body: z.i
     const cursor = ImportRow.find({ batch: batchId }).sort({ rowNumber: 1 }).lean().cursor();
     for await (const row of cursor) {
       if (row.skipped) { skippedRows++; continue; }
+      // A row still flagged ERROR (e.g. an invalid mobile) is never imported. Re-validating below would not catch it,
+      // because the staged values already had the bad field removed. Fixing the row in the review step clears the flag.
+      if (row.state === 'ERROR') { errorRows++; continue; }
       // Re-validate: rows may have been edited after preview.
       const n = normalise(row.mapped as never, { scenario, defaultUnit: locked.defaultUnit as Unit });
       if (n.errors.length) { errorRows++; continue; }
@@ -249,6 +253,19 @@ export async function commitImport(projectId: string, batchId: string, body: z.i
     locked.set({ status: 'COMMITTED', result, committedAt: new Date() });
     await locked.save();
     await recordAudit({ actor, action: 'IMPORT_SITES', entity: 'ImportBatch', entityId: locked._id, project: projectId, reason: `${locked.fileName}: ${created} created, ${updated} updated, ${skippedRows} skipped, ${errorRows} with errors` });
+    if (created > 0) {
+      await notifyProjectParty(
+        projectId,
+        'owner',
+        {
+          kind: 'SHOPS_IMPORTED',
+          title: 'Shop list imported',
+          body: `${created} shop${created > 1 ? 's' : ''} imported into project ${project.code} from ${locked.fileName}${skippedRows + errorRows ? ` (${skippedRows + errorRows} rows skipped)` : ''}.`,
+          dedupe: (r) => `import:${locked._id}:${r}`,
+        },
+        actor.id,
+      );
+    }
     return locked.toObject();
   } catch (e) {
     // Sites created so far are kept (each has importBatch); allow retry with remaining state.

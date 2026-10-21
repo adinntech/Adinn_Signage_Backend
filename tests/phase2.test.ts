@@ -71,15 +71,15 @@ describe('projects', () => {
     expect(a.body.data.requirement.source).toBe('EMAIL');
     expect(a.body.data.owner.name).toBe('BD');
     ids.project = a.body.data._id;
-    const b = await req().post('/api/v1/projects').set(as('BD')).send(body);
+    const b = await req().post('/api/v1/projects').set(as('BD')).send({ ...body, campaign: 'Dindigul Retail Phase 2' });
     expect(b.body.data.code).toBe(`SGN-AMUL-${year}-002`);
     const h = await req().get(`/api/v1/projects/${ids.project}/history`).set(as('BD'));
     expect(h.body.data[0].action).toBe('CREATE');
   });
 
   it('creates unique codes under concurrency', async () => {
-    const body = { clientId: ids.client, campaign: 'Race', requirement: requirement() };
-    const rs = await Promise.all([1, 2, 3, 4, 5].map(() => req().post('/api/v1/projects').set(as('BD')).send(body)));
+    const mk = (i: number) => ({ clientId: ids.client, campaign: `Race ${i}`, requirement: requirement() });
+    const rs = await Promise.all([1, 2, 3, 4, 5].map((i) => req().post('/api/v1/projects').set(as('BD')).send(mk(i))));
     expect(rs.every((r) => r.status === 201)).toBe(true);
     expect(new Set(rs.map((r) => r.body.data.code)).size).toBe(5);
   });
@@ -89,12 +89,12 @@ describe('projects', () => {
     expect((await req().post('/api/v1/projects').set(as('BD')).send({ ...base, clientId: '64b000000000000000000000' })).status).toBe(400);
     const off = await req().post('/api/v1/clients').set(as('BD')).send({ name: 'Off', code: 'OFF', status: 'INACTIVE' });
     expect((await req().post('/api/v1/projects').set(as('BD')).send({ ...base, clientId: off.body.data._id })).status).toBe(400);
-    expect((await req().post('/api/v1/projects').set(as('BD')).send({ clientId: ids.client, campaign: 'X' })).status).toBe(422);
+    expect((await req().post('/api/v1/projects').set(as('BD')).send({ clientId: ids.client })).status).toBe(422);
     expect((await req().post('/api/v1/projects').set(as('RECCE_COORDINATOR')).send({ ...base, clientId: ids.client })).status).toBe(403);
   });
 
   it('lists with filters, pagination and summary', async () => {
-    const l = await req().get('/api/v1/projects?limit=2&page=1&priority=HIGH').set(as('RECCE_COORDINATOR'));
+    const l = await req().get('/api/v1/projects?limit=2&page=1&priority=HIGH').set(as('BD'));
     expect(l.status).toBe(200);
     expect(l.body.data.length).toBe(2);
     expect(l.body.data[0].client.code).toBe('AMUL');
