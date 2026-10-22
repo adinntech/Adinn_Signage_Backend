@@ -71,6 +71,10 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   RECCE_ACKNOWLEDGEMENT: 'Recce - Acknowledgement',
   RECCE_EXPENSE: 'Recce - Expenses',
   OPS_SURVEY_PROOF: 'Operations - Survey Proof',
+  SALES_COMMENT_ATTACHMENT: 'Sales - Comment Attachments',
+  SALES_APPROVAL_PROOF: 'Sales - Approval Proof',
+  SALES_RATE_CARD_PDF: 'Sales - Rate Card PDF',
+  TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
 };
 
 const EXT_KIND: Record<string, FileKind> = {

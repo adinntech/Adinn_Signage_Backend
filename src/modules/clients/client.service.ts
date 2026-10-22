@@ -4,6 +4,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { diff, recordAudit } from '../audit/audit.service';
 import { SalesOrder } from '../sales/sales.model';
 import { normKey } from '../sites/site.fields';
+import { purgeClientData } from './client.cascade';
 import { Client } from './client.model';
 import type { z } from 'zod';
 import type { clientBody, clientListQuery, clientPatch, clientRegistration } from './client.validators';
@@ -135,6 +136,9 @@ export async function updateClient(id: string, patch: z.infer<typeof clientPatch
 
 export async function deleteClient(id: string, actor: Actor) {
   await getClient(id);
-  await Client.updateOne({ _id: id }, { deletedAt: new Date(), status: 'INACTIVE', updatedBy: actor.id });
-  await recordAudit({ actor, action: 'DELETE', entity: 'Client', entityId: id });
+  // No projects: the client and everything it owns (orders, files) is erased. With projects: hidden only, they still need it.
+  const { purged, removed } = await purgeClientData(id);
+  if (!purged) await Client.updateOne({ _id: id }, { deletedAt: new Date(), status: 'INACTIVE', updatedBy: actor.id });
+  await recordAudit({ actor, action: 'DELETE', entity: 'Client', entityId: id, reason: purged ? 'Erased with its sales orders and files' : 'Hidden: it still has projects' });
+  return { id, purged, removed };
 }

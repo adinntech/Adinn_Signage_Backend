@@ -16,13 +16,12 @@ export interface StorageProvider {
   remove(key: string): Promise<void>;
   /** Short-lived link to read a private object. `attachment` makes the browser save it under `fileName`. */
   signedUrl(key: string, fileName: string, ttlSeconds: number, disposition?: Disposition): Promise<string>;
-  /** Where the object sits in the bucket: the full path (with the app folder) and the full URL. Only Spaces has one; local files stay key-only. */
   /** The object's bytes, for previews the web app reads through this API (so the bucket needs no CORS rule). */
   stream(key: string): Promise<Readable>;
+  /** Object bytes (e.g. to attach a stored PDF to an email). */
+  get(key: string): Promise<Buffer>;
+  /** Where the object sits in the bucket: the full path (with the app folder) and the full URL. Only Spaces has one; local files stay key-only. */
   locate?(key: string): { path: string; url: string };
-
-   /** Object bytes (e.g. to attach a stored PDF to an email). */
-  /* // get(key: string): Promise<Buffer>; VIGNESH CODE*/
 }
 
 export type StorageType = 'local' | 'space';
@@ -238,6 +237,7 @@ function build(type: StorageType): StorageProvider {
 /**
  * The provider for a given storage type. Every file remembers where it was saved (local or space), so previews, downloads
  * and deletes always go to that place, whatever STORAGE_TYPE is set to now. Only NEW uploads follow STORAGE_TYPE.
+ * Throws a clear conflict when a Spaces file is read on a server where Spaces is not configured.
  */
 export function getStorageFor(type: StorageType): StorageProvider {
   if (override) return override;
@@ -251,62 +251,3 @@ export const getStorage = () => getStorageFor(env.storage);
 export function setStorageForTests(p: StorageProvider | undefined) {
   override = p;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// const providers: Partial<Record<StorageProvider['type'], StorageProvider>> = {};
-
-// const spacesConfigured = () => !!(env.DO_SPACES_BUCKET && env.DO_SPACES_ENDPOINT && env.DO_SPACES_REGION && env.DO_SPACES_KEY && env.DO_SPACES_SECRET);
-
-// function build(type: StorageProvider['type']): StorageProvider {
-//   if (type === 'local') return new LocalStorage(path.resolve(process.cwd(), env.LOCAL_UPLOAD_PATH), env.JWT_ACCESS_SECRET, env.publicBaseUrl);
-//   const client = new S3Client({
-//     region: env.DO_SPACES_REGION!,
-//     endpoint: env.DO_SPACES_ENDPOINT!,
-//     forcePathStyle: false,
-//     credentials: { accessKeyId: env.DO_SPACES_KEY!, secretAccessKey: env.DO_SPACES_SECRET! },
-//   });
-//   return new SpacesStorage({
-//     bucket: env.DO_SPACES_BUCKET!,
-//     prefix: env.STORAGE_PREFIX,
-//     client,
-//     signer: (key, fileName, ttl) =>
-//       getSignedUrl(
-//         client,
-//         new GetObjectCommand({
-//           Bucket: env.DO_SPACES_BUCKET!,
-//           Key: key,
-//           ResponseContentDisposition: `inline; filename="${fileName.replace(/[^\w.\- ]/g, '_')}"`,
-//         }),
-//         { expiresIn: ttl },
-//       ),
-//   });
-// }
-
-// /** Where new uploads go (STORAGE_TYPE). */
-// export function getStorage(): StorageProvider {
-//   return override ?? (providers[env.storage] ??= build(env.storage));
-// }
-
-// /**
-//  * The storage a file was uploaded to, so it is read and deleted where it actually lives even after STORAGE_TYPE
-//  * changes. null when that storage is not configured on this server (e.g. a Spaces file on a local-only dev machine).
-//  */
-// export function getStorageFor(type: StorageProvider['type']): StorageProvider | null {
-//   if (override) return override;
-//   if (type === env.storage) return getStorage();
-//   if (type === 'space' && !spacesConfigured()) return null;
-//   return (providers[type] ??= build(type));
-// >>>>>>> 703b8c9594686abb9d3ae68d0fdba78df4cef490
-// } ----> VIGNESH CODE 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
 import type { Express } from 'express';
@@ -18,8 +18,8 @@ const as = (r: string) => ({ Authorization: `Bearer ${tokens[r]}` });
 const api = () => request(app);
 const sent: OutgoingMail[] = [];
 const PDF = Buffer.from('%PDF-1.4\n% test\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n');
-let fileAssetModel: typeof import('../src/modules/files/file.model').FileAsset;
-const FileAsset = () => fileAssetModel;
+/** Legacy FileAsset rows: the model is gone, but no BD CRM file may leave one behind in the collection. */
+const FileAsset = () => ({ countDocuments: async (q: object) => (await import('mongoose')).default.connection.db!.collection('fileassets').countDocuments(q) });
 
 let seq = 0;
 const company = (over: Record<string, unknown> = {}) => ({
@@ -52,7 +52,6 @@ beforeAll(async () => {
   disconnectDb = db.disconnectDb;
   await db.connectDb();
   setMailSender = (await import('../src/modules/notifications/mail.service')).setMailSenderForTests;
-  fileAssetModel = (await import('../src/modules/files/file.model')).FileAsset;
   const { User } = await import('../src/modules/users/user.model');
   const { hashPassword } = await import('../src/modules/auth/auth.service');
   app = (await import('../src/app')).createApp();
@@ -476,5 +475,27 @@ describe('client approval proof', () => {
     expect((await api().delete(`/api/v1/sales/approval/documents/${first._id}`).set(as('BD'))).status).toBe(409);
     expect(fs.existsSync(path.join(root, first.file.key))).toBe(true);
     expect((await api().get(`/api/v1/sales/orders/${id}/files/${first.file.fileId}/url`).set(as('BD'))).status).toBe(200);
+  });
+
+  it('deleting a client with no projects erases its orders and their files; with projects it is only hidden', async () => {
+    const { order, client } = (await register()).body.data;
+    const c = await api().post(`/api/v1/sales/orders/${order._id}/comments`).set(as('BD')).field('body', 'Brief').attach('files', PDF, 'brief.pdf');
+    const key = c.body.data.attachments[0].key;
+    expect(fs.existsSync(path.join(root, key))).toBe(true);
+    expect((await api().delete(`/api/v1/clients/${client._id}`).set(as('BD'))).status).toBe(200);
+    expect(fs.existsSync(path.join(root, key))).toBe(false);
+    const { SalesOrder } = await import('../src/modules/sales/sales.model');
+    const { Client } = await import('../src/modules/clients/client.model');
+    expect(await SalesOrder.countDocuments({ client: client._id })).toBe(0);
+    expect(await Client.countDocuments({ _id: client._id })).toBe(0);
+
+    // a client that still has a project is hidden, and its orders stay
+    const kept = (await register()).body.data;
+    const { Project } = await import('../src/modules/projects/project.model');
+    vi.spyOn(Project, 'exists').mockResolvedValueOnce({ _id: kept.client._id } as never);
+    expect((await api().delete(`/api/v1/clients/${kept.client._id}`).set(as('BD'))).status).toBe(200);
+    expect(await Client.countDocuments({ _id: kept.client._id, deletedAt: { $ne: null } })).toBe(1);
+    expect(await SalesOrder.countDocuments({ client: kept.client._id })).toBe(1);
+    vi.restoreAllMocks();
   });
 });

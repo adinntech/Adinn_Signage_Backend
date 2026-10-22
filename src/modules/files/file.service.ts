@@ -84,7 +84,7 @@ const isLive = (f: FileEntry) => !f.deletedAt;
 
 const view = (f: FileEntry, projectId: Types.ObjectId | string) => ({
   id: String(f._id),
-  project: f.project ? String(f.project) : null,
+  project: String(projectId),
   category: f.category,
   originalName: f.originalName,
   mimeType: f.mimeType,
@@ -267,7 +267,7 @@ export async function removeProjectFiles(projectId: string) {
 export async function liveFileName(key: string): Promise<string | null> {
   const p = await Project.findOne({ files: { $elemMatch: { key, deletedAt: null } } }).select('files').lean();
   const f = ((p?.files ?? []) as unknown as FileEntry[]).find((x) => x.key === key && isLive(x));
-  return f ? f.originalName : null;
+  return f ? f.originalName : liveEmbeddedName(key);
 }
 
 /**
@@ -326,19 +326,13 @@ export async function storeEmbeddedFile(i: EmbeddedFileInput): Promise<StoredFil
   };
 }
 
-/** Where a stored file lives. Records not yet migrated only carry `fileId`; their details are read from the old FileAsset row. */
+/** Where a stored file lives. Records not yet migrated only carry `fileId` and have no location: run `npm run migrate:file-assets`. */
 async function locate(f: StoredFile) {
-  if (f.key && f.storage) return { key: f.key, storage: f.storage as StorageType, name: f.name ?? 'file', mimeType: f.mimeType ?? 'application/octet-stream' };
-  const a = await FileAsset.findById(f.fileId).lean();
-  if (!a) return null;
-  return { key: a.key, storage: a.storage as StorageType, name: a.originalName, mimeType: a.mimeType ?? 'application/octet-stream' };
+  if (!f.key || !f.storage) return null;
+  return { key: f.key, storage: f.storage as StorageType, name: f.name ?? 'file', mimeType: f.mimeType ?? 'application/octet-stream' };
 }
 
-function providerFor(type: StorageType) {
-  const p = getStorageFor(type);
-  if (!p) throw new AppError(503, 'STORAGE_UNAVAILABLE', 'This file is stored in DigitalOcean Spaces, which is not configured on this server');
-  return p;
-}
+const providerFor = (type: StorageType) => getStorageFor(type);
 
 /** File bytes, e.g. for an email attachment. */
 export async function readStoredFile(f: StoredFile) {
@@ -365,12 +359,7 @@ export async function eraseStoredFile(f: StoredFile, actor: Actor, owner: Embedd
   try {
     const at = await locate(f);
     if (!at) return;
-    const storage = getStorageFor(at.storage);
-    if (!storage) {
-      console.error(`file erase skipped: ${at.storage} storage is not configured`, { key: at.key, fileId: String(f.fileId) });
-      return;
-    }
-    await storage.remove(at.key);
+    await getStorageFor(at.storage).remove(at.key);
     await recordAudit({ actor, action: 'FILE_ERASED', entity: owner.entity, entityId: owner.id, changes: [{ field: 'file', oldValue: at.key, newValue: null }], reason: at.name });
   } catch (e) {
     console.error('file erase failed', { fileId: String(f.fileId), key: f.key }, e);
@@ -379,7 +368,7 @@ export async function eraseStoredFile(f: StoredFile, actor: Actor, owner: Embedd
 
 /** Removes objects stored by storeEmbeddedFile() when saving the owning record failed. */
 export async function discardStoredFiles(files: StoredFile[]) {
-  await Promise.allSettled(files.map((f) => getStorageFor(f.storage as StorageType)?.remove(f.key!)));
+  await Promise.allSettled(files.filter((f) => f.key && f.storage).map(async (f) => getStorageFor(f.storage as StorageType).remove(f.key!)));
 }
 
 /** Finds the stored-file entry with this key anywhere inside a record (comments, approvals, rate cards ...). */
@@ -411,4 +400,29 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
   const tpl = await EmailTemplate.findOne({ 'pdf.key': key }).lean();
   const inTpl = tpl && findStored(tpl, key);
   return inTpl ? (inTpl.name ?? 'file') : null;
+}
+
+/** Every stored-file entry inside a record (comments, approvals, rate cards, sent emails ...), each once. */
+export function collectStoredFiles(node: unknown, out = new Map<string, StoredFile>()): StoredFile[] {
+  if (Array.isArray(node)) node.forEach((x) => collectStoredFiles(x, out));
+  else if (node && typeof node === 'object' && !(node instanceof Types.ObjectId) && !(node instanceof Date)) {
+    const o = node as Record<string, unknown>;
+    if (typeof o.key === 'string' && o.storage && o.fileId) out.set(`${o.storage}:${o.key}`, o as unknown as StoredFile);
+    else Object.values(o).forEach((v) => collectStoredFiles(v, out));
+  }
+  return [...out.values()];
+}
+
+/** Erases stored objects (local folder or Spaces) for a record that is being destroyed. A file that cannot be erased is reported, not skipped. */
+export async function removeStoredFiles(files: StoredFile[]) {
+  const failed: string[] = [];
+  for (const f of files) {
+    try {
+      await getStorageFor(f.storage as StorageType).remove(f.key!);
+    } catch (e) {
+      failed.push(f.name ?? f.key!);
+      console.error('could not erase file', f.key, e);
+    }
+  }
+  return { failed };
 }
