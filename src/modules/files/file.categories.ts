@@ -15,6 +15,11 @@ export const FILE_CATEGORIES = [
   'RECCE_ACKNOWLEDGEMENT',
   'RECCE_EXPENSE',
   'OPS_SURVEY_PROOF',
+  // BD CRM (not tied to a project: stored per sales order, or once for the email template)
+  'SALES_COMMENT_ATTACHMENT',
+  'SALES_APPROVAL_PROOF',
+  'SALES_RATE_CARD_PDF',
+  'TEMPLATE_COMPANY_PROFILE',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
 
@@ -28,8 +33,16 @@ interface CategoryRule {
   read: readonly Permission[];
   /** Allowed file kinds. */
   kinds: readonly FileKind[];
-  /** Critical evidence: delete only hides the record, the stored object is kept (never overwritten or erased). */
+  /**
+   * Critical evidence: delete only hides the record, the stored object is kept (never overwritten or erased).
+   * Standalone categories document intent only; their owning module enforces when a file may be erased.
+   */
   evidence: boolean;
+  /**
+   * Stored against a sales order or template, never uploaded through the project files endpoint. No FileAsset row:
+   * the file's metadata is kept inside the owning record (see storedFile.schema).
+   */
+  standalone?: boolean;
 }
 
 const DOCS = ['sheet', 'document', 'image'] as const;
@@ -42,6 +55,12 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   RECCE_ACKNOWLEDGEMENT: { folder: (c, p) => `Recce/${c}/${p}/Acknowledgement`, write: 'field:execute', read: ['sites:read'], kinds: ['image', 'document'], evidence: true },
   RECCE_EXPENSE: { folder: (c, p) => `Recce/${c}/${p}/Expenses`, write: 'field:execute', read: ['sites:read', 'finance:manage'], kinds: ['image', 'document'], evidence: true },
   OPS_SURVEY_PROOF: { folder: (c, p) => `Operations/${c}/${p}/Survey_Proof`, write: 'sites:write', read: ['sites:read'], kinds: DOCS, evidence: true },
+  // `p` is the sales order number for these. Deleting a comment erases its files. Approval proof can be erased only
+  // until approval is complete; rate card PDFs are never erased; a template PDF is kept once an email has used it.
+  SALES_COMMENT_ATTACHMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Comments`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
+  SALES_APPROVAL_PROOF: { folder: (c, p) => `BD/Sales/${c}/${p}/Approval_Proof`, write: 'sales:write', read: ['sales:read'], kinds: ['document', 'image'], evidence: true, standalone: true },
+  SALES_RATE_CARD_PDF: { folder: (c, p) => `BD/Sales/${c}/${p}/Rate_Card`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: true, standalone: true },
+  TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
 /** Which part of the CRM a category belongs to; stored with every file so it is clear where it came from. */

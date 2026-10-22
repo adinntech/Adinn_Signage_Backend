@@ -28,12 +28,17 @@ export const PERMISSIONS = [
   'vendors:manage',
   'finance:manage',
   'reports:read',
+  // BD CRM: sales pipeline (orders), Company Profile email template, master rate card
+  'sales:read',
+  'sales:write',
+  'templates:manage',
+  'ratecards:manage',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS,
-  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read'],
+  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',
     'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read',

@@ -7,7 +7,8 @@ export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await s.listClients(clientListQuery.parse(req.query));
   ok(res, items, meta);
 });
-export const get = asyncHandler(async (req, res) => ok(res, await s.getClient(String(req.params.id))));
+export const summary = asyncHandler(async (_req, res) => ok(res, await s.clientSummary()));
+export const get = asyncHandler(async (req, res) => ok(res, await s.getClientDetails(String(req.params.id))));
 export const create = asyncHandler(async (req, res) =>
   ok(res, await s.createClient(clientBody.parse(req.body), actorOf(req)), undefined, 201),
 );

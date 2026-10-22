@@ -60,6 +60,7 @@ export const remove = asyncHandler(async (req, res) => {
 
 /** Local storage only: serves a file for a valid, unexpired signed link (browsers cannot send a bearer token from <img>). */
 export const raw = asyncHandler(async (req, res) => {
+  // Local files stay readable even after new uploads switch to Spaces.
   const storage = getStorageFor('local');
   if (!(storage instanceof LocalStorage)) throw AppError.notFound();
   const { key, exp, sig, dl } = z.object({ key: z.string().min(1).max(500), exp: z.coerce.number(), sig: z.string().min(1), dl: z.string().optional() }).parse(req.query);

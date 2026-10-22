@@ -1,14 +1,19 @@
 import { z } from 'zod';
 import { listQuery } from '../../common/query';
-import { optionalEmail, optionalMobile, rejectDuplicateContacts } from '../../common/validators/contact';
+import { mobileRule, optionalEmail, optionalMobile, rejectDuplicateContacts } from '../../common/validators/contact';
+import { CLIENT_TYPES } from './client.model';
 
 const gstin = z.string().trim().toUpperCase().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/, 'Invalid GSTIN');
+const optStr = (max: number) => z.string().trim().max(max).optional().or(z.literal('').transform(() => undefined));
+const pincode = z.string().trim().regex(/^\d{6}$/, 'Pincode must be 6 digits').optional().or(z.literal('').transform(() => undefined));
 
 const contact = z.object({
   name: z.string().trim().min(1, 'Enter the contact name'),
   designation: z.string().trim().optional(),
   phone: optionalMobile,
+  alternatePhone: optionalMobile,
   email: optionalEmail,
+  alternateEmail: optionalEmail,
   isPrimary: z.boolean().default(false),
 });
 
@@ -28,6 +33,32 @@ export const clientBody = z.object({
   gstin: gstin.optional().or(z.literal('').transform(() => undefined)),
   notes: z.string().trim().max(2000).optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).default('ACTIVE'),
+  // BD CRM company fields; optional here so the original client API keeps working unchanged.
+  email: optionalEmail,
+  industry: optStr(120),
+  district: optStr(80),
+  pincode,
 });
 export const clientPatch = clientBody.partial().omit({ code: true });
-export const clientListQuery = listQuery.extend({ status: z.enum(['ACTIVE', 'INACTIVE']).optional() });
+export const clientListQuery = listQuery.extend({
+  status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+  clientType: z.enum(CLIENT_TYPES).optional(),
+});
+
+/** BD "New Client" registration: company email and at least one contact with a mobile number are mandatory. */
+export const clientRegistration = z.object({
+  name: z.string().trim().min(2, 'Enter the company name').max(120),
+  email: z.string().trim().toLowerCase().email('Enter a valid company email'),
+  industry: optStr(120),
+  address: optStr(500),
+  city: optStr(80),
+  district: optStr(80),
+  state: optStr(80),
+  pincode,
+  gstin: gstin.optional().or(z.literal('').transform(() => undefined)),
+  contacts: z
+    .array(contact.extend({ phone: mobileRule }))
+    .min(1, 'Add at least one contact person')
+    .max(20)
+    .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),
+});

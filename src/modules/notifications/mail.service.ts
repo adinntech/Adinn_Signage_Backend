@@ -6,6 +6,8 @@ export interface OutgoingMail {
   subject: string;
   text: string;
   html: string;
+  cc?: string[];
+  attachments?: { filename: string; content: Buffer; contentType?: string }[];
 }
 export type MailSender = (mail: OutgoingMail) => Promise<void>;
 
@@ -20,7 +22,15 @@ function smtpSender(): MailSender {
     ...(env.SMTP_USER ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS ?? '' } } : {}),
   });
   return async (m) => {
-    await transport.sendMail({ from: env.MAIL_FROM!, to: m.to, subject: m.subject, text: m.text, html: m.html });
+    await transport.sendMail({
+      from: env.MAIL_FROM!,
+      to: m.to,
+      subject: m.subject,
+      text: m.text,
+      html: m.html,
+      ...(m.cc?.length ? { cc: m.cc } : {}),
+      ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+    });
   };
 }
 

@@ -12,6 +12,8 @@
         "seed": "tsx src/scripts/seed.ts",
         "create-user": "tsx src/scripts/create-user.ts",
         "reset-mpin": "tsx src/scripts/reset-mpin.ts",
+        "migrate:sales-arrays": "tsx src/scripts/migrate-sales-arrays.ts",
+        "migrate:file-assets": "tsx src/scripts/migrate-file-assets.ts",
         "format": "prettier --write src tests",
         "e2e:server": "tsx scripts/e2e-server.ts"
     },
@@ -36,6 +38,7 @@
         "multer": "^2.4.0",
         "nodemailer": "^10.1.7",
         "web-push": "^3.6.7",
+        "pdfkit": "^0.17.2",
         "zod": "^4.6.5"
     },
     "devDependencies": {
@@ -47,6 +50,7 @@
         "@types/multer": "^2.3.0",
         "@types/node": "^26.6.4",
         "@types/nodemailer": "^8.0.2",
+        "@types/pdfkit": "^0.17.2",
         "@types/supertest": "^7.2.1",
         "@types/web-push": "^3.6.4",
         "mongodb-memory-server": "^11.3.0",

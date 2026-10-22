@@ -92,6 +92,34 @@ describe('SpacesStorage', () => {
   });
 });
 
+describe('getStorageFor (read and delete where the file was uploaded)', () => {
+  it('returns the upload storage for its own type and a local provider for local files', async () => {
+    const { env } = await import('../src/config/env');
+    expect(storage.getStorageFor(env.storage)).toBe(storage.getStorage());
+    expect(storage.getStorageFor('local')).toBeInstanceOf(storage.LocalStorage);
+    expect(storage.getStorageFor('local')).toBe(storage.getStorageFor('local'));
+  });
+
+  it('returns null for Spaces files when Spaces is not configured on this server', async () => {
+    const { env } = await import('../src/config/env');
+    const configured = !!(env.DO_SPACES_BUCKET && env.DO_SPACES_ENDPOINT && env.DO_SPACES_REGION && env.DO_SPACES_KEY && env.DO_SPACES_SECRET);
+    const s = storage.getStorageFor('space');
+    if (configured || env.storage === 'space') expect(s).toBeInstanceOf(storage.SpacesStorage);
+    else expect(s).toBeNull();
+  });
+
+  it('uses the injected test provider for every type', () => {
+    const fake = new storage.LocalStorage(root, 'secret-secret-secret-secret-1234', 'http://localhost:4000');
+    storage.setStorageForTests(fake);
+    try {
+      expect(storage.getStorageFor('space')).toBe(fake);
+      expect(storage.getStorage()).toBe(fake);
+    } finally {
+      storage.setStorageForTests(undefined);
+    }
+  });
+});
+
 describe('keyFromSpaceUrl (safe URL-based delete)', () => {
   const opts = { baseUrls: ['https://adinn-space.sgp1.digitaloceanspaces.com'], prefix: 'signage' };
   it('extracts the app key and decodes escapes', () => {

@@ -13,6 +13,9 @@ import { userRouter } from './modules/users/user.routes';
 import { siteRouter } from './modules/sites/site.routes';
 import { notificationRouter } from './modules/notifications/notification.routes';
 import { fileRouter } from './modules/files/file.routes';
+import { salesRouter } from './modules/sales/sales.routes';
+import { templateRouter } from './modules/templates/template.routes';
+import { rateItemRouter } from './modules/ratecards/rateItem.routes';
 
 export function createApp() {
   const app = express();
@@ -42,6 +45,9 @@ export function createApp() {
   app.use('/api/v1/communications', communicationRouter);
   app.use('/api/v1/users', userRouter);
   app.use('/api/v1/notifications', notificationRouter);
+  app.use('/api/v1/sales', salesRouter);
+  app.use('/api/v1/email-templates', templateRouter);
+  app.use('/api/v1/rate-items', rateItemRouter);
   app.use('/api/v1', siteRouter);
   app.use('/api/v1', fileRouter);
 
