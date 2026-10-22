@@ -44,6 +44,16 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   OPS_SURVEY_PROOF: { folder: (c, p) => `Operations/${c}/${p}/Survey_Proof`, write: 'sites:write', read: ['sites:read'], kinds: DOCS, evidence: true },
 };
 
+/** Which part of the CRM a category belongs to; stored with every file so it is clear where it came from. */
+export const SECTION_LABEL: Record<FileCategory, string> = {
+  BD_CLIENT_DETAILS: 'BD - Client Details',
+  RECCE_IMAGE_ORIGINAL: 'Recce - Original Images',
+  RECCE_IMAGE_EDITED: 'Recce - Edited Images',
+  RECCE_ACKNOWLEDGEMENT: 'Recce - Acknowledgement',
+  RECCE_EXPENSE: 'Recce - Expenses',
+  OPS_SURVEY_PROOF: 'Operations - Survey Proof',
+};
+
 const EXT_KIND: Record<string, FileKind> = {
   '.jpg': 'image',
   '.jpeg': 'image',

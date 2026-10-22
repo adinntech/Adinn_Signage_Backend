@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { nextSeqBlock } from '../../common/counter.model';
 import { pageMeta, type Actor } from '../../common/query';
+import { assertNotCancelled } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
 import { notifyProjectParty } from '../notifications/notification.service';
 import { Requirement } from '../projects/project.model';
@@ -33,6 +34,7 @@ export async function defaultScenario(projectId: string): Promise<Scenario> {
 // ---- 1. upload & parse ----
 export async function uploadSheet(projectId: string, file: { buffer: Buffer; originalname: string; size: number }, actor: Actor) {
   await requireProject(projectId);
+  await assertNotCancelled(projectId);
   const parsed = await parseWorkbook(file.buffer, file.originalname);
   const scenario = await defaultScenario(projectId);
   const mapping = autoMap(parsed.headers);
@@ -181,6 +183,7 @@ export async function patchRow(projectId: string, batchId: string, rowId: string
 // ---- 3. commit ----
 export async function commitImport(projectId: string, batchId: string, body: z.infer<typeof commitBody>, actor: Actor) {
   const project = await requireProject(projectId);
+  await assertNotCancelled(projectId);
   const locked = await ImportBatch.findOneAndUpdate({ _id: batchId, project: projectId, status: 'PREVIEWED' }, { status: 'COMMITTING' }, { returnDocument: 'after' });
   if (!locked) {
     const b = await getBatch(projectId, batchId);

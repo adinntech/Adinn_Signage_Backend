@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
+import { assertNotCancelled } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
 import { notifyProjectParty } from '../notifications/notification.service';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
@@ -24,6 +25,7 @@ export async function setApproval(siteId: string, body: z.infer<typeof approvalB
   assertLevel(actor, body.level);
   const site = await Site.findOne({ _id: siteId, deletedAt: null });
   if (!site) throw AppError.notFound('Site not found');
+  await assertNotCancelled(site.project);
   if (site.scenario === 'CLIENT_PROVIDED' && body.value === 'APPROVED' && (!site.width || !site.height))
     throw new AppError(422, 'VALIDATION_ERROR', 'A shop without a measurement cannot be approved', [{ path: 'width', message: 'Add the board width and height first' }]);
   const field = FIELD[body.level];
@@ -53,6 +55,7 @@ export async function setApproval(siteId: string, body: z.infer<typeof approvalB
 export async function approveAllPending(projectId: string, level: 'ops' | 'bd', actor: Actor) {
   assertLevel(actor, level);
   await requireProject(projectId);
+  await assertNotCancelled(projectId);
   const field = FIELD[level];
   const res = await Site.updateMany(
     { project: projectId, deletedAt: null, [field]: 'PENDING', width: { $gt: 0 }, height: { $gt: 0 } },

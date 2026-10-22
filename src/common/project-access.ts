@@ -48,3 +48,9 @@ export const scopeSite = async (req: Request, _res: Response, next: NextFunction
     next(e);
   }
 };
+
+/** A cancelled project is read-only: no shop edits, imports, approvals, survey areas or uploads. */
+export async function assertNotCancelled(projectId: string | Types.ObjectId) {
+  const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('status').lean();
+  if (p?.status === 'CANCELLED') throw AppError.conflict('This project was cancelled, so it can no longer be changed');
+}

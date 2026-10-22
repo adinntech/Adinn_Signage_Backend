@@ -457,3 +457,53 @@ describe('Excel/CSV import never imports a row that is still in error', () => {
     expect(sites.body.data.find((s: { shopName: string }) => s.shopName === 'Fixed Later').mobile).toBe('9123456780');
   });
 });
+
+describe('a cancelled project is read-only', () => {
+  let pid = '';
+  let siteId = '';
+  const xlsx = () => Buffer.concat([Buffer.from('PK'), Buffer.alloc(60, 55)]);
+
+  beforeAll(async () => {
+    const p = await create({ requirementType: 'ASO', expectedShops: undefined });
+    pid = p.body.data._id;
+    await assign(pid);
+    await api().post(`/api/v1/projects/${pid}/survey-areas`).set(as('OPERATIONS')).send({ area: 'Before cancel', shopsFound: 3 });
+    siteId = (await addSite(pid, { shopName: 'Before Cancel Shop', dealerName: 'Raj', district: 'Salem' })).body.data.site._id;
+    const c = await api().patch(`/api/v1/projects/${pid}/status`).set(as('BD')).send({ status: 'CANCELLED', reason: 'Client withdrew the campaign' });
+    expect(c.status).toBe(200);
+  });
+
+  it('keeps the reason and shows up as its own status, with the assignee still able to read it', async () => {
+    const g = await api().get(`/api/v1/projects/${pid}`).set(as('OPERATIONS'));
+    expect(g.status).toBe(200);
+    expect(g.body.data).toMatchObject({ status: 'CANCELLED', statusReason: 'Client withdrew the campaign' });
+    const list = await api().get('/api/v1/projects?status=CANCELLED&assigned=true&limit=100').set(as('OPERATIONS'));
+    expect(list.body.data.map((p: { _id: string }) => p._id)).toContain(pid);
+    const s = await api().get('/api/v1/projects/summary').set(as('OPERATIONS'));
+    expect(s.body.data.byStatus.CANCELLED).toBeGreaterThan(0);
+  });
+
+  it('refuses every change: stage, shops, imports, approvals, survey areas and uploads', async () => {
+    const r = [
+      await api().post(`/api/v1/projects/${pid}/stage`).set(as('OPERATIONS')).send({ stage: 'PLANNING' }),
+      await addSite(pid, { shopName: 'After Cancel' }),
+      await api().patch(`/api/v1/sites/${siteId}`).set(as('OPERATIONS')).send({ remarks: 'late edit' }),
+      await api().delete(`/api/v1/sites/${siteId}`).set(as('OPERATIONS')),
+      await api().post(`/api/v1/sites/${siteId}/duplicate`).set(as('OPERATIONS')),
+      await api().post(`/api/v1/sites/${siteId}/approval`).set(as('OPERATIONS')).send({ level: 'ops', value: 'APPROVED' }),
+      await api().post(`/api/v1/projects/${pid}/sites/approve-all`).set(as('OPERATIONS')).send({ level: 'ops' }),
+      await api().post(`/api/v1/projects/${pid}/sites/imports`).set(as('OPERATIONS')).attach('file', Buffer.from('Shop Name\nX'), { filename: 'x.csv' }),
+      await api().post(`/api/v1/projects/${pid}/survey-areas`).set(as('OPERATIONS')).send({ area: 'After cancel', shopsFound: 1 }),
+      await api().post(`/api/v1/projects/${pid}/files`).set(as('BD')).field('category', 'BD_CLIENT_DETAILS').attach('files', xlsx(), { filename: 'late.xlsx' }),
+    ];
+    r.forEach((res, i) => {
+      expect(res.status, `change ${i}`).toBe(409);
+      expect(res.body.error.message, `change ${i}`).toMatch(/cancel/i);
+    });
+  });
+
+  it('still lets people read what was recorded before the cancellation', async () => {
+    expect((await api().get(`/api/v1/projects/${pid}/sites`).set(as('OPERATIONS'))).body.data).toHaveLength(1);
+    expect((await api().get(`/api/v1/projects/${pid}/survey-areas`).set(as('OPERATIONS'))).body.data).toHaveLength(1);
+  });
+});

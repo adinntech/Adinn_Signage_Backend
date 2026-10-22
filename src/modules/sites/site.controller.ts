@@ -11,6 +11,7 @@ import { SCENARIOS } from './site.fields';
 const p = (req: Request, k = 'projectId') => String(req.params[k]);
 export const upload = multer({
   storage: multer.memoryStorage(),
+  defParamCharset: 'utf8',
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) =>
     /\.(xlsx|csv)$/i.test(file.originalname) ? cb(null, true) : cb(AppError.badRequest('Only .xlsx or .csv files are allowed')),

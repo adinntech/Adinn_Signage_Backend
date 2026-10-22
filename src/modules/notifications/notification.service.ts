@@ -7,6 +7,7 @@ import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
 import { publish } from './notification.hub';
 import { mailAvailable, renderMail, sendMail } from './mail.service';
+import { pushAvailable, sendPush, subscriptionCount } from './push.service';
 import { Notification, type NotificationKind } from './notification.model';
 
 /** Kinds that need someone to act, so they are also emailed. The rest stay in the app to avoid inbox noise. */
@@ -25,8 +26,8 @@ export interface NotifySpec {
   dedupe: (recipientId: string) => string;
 }
 
-const linkFor = (role: string, projectId: string) =>
-  OPS_ROLES.has(role) ? `${env.webBaseUrl}/operations/projects/${projectId}` : role === 'BD' ? `${env.webBaseUrl}/bd/dashboard?view=${projectId}` : `${env.webBaseUrl}/dashboard`;
+const linkFor = (role: string, projectId: string, kind?: string) =>
+  OPS_ROLES.has(role) ? `${env.webBaseUrl}/operations/projects/${projectId}${kind === 'DOCUMENTS_ADDED' ? '?tab=documents' : ''}` : role === 'BD' ? `${env.webBaseUrl}/bd/dashboard?view=${projectId}` : `${env.webBaseUrl}/dashboard`;
 
 /**
  * Records a notification for each recipient (never the person who caused the event) and starts email delivery.
@@ -40,9 +41,12 @@ export async function notify(spec: NotifySpec): Promise<void> {
     for (const u of users) {
       const wantsEmail = EMAIL_KINDS.has(spec.kind);
       const skipReason = !wantsEmail ? undefined : !u.email ? 'No email address on the account' : !mailAvailable() ? 'Email is not configured on the server' : undefined;
-      const delivery = !wantsEmail
-        ? []
-        : [{ channel: 'EMAIL' as const, status: skipReason ? ('SKIPPED' as const) : ('QUEUED' as const), to: u.email, attempts: 0, lastError: skipReason, updatedAt: new Date() }];
+      const now = new Date();
+      const delivery: { channel: 'EMAIL' | 'PUSH'; status: 'QUEUED' | 'SKIPPED'; to?: string | undefined; attempts: number; lastError?: string | undefined; updatedAt: Date }[] = [];
+      if (wantsEmail) delivery.push({ channel: 'EMAIL', status: skipReason ? 'SKIPPED' : 'QUEUED', to: u.email, attempts: 0, lastError: skipReason, updatedAt: now });
+      // Browser push goes out for every event, to every browser this person allowed notifications in.
+      const pushSkip = !pushAvailable() ? 'Browser push is not configured on the server' : (await subscriptionCount(String(u._id))) === 0 ? 'No browser has allowed notifications yet' : undefined;
+      if (spec.kind !== 'ADMIN_ACTIVITY') delivery.push({ channel: 'PUSH', status: pushSkip ? 'SKIPPED' : 'QUEUED', attempts: 0, lastError: pushSkip, updatedAt: now });
       try {
         const doc = await Notification.create({
           recipient: u._id,
@@ -57,7 +61,8 @@ export async function notify(spec: NotifySpec): Promise<void> {
           deliveries: delivery,
         });
         publish(String(u._id), 'notification', toItem(doc.toObject() as never));
-        if (delivery[0]?.status === 'QUEUED') void deliverEmail(String(doc._id));
+        if (delivery.some((d) => d.channel === 'EMAIL' && d.status === 'QUEUED')) void deliverEmail(String(doc._id));
+        if (delivery.some((d) => d.channel === 'PUSH' && d.status === 'QUEUED')) void deliverPush(String(doc._id), u.role);
       } catch (e) {
         if ((e as { code?: number }).code !== 11000) throw e; // 11000: already notified for this event
       }
@@ -89,6 +94,30 @@ export async function notifyProjectParty(
   }
 }
 
+/** Pushes one notification to the person's browsers and records whether any accepted it. */
+export async function deliverPush(notificationId: string, role: string): Promise<void> {
+  const n = await Notification.findById(notificationId);
+  const d = n?.deliveries.find((x) => x.channel === 'PUSH');
+  if (!n || !d || d.status === 'SENT' || d.status === 'SKIPPED') return;
+  d.attempts = (d.attempts ?? 0) + 1;
+  d.updatedAt = new Date();
+  try {
+    const r = await sendPush(String(n.recipient), { title: n.title, body: n.body, url: linkFor(role, String(n.project), n.kind), tag: String(n._id) });
+    if (r.sent > 0) {
+      d.status = 'SENT';
+      d.sentAt = new Date();
+      d.lastError = undefined as never;
+    } else {
+      d.status = 'FAILED';
+      d.lastError = r.error ?? 'No browser accepted the notification';
+    }
+  } catch (e) {
+    d.status = 'FAILED';
+    d.lastError = e instanceof Error ? e.message.slice(0, 300) : 'Push failed';
+  }
+  await n.save();
+}
+
 /** Sends (or retries) the email for one notification and records the outcome. */
 export async function deliverEmail(notificationId: string): Promise<void> {
   const n = await Notification.findById(notificationId);
@@ -98,7 +127,7 @@ export async function deliverEmail(notificationId: string): Promise<void> {
   d.attempts = (d.attempts ?? 0) + 1;
   d.updatedAt = new Date();
   try {
-    const mail = renderMail(n.title, n.body, linkFor(user?.role ?? '', String(n.project)));
+    const mail = renderMail(n.title, n.body, linkFor(user?.role ?? '', String(n.project), n.kind));
     await sendMail({ to: d.to, ...mail });
     d.status = 'SENT';
     d.sentAt = new Date();
@@ -134,6 +163,25 @@ export function startNotificationRetry(everyMs = 5 * 60_000) {
   return t;
 }
 
+/**
+ * Deletes notifications that were read more than NOTIFICATION_READ_RETENTION_DAYS ago, which keeps the collection small
+ * under heavy use. Unread notifications are never removed. Returns how many were deleted (0 when retention is off).
+ */
+export async function purgeReadNotifications(days = env.NOTIFICATION_READ_RETENTION_DAYS, now = new Date()): Promise<number> {
+  if (!days || days <= 0) return 0;
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60_000);
+  const r = await Notification.deleteMany({ readAt: { $ne: null, $lt: cutoff } });
+  return r.deletedCount ?? 0;
+}
+
+export function startNotificationCleanup(everyHours = env.NOTIFICATION_CLEANUP_INTERVAL_HOURS) {
+  const run = () => void purgeReadNotifications().then((n) => n && console.log(`Removed ${n} read notification(s) older than ${env.NOTIFICATION_READ_RETENTION_DAYS} day(s)`)).catch((e) => console.error('notification clean-up failed', e));
+  run();
+  const t = setInterval(run, everyHours * 60 * 60_000);
+  t.unref();
+  return t;
+}
+
 /* ------------------------------- reading ------------------------------- */
 
 const WEB_KIND: Record<NotificationKind, string> = {
@@ -144,6 +192,8 @@ const WEB_KIND: Record<NotificationKind, string> = {
   STAGE_CHANGED: 'stage',
   APPROVAL_CORRECTION: 'approval',
   PROJECT_CANCELLED: 'cancelled',
+  ACTIVITY: 'activity',
+  ADMIN_ACTIVITY: 'activity',
 };
 
 type NotificationRow = {

@@ -4,6 +4,7 @@ import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { subscribe } from './notification.hub';
 import * as svc from './notification.service';
+import { pushAvailable, removeSubscription, saveSubscription, subscriptionBody, vapidPublicKey } from './push.service';
 
 export const notificationRouter = Router();
 notificationRouter.use(authenticate);
@@ -23,6 +24,17 @@ notificationRouter.get('/stream', (req, res) => {
   const exp = (req.auth as { exp?: number }).exp;
   subscribe(req.auth!.sub, res, exp ? exp * 1000 : undefined);
 });
+
+// Browser push (Chrome notifications that arrive even when the CRM tab is closed).
+notificationRouter.get('/push/key', (_req, res) => ok(res, { enabled: pushAvailable(), publicKey: vapidPublicKey() }));
+notificationRouter.post(
+  '/push/subscribe',
+  asyncHandler(async (req, res) => ok(res, await saveSubscription(actorOf(req).id, subscriptionBody.parse(req.body), req.get('user-agent')))),
+);
+notificationRouter.post(
+  '/push/unsubscribe',
+  asyncHandler(async (req, res) => ok(res, await removeSubscription(actorOf(req).id, subscriptionBody.pick({ endpoint: true }).parse(req.body).endpoint))),
+);
 
 notificationRouter.get('/', asyncHandler(async (req, res) => ok(res, await svc.listNotifications(actorOf(req)))));
 notificationRouter.post('/read', asyncHandler(async (req, res) => ok(res, await svc.markAllRead(actorOf(req)))));

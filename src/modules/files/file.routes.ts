@@ -7,5 +7,8 @@ export const fileRouter = Router();
 fileRouter.get('/files/raw', c.raw); // signed link, no bearer token
 fileRouter.post('/projects/:projectId/files', authenticate, c.receive, c.upload);
 fileRouter.get('/projects/:projectId/files', authenticate, c.list);
+fileRouter.post('/projects/:projectId/files/check', authenticate, c.check);
 fileRouter.get('/files/:id/url', authenticate, c.url);
+fileRouter.get('/files/limits', authenticate, c.limits);
+fileRouter.get('/files/:id/content', authenticate, c.content);
 fileRouter.delete('/files/:id', authenticate, c.remove);

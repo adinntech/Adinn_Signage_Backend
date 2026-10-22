@@ -5,6 +5,8 @@ import { nextSeq } from '../../common/counter.model';
 import { projectScope } from '../../common/project-access';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, listAudit, recordAudit } from '../audit/audit.service';
+import { removeProjectFiles } from '../files/file.service';
+import { purgeProjectData } from './project.cascade';
 import { notify, type NotifySpec } from '../notifications/notification.service';
 import { Client } from '../clients/client.model';
 import { CommunicationMessage } from '../communications/communication.model';
@@ -247,16 +249,19 @@ export async function changeStatus(id: string, status: string, reason: string | 
   return getProject(id);
 }
 
-/** BD can delete only what Operations has never seen. Everything else is cancelled so history survives. */
+/**
+ * BD can delete only what Operations has never seen; everything else is cancelled so history survives. Super Admin can
+ * delete any project (to clear test data). Deleting removes the project AND everything linked to it: stored files, shops,
+ * survey areas, notifications, chat and audit history.
+ */
 export async function deleteProject(id: string, actor: Actor) {
   const p = await Project.findOne({ _id: id, deletedAt: null });
   if (!p) throw AppError.notFound('Project not found');
-  if (p.assignedTo || !(UNASSIGNED.includes(p.status) || p.status === 'CANCELLED')) throw AppError.conflict(NOT_DELETABLE_HINT);
-  p.deletedAt = new Date();
-  p.updatedBy = new Types.ObjectId(actor.id);
-  await p.save();
-  await recordAudit({ actor, action: 'DELETE', entity: 'Project', entityId: id, project: id });
-  return { id };
+  if (actor.role !== 'SUPER_ADMIN' && (p.assignedTo || !(UNASSIGNED.includes(p.status) || p.status === 'CANCELLED'))) throw AppError.conflict(NOT_DELETABLE_HINT);
+  // Files first: if one cannot be erased from storage, nothing is deleted and the person can simply try again.
+  const { failed } = await removeProjectFiles(id);
+  if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the project was not deleted: ${failed.join(', ')}. Try again.`);
+  return { id, removed: await purgeProjectData(id) };
 }
 
 /* ------------------------- BD -> Operations assignment ------------------------- */

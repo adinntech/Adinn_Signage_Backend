@@ -36,13 +36,28 @@ const schema = z
     LOCAL_UPLOAD_PATH: z.string().default('public/uploads'),
     /** Folder prefix inside the shared bucket so this app never touches other apps' files. */
     STORAGE_PREFIX: z.string().default('signage'),
-    MAX_FILE_SIZE: z.coerce.number().int().positive().default(52428800),
-    MAX_IMAGE_SIZE: z.coerce.number().int().positive().default(3145728),
-    MAX_VIDEO_SIZE: z.coerce.number().int().positive().default(10485760),
+    /** Upload size limits in bytes. Set in the .env files (no built-in numbers); the web app reads them from GET /files/limits. */
+    MAX_FILE_SIZE: z.coerce.number().int().positive(),
+    MAX_IMAGE_SIZE: z.coerce.number().int().positive(),
+    MAX_VIDEO_SIZE: z.coerce.number().int().positive(),
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
     /** Public URL of the web CRM, used for links inside notification emails. */
     WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
     /** Email notifications. Leave SMTP_HOST empty to keep notifications in-app only (deliveries are recorded as SKIPPED). */
+    /** Browser push (Chrome/Edge/Firefox) for people who have allowed notifications. Generate with `npx web-push generate-vapid-keys`. */
+    VAPID_PUBLIC_KEY: optional,
+    VAPID_PRIVATE_KEY: optional,
+    VAPID_SUBJECT: z.string().default('mailto:admin@example.com'),
+    /** Read notifications are deleted after this many days (0 keeps them forever). Unread ones are never deleted. */
+    NOTIFICATION_READ_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
+    /** How often the clean-up runs. */
+    /** Every this many hours, stored files that no project records (e.g. after data was deleted straight from MongoDB) are erased. 0 = off. */
+    STORAGE_ORPHAN_CLEANUP_HOURS: z.coerce.number().min(0).default(0),
+    /** Files newer than this are never treated as orphans (an upload may still be saving its record). */
+    /** Watch the projects collection and clear leftovers within seconds when a project is deleted directly in MongoDB (needs a replica set, e.g. Atlas). */
+    STORAGE_ORPHAN_WATCH: z.enum(['true', 'false']).default('false'),
+    STORAGE_ORPHAN_GRACE_MINUTES: z.coerce.number().min(1).default(60),
+    NOTIFICATION_CLEANUP_INTERVAL_HOURS: z.coerce.number().min(0.01).default(6),
     SMTP_HOST: optional,
     SMTP_PORT: z.coerce.number().int().default(587),
     SMTP_SECURE: z.enum(['true', 'false']).default('false'),
@@ -56,6 +71,8 @@ const schema = z
     DO_SPACES_SECRET: optional,
     /** Reserved for public assets; all current files are private and served through signed URLs. */
     DO_SPACES_CDN_BASE: optional,
+    /** Who can open an uploaded file straight from its URL: public-read (anyone with the link) or private (signed links only). */
+    DO_SPACES_ACL: z.enum(['public-read', 'private']).default('public-read'),
   })
   .superRefine((v, ctx) => {
     if (v.STORAGE_TYPE !== 'local') {
@@ -90,4 +107,5 @@ export const env = {
   webBaseUrl: parsed.data.WEB_BASE_URL.replace(/\/+$/, ''),
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
+  pushEnabled: !!(parsed.data.VAPID_PUBLIC_KEY && parsed.data.VAPID_PRIVATE_KEY),
 };

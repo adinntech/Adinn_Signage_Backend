@@ -73,7 +73,15 @@ describe('LocalStorage', () => {
 });
 
 describe('SpacesStorage', () => {
-  it('uploads privately under the signage/ prefix and deletes the same key', async () => {
+  it('uploads as public-read when configured, so the stored URL opens directly', async () => {
+    const sent: { input: Record<string, unknown> }[] = [];
+    const client = { send: async (c: { input: Record<string, unknown> }) => void sent.push({ input: c.input }) };
+    const s = new storage.SpacesStorage({ bucket: 'adinn-space', prefix: 'signage', client: client as never, acl: 'public-read' });
+    await s.put('BD/a.png', Buffer.from('x'), 'image/png');
+    expect(sent[0]!.input.ACL).toBe('public-read');
+  });
+
+  it('uploads with the configured access (private by default) under the signage/ prefix and deletes the same key', async () => {
     const sent: { name: string; input: Record<string, unknown> }[] = [];
     const client = { send: async (c: { constructor: { name: string }; input: Record<string, unknown> }) => void sent.push({ name: c.constructor.name, input: c.input }) };
     const s = new storage.SpacesStorage({ bucket: 'adinn-space', prefix: 'signage', client: client as never });

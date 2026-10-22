@@ -8,16 +8,20 @@ export const NOTIFICATION_KINDS = [
   'STAGE_CHANGED',
   'APPROVAL_CORRECTION',
   'PROJECT_CANCELLED',
+  /** Any other create / edit / delete on a project, sent to the people working on it. */
+  'ACTIVITY',
+  /** The same, for Super Admin: everything everyone does, in the app only. */
+  'ADMIN_ACTIVITY',
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 export const DELIVERY_STATUSES = ['QUEUED', 'SENT', 'FAILED', 'SKIPPED'] as const;
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 
-/** One attempt trail per channel. In-app delivery is the notification record itself; EMAIL is tracked here. */
+/** One attempt trail per channel. In-app delivery is the notification record itself; EMAIL and browser PUSH are tracked here. */
 const deliverySchema = new Schema(
   {
-    channel: { type: String, enum: ['EMAIL'], required: true },
+    channel: { type: String, enum: ['EMAIL', 'PUSH'], required: true },
     status: { type: String, enum: DELIVERY_STATUSES, required: true },
     to: String,
     attempts: { type: Number, default: 0 },

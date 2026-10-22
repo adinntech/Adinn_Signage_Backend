@@ -12,6 +12,30 @@ export const PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
 export const REQUIREMENT_TYPES = ['ASO', 'SHOP_DETAILS', 'SHOP_MEASUREMENT'] as const;
 export type RequirementType = (typeof REQUIREMENT_TYPES)[number];
 
+const projectFileSchema = new Schema(
+  {
+    section: String,
+    category: { type: String, required: true },
+    /** Storage key, e.g. BD/Client_Details/AMUL/<project code>/<file>. */
+    key: { type: String, required: true },
+    storage: { type: String, enum: ['local', 'space'], required: true },
+    /** Spaces only: full object path in the bucket (with the app folder) and the full URL. Not set for local files. */
+    path: String,
+    url: String,
+    originalName: { type: String, required: true },
+    mimeType: String,
+    kind: { type: String, enum: ['image', 'video', 'document', 'sheet'], required: true },
+    size: Number,
+    sha256: String,
+    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    uploadedAt: { type: Date, default: Date.now },
+    deletedAt: Date,
+    deletedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    objectRetained: Boolean,
+  },
+  { _id: true },
+);
+
 const contactSchema = new Schema(
   { name: { type: String, required: true, trim: true }, email: { type: String, lowercase: true, trim: true }, phone: String },
   { _id: true },
@@ -27,6 +51,12 @@ const projectSchema = new Schema(
     /** Expected number of shops (null for ASO surveys where the count is unknown). */
     expectedShops: Number,
     contacts: [contactSchema],
+    /**
+     * Every file of this project, grouped by CRM section (the single place files are recorded; there is no separate
+     * collection). Each entry's _id is the file id. Not loaded unless asked for, so project lists stay light.
+     * Critical evidence that was "deleted" stays here with deletedAt set, because its stored object is kept.
+     */
+    files: { type: [projectFileSchema], select: false, default: undefined },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     assignedAt: Date,
     name: { type: String, required: true, trim: true },

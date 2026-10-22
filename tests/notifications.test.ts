@@ -56,7 +56,7 @@ beforeAll(async () => {
   const { User } = await import('../src/modules/users/user.model');
   const { hashPassword } = await import('../src/modules/auth/auth.service');
   app = (await import('../src/app')).createApp();
-  const users: [string, string][] = [['BD', 'BD'], ['OPS_A', 'OPERATIONS'], ['OPS_B', 'OPERATIONS'], ['COORD', 'RECCE_COORDINATOR'], ['FINANCE', 'FINANCE']];
+  const users: [string, string][] = [['BD', 'BD'], ['OPS_A', 'OPERATIONS'], ['OPS_B', 'OPERATIONS'], ['COORD', 'RECCE_COORDINATOR'], ['FINANCE', 'FINANCE'], ['ADMIN', 'SUPER_ADMIN']];
   for (const [key, role] of users) {
     const u = await User.create({ name: key, email: `${key.toLowerCase()}@t.com`, role: role as 'BD', passwordHash: await hashPassword('Passw0rd!x') });
     uid[key] = String(u._id);
@@ -119,7 +119,7 @@ describe('assignment notifications are stored per person in the database', () =>
     await api().post('/api/v1/notifications/read').set(as('OPS_A'));
     expect((await inbox('OPS_A')).unread).toBe(0);
     const log1 = await log(p._id);
-    expect(log1[0]!.readAt).toBeTruthy();
+    expect(log1.find((l) => l.kind === 'assigned')!.readAt).toBeTruthy();
   });
 
   it('requires login', async () => {
@@ -190,24 +190,25 @@ describe('email delivery is tracked, retried and never faked', () => {
 });
 
 describe('other events notify the right side', () => {
-  it('tells the assignee about new client documents once per hour, in-app only', async () => {
+  it('tells the assignee about every upload of client documents, in-app only', async () => {
     const p = await make();
     await assign(p._id, 'OPS_A');
     const up = (n: number) => api().post(`/api/v1/projects/${p._id}/files`).set(as('BD')).field('category', 'BD_CLIENT_DETAILS').attach('files', Buffer.concat([Buffer.from('PK'), Buffer.alloc(60, n)]), { filename: `f${n}.xlsx` });
     expect((await up(1)).status).toBe(201);
     expect((await up(2)).status).toBe(201);
     const docs = (await forProject('OPS_A', p._id)).filter((n) => n.kind === 'documents');
-    expect(docs).toHaveLength(1);
+    expect(docs).toHaveLength(2); // one per upload, so a later upload is never silenced
     expect(docs[0]!.title).toBe('Client documents added');
     const row = (await log(p._id)).find((l) => l.kind === 'documents')!;
-    expect(row.deliveries).toHaveLength(0); // not an action item, so no email
+    expect(row.deliveries.some((d) => (d as { channel?: string }).channel === 'EMAIL')).toBe(false); // not an action item, so no email
   });
 
-  it('does not notify anyone about documents on a draft nobody owns yet', async () => {
+  it('does not notify the project team about documents on a draft nobody owns yet (only Admin sees it)', async () => {
     const p = await make();
     const r = await api().post(`/api/v1/projects/${p._id}/files`).set(as('BD')).field('category', 'BD_CLIENT_DETAILS').attach('files', Buffer.concat([Buffer.from('PK'), Buffer.alloc(60, 77)]), { filename: 'draft.xlsx' });
     expect(r.status).toBe(201);
-    expect(await log(p._id)).toHaveLength(0);
+    await waitFor(async () => (await log(p._id)).length > 0);
+    expect((await log(p._id)).filter((l) => l.recipient?.name !== 'ADMIN')).toHaveLength(0);
   });
 
   it('tells the BD owner when Operations changes the stage, and not Operations itself', async () => {
@@ -424,5 +425,163 @@ describe('live push to people who have the CRM open', () => {
     await waitFor(async () => ended, 3000);
     expect(hub.openConnections('user-exp')).toBe(0);
     expect(hub.publish('user-exp', 'notification', { x: 2 })).toBe(0);
+  });
+});
+
+describe('browser (Chrome) push notifications', () => {
+  let push: typeof import('../src/modules/notifications/push.service');
+  const pushed: { endpoint: string; title: string; body: string; url: string; tag: string }[] = [];
+  const sub = (n: number) => ({ endpoint: `https://push.example.test/send/${n}`, keys: { p256dh: 'BPaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', auth: 'authsecret12345' } });
+  const row = async (pid: string) => (await log(pid)).find((l) => l.kind === 'assigned')!;
+  const pushDelivery = async (pid: string) => (await row(pid)).deliveries.find((d) => (d as { channel?: string }).channel === 'PUSH') as { status: string; attempts: number; lastError: string | null } | undefined;
+
+  beforeAll(async () => {
+    push = await import('../src/modules/notifications/push.service');
+  });
+  beforeEach(() => {
+    pushed.length = 0;
+    push.setPushSenderForTests(async (s, p) => {
+      pushed.push({ endpoint: s.endpoint, ...p });
+      return { ok: true };
+    });
+  });
+  afterAll(() => push.setPushSenderForTests(undefined));
+
+  it('requires login to read the key or subscribe', async () => {
+    expect((await api().get('/api/v1/notifications/push/key')).status).toBe(401);
+    expect((await api().post('/api/v1/notifications/push/subscribe').send(sub(1))).status).toBe(401);
+  });
+
+  it('stores a browser subscription, validates it, and removes it on request', async () => {
+    expect((await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send({ endpoint: 'not a url', keys: {} })).status).toBe(422);
+    expect((await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send(sub(1))).status).toBe(200);
+    expect(await push.subscriptionCount(uid.OPS_A!)).toBe(1);
+    await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send(sub(1)); // same browser again: still one
+    expect(await push.subscriptionCount(uid.OPS_A!)).toBe(1);
+    await api().post('/api/v1/notifications/push/unsubscribe').set(as('OPS_A')).send({ endpoint: sub(1).endpoint });
+    expect(await push.subscriptionCount(uid.OPS_A!)).toBe(0);
+  });
+
+  it('pushes the assignment to every browser the assignee allowed, with a link to the project', async () => {
+    await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send(sub(10));
+    await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send(sub(11));
+    const p = await make({ campaign: 'Push campaign' });
+    await assign(p._id, 'OPS_A');
+    await waitFor(async () => (await pushDelivery(p._id))?.status === 'SENT');
+    expect(pushed.map((x) => x.endpoint).sort()).toEqual([sub(10).endpoint, sub(11).endpoint]);
+    expect(pushed[0]).toMatchObject({ title: 'New Project Assigned', url: `https://crm.example.test/operations/projects/${p._id}` });
+    expect(pushed[0]!.body).toContain(p.code);
+    expect(await pushDelivery(p._id)).toMatchObject({ status: 'SENT', attempts: 1 });
+    await api().post('/api/v1/notifications/push/unsubscribe').set(as('OPS_A')).send({ endpoint: sub(10).endpoint });
+    await api().post('/api/v1/notifications/push/unsubscribe').set(as('OPS_A')).send({ endpoint: sub(11).endpoint });
+  });
+
+  it('does not push to someone who has not allowed notifications, and says so', async () => {
+    const p = await make();
+    await assign(p._id, 'OPS_B');
+    expect(await pushDelivery(p._id)).toMatchObject({ status: 'SKIPPED', lastError: 'No browser has allowed notifications yet' });
+    expect(pushed).toHaveLength(0);
+  });
+
+  it('removes a subscription the browser has revoked and records the failure', async () => {
+    await api().post('/api/v1/notifications/push/subscribe').set(as('OPS_A')).send(sub(20));
+    push.setPushSenderForTests(async () => ({ ok: false, gone: true, error: 'Gone' }));
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    await waitFor(async () => (await pushDelivery(p._id))?.status === 'FAILED');
+    expect(await push.subscriptionCount(uid.OPS_A!)).toBe(0); // dead subscription cleaned up
+    expect((await pushDelivery(p._id))?.lastError).toBe('Gone');
+  });
+
+  it('never pushes to the person who caused the event', async () => {
+    await api().post('/api/v1/notifications/push/subscribe').set(as('BD')).send(sub(30));
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(pushed.some((x) => x.endpoint === sub(30).endpoint)).toBe(false);
+    await api().post('/api/v1/notifications/push/unsubscribe').set(as('BD')).send({ endpoint: sub(30).endpoint });
+  });
+});
+
+describe('duplicate check before upload', () => {
+  const sha = async (b: Buffer) => (await import('node:crypto')).createHash('sha256').update(b).digest('hex');
+  const check = (who: string, pid: string, hashes: string[], category = 'BD_CLIENT_DETAILS') =>
+    api().post(`/api/v1/projects/${pid}/files/check`).set(as(who)).send({ category, files: hashes.map((sha256) => ({ sha256 })) });
+
+  it('tells the browser which files are already stored, by content', async () => {
+    const p = await make();
+    const a = Buffer.concat([Buffer.from('PK'), Buffer.alloc(80, 41)]);
+    const b = Buffer.concat([Buffer.from('PK'), Buffer.alloc(80, 42)]);
+    await api().post(`/api/v1/projects/${p._id}/files`).set(as('BD')).field('category', 'BD_CLIENT_DETAILS').attach('files', a, { filename: 'first.xlsx' });
+    const r = await check('BD', p._id, [await sha(a), await sha(b)]);
+    expect(r.status).toBe(200);
+    expect(r.body.data).toEqual([
+      { sha256: await sha(a), duplicate: true, existingName: 'first.xlsx' },
+      { sha256: await sha(b), duplicate: false, existingName: null },
+    ]);
+  });
+
+  it('is scoped and validated like an upload', async () => {
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    const h = await sha(Buffer.from('x'));
+    expect((await check('OPS_B', p._id, [h], 'OPS_SURVEY_PROOF')).status).toBe(404); // not their project
+    expect((await check('FINANCE', p._id, [h])).status).toBe(403); // cannot write this category
+    expect((await check('BD', p._id, ['not-a-hash'])).status).toBe(422);
+    expect((await api().post(`/api/v1/projects/${p._id}/files/check`).send({})).status).toBe(401);
+  });
+});
+
+describe('every action is announced, and Admin sees all of them', () => {
+  it('tells the assignee about a BD edit and Admin too; the editor is not told', async () => {
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    const r = await api().patch(`/api/v1/projects/${p._id}`).set(as('BD')).send({ district: 'Madurai' });
+    expect(r.status).toBe(200);
+    await waitFor(async () => (await forProject('OPS_A', p._id)).some((n) => n.kind === 'activity'));
+    const ops = (await forProject('OPS_A', p._id)).filter((n) => n.kind === 'activity');
+    expect(ops[0]!.text).toContain('BD (BD) updated the project (district)');
+    await waitFor(async () => (await forProject('ADMIN', p._id)).some((n) => n.kind === 'activity'));
+    expect((await forProject('BD', p._id)).filter((n) => n.kind === 'activity')).toHaveLength(0);
+    expect((await forProject('OPS_B', p._id))).toHaveLength(0); // someone unrelated hears nothing
+  });
+
+  it('tells BD when Operations adds a shop, and Admin gets a copy that is in-app only', async () => {
+    const p = await make({ requirementType: 'SHOP_DETAILS' });
+    await assign(p._id, 'OPS_A');
+    const r = await api().post(`/api/v1/projects/${p._id}/sites`).set(as('OPS_A')).send({ shopName: 'Anand Stores', dealerName: 'Anand', district: 'Salem', mobile: '9843011122' });
+    expect(r.status).toBe(201);
+    await waitFor(async () => (await forProject('BD', p._id)).some((n) => n.kind === 'activity'));
+    await waitFor(async () => (await forProject('ADMIN', p._id)).some((n) => n.kind === 'activity'));
+    const row = (await log(p._id)).filter((l) => l.kind === 'activity');
+    expect(row.length).toBeGreaterThan(0);
+  });
+
+  it('does not send Admin a duplicate for the assignment itself', async () => {
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    await waitFor(async () => (await forProject('ADMIN', p._id)).length > 0);
+    expect((await forProject('ADMIN', p._id)).every((n) => n.kind === 'activity')).toBe(true);
+  });
+});
+
+describe('read notifications are cleared after the configured number of days', () => {
+  it('deletes only read notifications older than the limit and keeps unread ones', async () => {
+    const { Notification } = await import('../src/modules/notifications/notification.model');
+    const p = await make();
+    await assign(p._id, 'OPS_A');
+    const mine = await Notification.find({ recipient: uid.OPS_A, project: p._id });
+    const day = 86_400_000;
+    const old = new Date(Date.now() - 10 * day);
+    const recent = new Date(Date.now() - 1 * day);
+    await Notification.updateOne({ _id: mine[0]!._id }, { readAt: old });
+    const extra = await Notification.create({ recipient: uid.OPS_A, kind: 'ACTIVITY', title: 't', body: 'b', project: p._id, dedupeKey: 'x-recent', readAt: recent });
+    const unreadOld = await Notification.create({ recipient: uid.OPS_A, kind: 'ACTIVITY', title: 't', body: 'b', project: p._id, dedupeKey: 'x-unread' });
+    await Notification.updateOne({ _id: unreadOld._id }, { createdAt: old });
+    expect(await notif.purgeReadNotifications(7)).toBeGreaterThanOrEqual(1);
+    expect(await Notification.exists({ _id: mine[0]!._id })).toBeNull();
+    expect(await Notification.exists({ _id: extra._id })).not.toBeNull(); // read, but inside the window
+    expect(await Notification.exists({ _id: unreadOld._id })).not.toBeNull(); // unread is never deleted
+    expect(await notif.purgeReadNotifications(0)).toBe(0); // 0 turns clean-up off
   });
 });

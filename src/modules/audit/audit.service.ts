@@ -1,3 +1,4 @@
+import { announceActivity } from '../notifications/activity.service';
 import { AuditLog, type AuditInput } from './auditLog.model';
 
 export const recordAudit = (i: AuditInput) =>
@@ -10,6 +11,9 @@ export const recordAudit = (i: AuditInput) =>
     project: i.project,
     changes: i.changes ?? [],
     reason: i.reason,
+  }).then((doc) => {
+    void announceActivity(i, doc._id);
+    return doc;
   });
 
 const norm = (v: unknown) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);

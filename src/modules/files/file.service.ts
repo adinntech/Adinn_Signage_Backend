@@ -1,16 +1,15 @@
 import { createHash } from 'node:crypto';
-import type { Types } from 'mongoose';
+import { Types } from 'mongoose';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
-import { assertProjectAccess } from '../../common/project-access';
+import { assertNotCancelled, assertProjectAccess } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
 import { notifyProjectParty } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
-import { CATEGORY_RULES, FILE_CATEGORIES, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
-import { FileAsset } from './file.model';
-import { getStorage } from './storage';
+import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
+import { getStorage, getStorageFor, type Disposition } from './storage';
 
 const hasPerm = (role: string, p: Permission) => permissionsFor(role as Role).includes(p);
 export const canReadCategory = (role: string, c: FileCategory) => CATEGORY_RULES[c].read.some((p) => hasPerm(role, p));
@@ -55,28 +54,61 @@ export function assertCanWrite(role: string, category: FileCategory) {
   if (!hasPerm(role, CATEGORY_RULES[category].write)) throw AppError.forbidden();
 }
 
-const view = (f: InstanceType<typeof FileAsset> | Record<string, any>) => ({
+/** A file as recorded inside its project document (Project.files). `_id` is the file id. */
+export interface FileEntry {
+  _id: Types.ObjectId;
+  section?: string | null;
+  category: string;
+  key: string;
+  storage: 'local' | 'space';
+  path?: string | null;
+  url?: string | null;
+  originalName: string;
+  mimeType?: string | null;
+  kind: FileKind;
+  size?: number | null;
+  sha256?: string | null;
+  uploadedBy?: Types.ObjectId | null;
+  uploadedAt?: Date | null;
+  deletedAt?: Date | null;
+  deletedBy?: Types.ObjectId | null;
+  objectRetained?: boolean | null;
+}
+
+const isLive = (f: FileEntry) => !f.deletedAt;
+
+const view = (f: FileEntry, projectId: Types.ObjectId | string) => ({
   id: String(f._id),
-  project: String(f.project),
+  project: String(projectId),
   category: f.category,
   originalName: f.originalName,
   mimeType: f.mimeType,
   kind: f.kind,
   size: f.size,
   storage: f.storage,
-  uploadedBy: String(f.uploadedBy),
-  createdAt: f.createdAt,
+  /** Full public URL (Spaces only). */
+  url: f.url ?? undefined,
+  section: f.section ?? undefined,
+  uploadedBy: f.uploadedBy ? String(f.uploadedBy) : undefined,
+  createdAt: f.uploadedAt,
 });
+
+async function projectFiles(projectId: string | Types.ObjectId): Promise<FileEntry[]> {
+  const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('files').lean();
+  return ((p?.files ?? []) as unknown as FileEntry[]).filter(isLive);
+}
 
 async function projectWithClient(projectId: string) {
   const project = await Project.findOne({ _id: projectId, deletedAt: null }).populate<{ client: { _id: Types.ObjectId; name: string } }>('client', 'name');
   if (!project) throw AppError.notFound('Project not found');
+  if (!project.client) throw AppError.conflict('The client of this project no longer exists. Ask an admin to restore the client or re-create the project.');
   return project;
 }
 
 export async function uploadFiles(projectId: string, category: FileCategory, files: UploadedFile[], actor: Actor) {
   assertCanWrite(actor.role, category);
   await assertProjectAccess(actor, projectId);
+  await assertNotCancelled(projectId);
   validateFiles(category, files);
   const project = await projectWithClient(projectId);
   const storage = getStorage();
@@ -85,7 +117,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
   const hashes = files.map((f) => createHash('sha256').update(f.buffer).digest('hex'));
   const inBatch = hashes.findIndex((h, i) => hashes.indexOf(h) !== i);
   if (inBatch !== -1) throw AppError.conflict(`${files[inBatch]!.originalname} was selected twice`);
-  const existing = await FileAsset.findOne({ project: project._id, category, deletedAt: null, sha256: { $in: hashes } }).select('originalName sha256').lean();
+  const existing = (await projectFiles(project._id)).find((f) => f.category === category && f.sha256 && hashes.includes(f.sha256));
   if (existing) {
     const dup = files[hashes.indexOf(existing.sha256 as string)]!;
     throw AppError.conflict(`${dup.originalname} was already uploaded to this project (as "${existing.originalName}")`);
@@ -99,25 +131,28 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
       const key = buildFileKey({ category, clientName: project.client.name, projectCode: project.code, originalName: f.originalname });
       await storage.put(key, f.buffer, f.mimetype);
       stored.push(key);
-      const doc = await FileAsset.create({
-        project: project._id,
-        client: project.client._id,
+      const entry: FileEntry = {
+        _id: new Types.ObjectId(),
+        section: SECTION_LABEL[category],
         category,
         key,
         storage: storage.type,
+        ...(storage.locate ? storage.locate(key) : {}),
         originalName: f.originalname,
         mimeType: f.mimetype,
         kind,
         size: f.size,
-        sha256: hashes[files.indexOf(f)],
-        uploadedBy: actor.id,
-      });
-      await recordAudit({ actor, action: 'UPLOAD', entity: 'FileAsset', entityId: doc._id, project: project._id, changes: [{ field: 'key', oldValue: null, newValue: key }, { field: 'category', oldValue: null, newValue: category }] });
-      out.push(view(doc));
+        sha256: hashes[files.indexOf(f)]!,
+        uploadedBy: new Types.ObjectId(actor.id),
+        uploadedAt: new Date(),
+      };
+      await Project.updateOne({ _id: project._id }, { $push: { files: entry } });
+      await recordAudit({ actor, action: 'UPLOAD', entity: 'FileAsset', entityId: entry._id, project: project._id, changes: [{ field: 'key', oldValue: null, newValue: key }, { field: 'category', oldValue: null, newValue: category }] });
+      out.push(view(entry, project._id));
     }
     if (category === 'BD_CLIENT_DETAILS') {
-      // One notification per hour per project, however many files were added, so Operations is not flooded.
-      const bucket = new Date().toISOString().slice(0, 13);
+      // One notification per upload (however many files it holds). Keyed on the first file so every new upload is announced.
+      const batch = out[0]?.id ?? Date.now();
       await notifyProjectParty(
         project._id,
         'assignee',
@@ -125,7 +160,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
           kind: 'DOCUMENTS_ADDED',
           title: 'Client documents added',
           body: `${out.length} new file${out.length > 1 ? 's' : ''} added to project ${project.code} (${project.client.name}).`,
-          dedupe: (r) => `docs:${project._id}:${r}:${bucket}`,
+          dedupe: (r) => `docs:${project._id}:${r}:${batch}`,
         },
         actor.id,
       );
@@ -134,7 +169,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
   } catch (e) {
     // Do not leave orphaned objects behind when a later file in the batch fails.
     await Promise.allSettled(stored.map((k) => storage.remove(k)));
-    await FileAsset.deleteMany({ key: { $in: stored } });
+    await Project.updateOne({ _id: project._id }, { $pull: { files: { key: { $in: stored } } } });
     throw e;
   }
 }
@@ -143,27 +178,42 @@ export async function listFiles(projectId: string, actor: Actor, category?: File
   const role = actor.role;
   if (category && !canReadCategory(role, category)) throw AppError.forbidden();
   await assertProjectAccess(actor, projectId);
-  const items = await FileAsset.find({ project: projectId, deletedAt: null, category: category ?? { $in: readableCategories(role) } })
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
-  return items.map(view);
+  const allowed = category ? [category as string] : (readableCategories(role) as string[]);
+  return (await projectFiles(projectId))
+    .filter((f) => allowed.includes(f.category))
+    .sort((a, b) => +(b.uploadedAt ?? 0) - +(a.uploadedAt ?? 0))
+    .slice(0, 500)
+    .map((f) => view(f, projectId));
 }
 
+/** Finds a live file by id inside whichever project holds it. */
 async function findLive(id: string) {
-  const f = await FileAsset.findOne({ _id: id, deletedAt: null });
-  if (!f) throw AppError.notFound('File not found');
-  return f;
+  const p = await Project.findOne({ 'files._id': id, deletedAt: null }).select('files').lean();
+  const f = ((p?.files ?? []) as unknown as FileEntry[]).find((x) => String(x._id) === String(id) && isLive(x));
+  if (!p || !f) throw AppError.notFound('File not found');
+  return { ...f, project: p._id as Types.ObjectId };
 }
 
-/** Short-lived read link. Files are private; this is the only way to open one. */
-export async function fileUrl(id: string, actor: Actor) {
+/** Short-lived read link. Used for previews and downloads under the original name. */
+export async function fileUrl(id: string, actor: Actor, disposition: Disposition = 'inline') {
   const f = await findLive(id);
   if (!canReadCategory(actor.role, f.category as FileCategory)) throw AppError.forbidden();
   await assertProjectAccess(actor, String(f.project));
   const ttl = env.SIGNED_URL_TTL_SECONDS;
-  const url = await getStorage().signedUrl(f.key, f.originalName, ttl);
+  const url = await getStorageFor(f.storage).signedUrl(f.key, f.originalName, ttl, disposition);
   return { url, expiresAt: new Date(Date.now() + ttl * 1000).toISOString(), name: f.originalName, mimeType: f.mimeType };
+}
+
+/** The file's bytes for an in-app preview. Same access rules as the signed link. */
+export async function fileContent(id: string, actor: Actor) {
+  const f = await findLive(id);
+  if (!canReadCategory(actor.role, f.category as FileCategory)) throw AppError.forbidden();
+  await assertProjectAccess(actor, String(f.project));
+  try {
+    return { stream: await getStorageFor(f.storage).stream(f.key), name: f.originalName, mimeType: f.mimeType ?? 'application/octet-stream' };
+  } catch {
+    throw AppError.notFound('The stored file is missing');
+  }
 }
 
 export async function removeFile(id: string, actor: Actor) {
@@ -171,16 +221,56 @@ export async function removeFile(id: string, actor: Actor) {
   assertCanWrite(actor.role, f.category as FileCategory);
   await assertProjectAccess(actor, String(f.project));
   const evidence = CATEGORY_RULES[f.category as FileCategory].evidence;
-  if (!evidence) await getStorage().remove(f.key);
-  f.deletedAt = new Date();
-  f.deletedBy = actor.id as never;
-  f.objectRetained = evidence;
-  await f.save();
+  if (evidence) {
+    // Critical evidence: hide it but keep the record, because the stored object is kept.
+    await Project.updateOne({ _id: f.project, 'files._id': f._id }, { $set: { 'files.$.deletedAt': new Date(), 'files.$.deletedBy': new Types.ObjectId(actor.id), 'files.$.objectRetained': true } });
+  } else {
+    await getStorageFor(f.storage).remove(f.key);
+    await Project.updateOne({ _id: f.project }, { $pull: { files: { _id: f._id } } });
+  }
   await recordAudit({ actor, action: 'DELETE', entity: 'FileAsset', entityId: f._id, project: f.project, reason: evidence ? 'Evidence retained in storage' : undefined });
   return { id, removed: evidence ? ('hidden' as const) : ('erased' as const) };
 }
 
-/** Used by the signed local link: only serve keys that still have a live record. */
-export async function liveKey(key: string) {
-  return FileAsset.exists({ key, deletedAt: null });
+/**
+ * Erases every file of a project that is being deleted, from storage (local folder or Spaces) and from the project record.
+ * A file that cannot be erased is reported, not hidden.
+ */
+export async function removeProjectFiles(projectId: string) {
+  // Every recorded file, including hidden evidence: the whole project is being destroyed, so nothing may be left in storage.
+  const files = (((await Project.findById(projectId).select('files').lean())?.files ?? []) as unknown as FileEntry[]);
+  const failed: string[] = [];
+  const erased: Types.ObjectId[] = [];
+  for (const f of files) {
+    try {
+      await getStorageFor(f.storage).remove(f.key);
+      erased.push(f._id);
+    } catch (e) {
+      failed.push(f.originalName);
+      console.error('could not erase file', f.key, e);
+    }
+  }
+  if (erased.length) {
+    await Project.updateOne({ _id: projectId }, { $pull: { files: { _id: { $in: erased } } } });
+  }
+  return { erased: erased.length, failed };
+}
+
+/** Returns the original file name for a key that still has a live record, or null (only recorded files are served). */
+export async function liveFileName(key: string): Promise<string | null> {
+  const p = await Project.findOne({ files: { $elemMatch: { key, deletedAt: null } } }).select('files').lean();
+  const f = ((p?.files ?? []) as unknown as FileEntry[]).find((x) => x.key === key && isLive(x));
+  return f ? f.originalName : null;
+}
+
+/**
+ * Lets the browser ask "do you already have these files?" before uploading them, using a SHA-256 of the content.
+ * Returns the stored name for every hash that is already in this project + category.
+ */
+export async function checkDuplicates(projectId: string, category: FileCategory, hashes: string[], actor: Actor) {
+  assertCanWrite(actor.role, category);
+  await assertProjectAccess(actor, projectId);
+  const rows = (await projectFiles(projectId)).filter((f) => f.category === category && f.sha256 && hashes.includes(f.sha256));
+  const byHash = new Map(rows.map((r) => [r.sha256 as string, r.originalName]));
+  return hashes.map((sha256) => ({ sha256, duplicate: byHash.has(sha256), existingName: byHash.get(sha256) ?? null }));
 }

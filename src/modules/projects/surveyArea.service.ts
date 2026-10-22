@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
+import { assertNotCancelled } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
 import { Project } from './project.model';
 import { SurveyArea } from './surveyArea.model';
@@ -28,6 +29,7 @@ export const listAreas = async (projectId: string) => {
 
 export async function createArea(projectId: string, body: z.infer<typeof surveyAreaBody>, actor: Actor) {
   await requireAso(projectId);
+  await assertNotCancelled(projectId);
   if (await SurveyArea.exists({ project: projectId, areaKey: key(body.area) })) throw AppError.conflict(`"${body.area}" is already recorded for this project`);
   const a = await SurveyArea.create({ ...body, project: projectId, areaKey: key(body.area), createdBy: actor.id, updatedBy: actor.id });
   await recordAudit({ actor, action: 'CREATE', entity: 'SurveyArea', entityId: a._id, project: projectId });
@@ -37,6 +39,7 @@ export async function createArea(projectId: string, body: z.infer<typeof surveyA
 export async function updateArea(id: string, body: z.infer<typeof surveyAreaBody>, actor: Actor) {
   const a = await SurveyArea.findById(id);
   if (!a) throw AppError.notFound('Survey area not found');
+  await assertNotCancelled(a.project);
   if (await SurveyArea.exists({ project: a.project, areaKey: key(body.area), _id: { $ne: id } })) throw AppError.conflict(`"${body.area}" is already recorded for this project`);
   a.set({ ...body, areaKey: key(body.area), updatedBy: actor.id });
   await a.save();
@@ -45,6 +48,9 @@ export async function updateArea(id: string, body: z.infer<typeof surveyAreaBody
 }
 
 export async function deleteArea(id: string, actor: Actor) {
+  const existing = await SurveyArea.findById(id).select('project').lean();
+  if (!existing) throw AppError.notFound('Survey area not found');
+  await assertNotCancelled(existing.project);
   const a = await SurveyArea.findByIdAndDelete(id);
   if (!a) throw AppError.notFound('Survey area not found');
   await recordAudit({ actor, action: 'DELETE', entity: 'SurveyArea', entityId: a._id, project: a.project });

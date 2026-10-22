@@ -2,6 +2,7 @@ import { Types } from 'mongoose';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { nextSeqBlock } from '../../common/counter.model';
+import { assertNotCancelled } from '../../common/project-access';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, recordAudit } from '../audit/audit.service';
 import { Project } from '../projects/project.model';
@@ -90,6 +91,7 @@ const fail = (errors: { field: string; message: string }[]) => {
 
 export async function createSite(projectId: string, input: z.infer<typeof siteCreate>, actor: Actor) {
   const project = await requireProject(projectId);
+  await assertNotCancelled(projectId);
   const { allowDuplicate, scenario: sc, ...raw } = input;
   const scenario = (sc as Scenario | undefined) ?? 'MEASUREMENT_REQUIRED';
   const n = prepare(raw, scenario);
@@ -110,6 +112,7 @@ export async function createSite(projectId: string, input: z.infer<typeof siteCr
 export async function updateSite(id: string, patch: Raw, actor: Actor) {
   const before = await Site.findOne({ _id: id, deletedAt: null }).lean();
   if (!before) throw AppError.notFound('Site not found');
+  await assertNotCancelled(before.project);
   const merged = { ...before, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } as Record<string, unknown>;
   // Cleared text fields arrive as ''. Merge, then re-validate everything with the same rules as import.
   const scenario = (patch.scenario as Scenario | undefined) ?? (before.scenario as Scenario) ?? 'MEASUREMENT_REQUIRED';
@@ -139,6 +142,9 @@ export async function updateSite(id: string, patch: Raw, actor: Actor) {
 }
 
 export async function deleteSite(id: string, actor: Actor) {
+  const existing = await Site.findOne({ _id: id, deletedAt: null }).select('project').lean();
+  if (!existing) throw AppError.notFound('Site not found');
+  await assertNotCancelled(existing.project);
   const s = await Site.findOneAndUpdate({ _id: id, deletedAt: null }, { deletedAt: new Date(), updatedBy: actor.id });
   if (!s) throw AppError.notFound('Site not found');
   await syncSiteCount(String(s.project));
@@ -149,6 +155,7 @@ export async function duplicateSite(id: string, actor: Actor) {
   const s = await Site.findOne({ _id: id, deletedAt: null }).lean();
   if (!s) throw AppError.notFound('Site not found');
   const project = await requireProject(String(s.project));
+  await assertNotCancelled(String(s.project));
   const seq = await nextSeqBlock(`site:${s.project}`, 1);
   const { _id, siteCode, seq: _seq, createdAt, updatedAt, importBatch, sourceRow, ...rest } = s as Record<string, any>;
   const copy = await Site.create({ ...rest, seq, siteCode: `${project.code}-S${String(seq).padStart(3, '0')}`, createdBy: actor.id, updatedBy: actor.id });
@@ -158,6 +165,7 @@ export async function duplicateSite(id: string, actor: Actor) {
 }
 
 export async function bulk(projectId: string, b: z.infer<typeof bulkBody>, actor: Actor) {
+  await assertNotCancelled(projectId);
   await requireProject(projectId);
   const filter = buildFilter(projectId, b.ids?.length ? {} : (b.filter ?? {}), b.ids);
   if (b.action === 'delete') {
