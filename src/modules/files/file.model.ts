@@ -4,8 +4,13 @@ import { FILE_CATEGORIES } from './file.categories';
 /** Metadata only; the bytes live in local storage or DigitalOcean Spaces (never in MongoDB). */
 const fileSchema = new Schema(
   {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-    client: { type: Schema.Types.ObjectId, ref: 'Client', required: true },
+    /**
+     * Project files always carry project + client. BD CRM files (sales orders, email templates) are no longer stored
+     * here; `order` only remains on rows created before that change, until migrate:file-assets copies them out.
+     */
+    project: { type: Schema.Types.ObjectId, ref: 'Project', index: true },
+    client: { type: Schema.Types.ObjectId, ref: 'Client' },
+    order: { type: Schema.Types.ObjectId, ref: 'SalesOrder', index: true },
     category: { type: String, enum: FILE_CATEGORIES, required: true },
     /** Storage key, e.g. BD/Client_Details/AMUL/SGN-AMUL-2026-001/<file>. Unique: objects are never overwritten. */
     key: { type: String, required: true, unique: true },

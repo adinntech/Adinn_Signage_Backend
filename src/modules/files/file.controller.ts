@@ -8,7 +8,7 @@ import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { ALLOWED_EXTENSIONS, FILE_CATEGORIES } from './file.categories';
 import * as svc from './file.service';
-import { LocalStorage, getStorage } from './storage';
+import { LocalStorage, getStorageFor } from './storage';
 
 const category = z.enum(FILE_CATEGORIES);
 
@@ -44,7 +44,8 @@ export const remove = asyncHandler(async (req, res) => {
 
 /** Local storage only: serves a file for a valid, unexpired signed link (browsers cannot send a bearer token from <img>). */
 export const raw = asyncHandler(async (req, res) => {
-  const storage = getStorage();
+  // Local files stay readable even after new uploads switch to Spaces.
+  const storage = getStorageFor('local');
   if (!(storage instanceof LocalStorage)) throw AppError.notFound();
   const { key, exp, sig } = z.object({ key: z.string().min(1).max(500), exp: z.coerce.number(), sig: z.string().min(1) }).parse(req.query);
   if (!storage.verify(key, exp, sig) || !(await svc.liveKey(key))) throw AppError.forbidden('This link is invalid or has expired');

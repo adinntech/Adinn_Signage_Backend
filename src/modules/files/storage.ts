@@ -13,6 +13,8 @@ export interface StorageProvider {
   remove(key: string): Promise<void>;
   /** Short-lived link to read a private object. */
   signedUrl(key: string, fileName: string, ttlSeconds: number): Promise<string>;
+  /** Object bytes (e.g. to attach a stored PDF to an email). */
+  get(key: string): Promise<Buffer>;
 }
 
 /* ---------------------------------- local ---------------------------------- */
@@ -47,6 +49,10 @@ export class LocalStorage implements StorageProvider {
     const full = this.resolve(key);
     await fs.access(full);
     return full;
+  }
+
+  async get(key: string): Promise<Buffer> {
+    return fs.readFile(this.resolve(key));
   }
 
   sign(key: string, exp: number): string {
@@ -102,6 +108,13 @@ export class SpacesStorage implements StorageProvider {
     await this.o.client.send(new DeleteObjectCommand({ Bucket: this.o.bucket, Key: this.fullKey(key) }));
   }
 
+  async get(key: string): Promise<Buffer> {
+    const out = await this.o.client.send(new GetObjectCommand({ Bucket: this.o.bucket, Key: this.fullKey(key) }));
+    const body = out.Body as { transformToByteArray?: () => Promise<Uint8Array> } | undefined;
+    if (!body?.transformToByteArray) throw new Error('Empty object body');
+    return Buffer.from(await body.transformToByteArray());
+  }
+
   signedUrl(key: string, fileName: string, ttlSeconds: number): Promise<string> {
     if (!this.o.signer) throw new Error('Spaces signer not configured');
     return this.o.signer(this.fullKey(key), fileName, ttlSeconds);
@@ -134,39 +147,53 @@ export function keyFromSpaceUrl(url: string, opts: { baseUrls: string[]; prefix:
 
 /* --------------------------------- factory --------------------------------- */
 
-let current: StorageProvider | undefined;
+let override: StorageProvider | undefined;
+const providers: Partial<Record<StorageProvider['type'], StorageProvider>> = {};
 
+const spacesConfigured = () => !!(env.DO_SPACES_BUCKET && env.DO_SPACES_ENDPOINT && env.DO_SPACES_REGION && env.DO_SPACES_KEY && env.DO_SPACES_SECRET);
+
+function build(type: StorageProvider['type']): StorageProvider {
+  if (type === 'local') return new LocalStorage(path.resolve(process.cwd(), env.LOCAL_UPLOAD_PATH), env.JWT_ACCESS_SECRET, env.publicBaseUrl);
+  const client = new S3Client({
+    region: env.DO_SPACES_REGION!,
+    endpoint: env.DO_SPACES_ENDPOINT!,
+    forcePathStyle: false,
+    credentials: { accessKeyId: env.DO_SPACES_KEY!, secretAccessKey: env.DO_SPACES_SECRET! },
+  });
+  return new SpacesStorage({
+    bucket: env.DO_SPACES_BUCKET!,
+    prefix: env.STORAGE_PREFIX,
+    client,
+    signer: (key, fileName, ttl) =>
+      getSignedUrl(
+        client,
+        new GetObjectCommand({
+          Bucket: env.DO_SPACES_BUCKET!,
+          Key: key,
+          ResponseContentDisposition: `inline; filename="${fileName.replace(/[^\w.\- ]/g, '_')}"`,
+        }),
+        { expiresIn: ttl },
+      ),
+  });
+}
+
+/** Where new uploads go (STORAGE_TYPE). */
 export function getStorage(): StorageProvider {
-  if (current) return current;
-  if (env.storage === 'local') {
-    current = new LocalStorage(path.resolve(process.cwd(), env.LOCAL_UPLOAD_PATH), env.JWT_ACCESS_SECRET, env.publicBaseUrl);
-  } else {
-    const client = new S3Client({
-      region: env.DO_SPACES_REGION!,
-      endpoint: env.DO_SPACES_ENDPOINT!,
-      forcePathStyle: false,
-      credentials: { accessKeyId: env.DO_SPACES_KEY!, secretAccessKey: env.DO_SPACES_SECRET! },
-    });
-    current = new SpacesStorage({
-      bucket: env.DO_SPACES_BUCKET!,
-      prefix: env.STORAGE_PREFIX,
-      client,
-      signer: (key, fileName, ttl) =>
-        getSignedUrl(
-          client,
-          new GetObjectCommand({
-            Bucket: env.DO_SPACES_BUCKET!,
-            Key: key,
-            ResponseContentDisposition: `inline; filename="${fileName.replace(/[^\w.\- ]/g, '_')}"`,
-          }),
-          { expiresIn: ttl },
-        ),
-    });
-  }
-  return current;
+  return override ?? (providers[env.storage] ??= build(env.storage));
+}
+
+/**
+ * The storage a file was uploaded to, so it is read and deleted where it actually lives even after STORAGE_TYPE
+ * changes. null when that storage is not configured on this server (e.g. a Spaces file on a local-only dev machine).
+ */
+export function getStorageFor(type: StorageProvider['type']): StorageProvider | null {
+  if (override) return override;
+  if (type === env.storage) return getStorage();
+  if (type === 'space' && !spacesConfigured()) return null;
+  return (providers[type] ??= build(type));
 }
 
 /** Tests inject a provider (or reset with undefined). */
 export function setStorageForTests(p: StorageProvider | undefined) {
-  current = p;
+  override = p;
 }
