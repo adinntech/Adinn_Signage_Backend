@@ -1,17 +1,23 @@
 import { z } from 'zod';
 import { listQuery } from '../../common/query';
-import { mobileRule, optionalEmail, optionalMobile, rejectDuplicateContacts } from '../../common/validators/contact';
+import { mobileRule, optionalEmail, rejectDuplicateContacts } from '../../common/validators/contact';
 import { CLIENT_TYPES } from './client.model';
 
 const gstin = z.string().trim().toUpperCase().regex(/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/, 'Invalid GSTIN');
 const optStr = (max: number) => z.string().trim().max(max).optional().or(z.literal('').transform(() => undefined));
 const pincode = z.string().trim().regex(/^\d{6}$/, 'Pincode must be 6 digits').optional().or(z.literal('').transform(() => undefined));
 
+// Client contact persons: names/designations are letters and spaces; mobiles are typed as exactly 10 digits.
+const LETTERS = /^[A-Za-z ]+$/;
+const LETTERS_MSG = 'Use letters and spaces only';
+const strictMobile = z.string().trim().regex(/^\d{10}$/, 'Mobile number must be exactly 10 digits').pipe(mobileRule);
+const optionalStrictMobile = z.union([z.literal('').transform(() => undefined), strictMobile]).optional();
+
 const contact = z.object({
-  name: z.string().trim().min(1, 'Enter the contact name'),
-  designation: z.string().trim().optional(),
-  phone: optionalMobile,
-  alternatePhone: optionalMobile,
+  name: z.string().trim().min(1, 'Enter the contact name').max(120).regex(LETTERS, LETTERS_MSG),
+  designation: z.string().trim().max(120).regex(LETTERS, LETTERS_MSG).optional().or(z.literal('').transform(() => undefined)),
+  phone: optionalStrictMobile,
+  alternatePhone: optionalStrictMobile,
   email: optionalEmail,
   alternateEmail: optionalEmail,
   isPrimary: z.boolean().default(false),
@@ -57,7 +63,7 @@ export const clientRegistration = z.object({
   pincode,
   gstin: gstin.optional().or(z.literal('').transform(() => undefined)),
   contacts: z
-    .array(contact.extend({ phone: mobileRule }))
+    .array(contact.extend({ phone: strictMobile }))
     .min(1, 'Add at least one contact person')
     .max(20)
     .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),

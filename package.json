@@ -14,6 +14,7 @@
         "reset-mpin": "tsx src/scripts/reset-mpin.ts",
         "migrate:sales-arrays": "tsx src/scripts/migrate-sales-arrays.ts",
         "migrate:file-assets": "tsx src/scripts/migrate-file-assets.ts",
+        "seed:industries": "tsx src/scripts/seed-industries.ts",
         "format": "prettier --write src tests",
         "e2e:server": "tsx scripts/e2e-server.ts"
     },
