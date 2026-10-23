@@ -14,7 +14,7 @@ export const approvalBody = z
 export const approveAllBody = z.object({ level: z.enum(['ops', 'bd']) });
 
 const FIELD = { ops: 'opsApproval', bd: 'bdApproval' } as const;
-const NEEDS: Record<'ops' | 'bd', Permission> = { ops: 'verification:manage', bd: 'projects:write' };
+const NEEDS: Record<'ops' | 'bd', Permission> = { ops: 'verification:manage', bd: 'approvals:client' };
 
 /** Operations approves the ops level, BD approves the BD level; neither can act for the other (Super Admin can). */
 function assertLevel(actor: Actor, level: 'ops' | 'bd') {

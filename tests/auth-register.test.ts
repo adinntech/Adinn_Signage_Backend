@@ -159,7 +159,7 @@ describe('platform separation', () => {
 describe('role card must match the registered role', () => {
   it('operations account only signs in under Operations; every other card says "User not found"', async () => {
     await post('/register', web);
-    for (const loginRole of ['BD', 'ACCOUNTS', 'ADMIN', 'RECCE', 'VENDOR']) {
+    for (const loginRole of ['BD', 'CLIENT_SERVICING', 'ADMIN', 'RECCE', 'VENDOR']) {
       const r = await post('/login', { identifier: web.email, mpin: web.mpin, loginRole, platform: 'web' });
       expect(r.status, loginRole).toBe(404);
       expect(r.body.error.code).toBe('USER_NOT_FOUND');

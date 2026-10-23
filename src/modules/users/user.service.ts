@@ -6,7 +6,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { diff, recordAudit } from '../audit/audit.service';
 import { credentialFields } from '../auth/auth.service';
 import { RefreshToken } from '../auth/refreshToken.model';
-import type { Role } from '../roles/roles';
+import { ROLES, type Role } from '../roles/roles';
 import { User, toPublicUser, type UserDoc } from './user.model';
 import type { changeCredentialSchema, createUserSchema, lookupQuery, resetCredentialSchema, updateUserSchema, userListQuery } from './user.validators';
 
@@ -128,7 +128,7 @@ export async function deleteUser(id: string, actor: Actor) {
 
 /** Minimal directory for owner/approver/participant pickers. */
 export async function lookupUsers(q: z.infer<typeof lookupQuery>) {
-  const roles = (q.roles?.split(',') ?? []).filter((r): r is Role => ['SUPER_ADMIN', 'BD', 'RECCE_COORDINATOR', 'RECCE_EXECUTIVE', 'VENDOR', 'OPERATIONS', 'FINANCE', 'MANAGEMENT'].includes(r));
+  const roles = (q.roles?.split(',') ?? []).filter((r): r is Role => (ROLES as readonly string[]).includes(r));
   const filter: Record<string, unknown> = { isActive: true, ...ALIVE };
   if (roles.length) filter.role = { $in: roles };
   if (q.q) filter.name = new RegExp(escapeRegex(q.q), 'i');

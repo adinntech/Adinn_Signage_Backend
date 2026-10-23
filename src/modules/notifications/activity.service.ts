@@ -28,7 +28,7 @@ const NOUN: Record<string, string> = {
 };
 const TITLE_NOUN: Record<string, string> = { Project: 'Project', Site: 'Shop', SurveyArea: 'Survey area', FileAsset: 'Document', Requirement: 'Requirements', ImportBatch: 'Shops' };
 const PAST: Record<string, string> = { CREATE: 'added', UPDATE: 'updated', DELETE: 'deleted', DUPLICATE: 'duplicated', BULK_UPDATE: 'bulk updated', BULK_DELETE: 'bulk deleted', APPROVAL: 'approval changed', UPLOAD: 'uploaded' };
-const ROLE: Record<string, string> = { BD: 'BD', OPERATIONS: 'Operations', RECCE_COORDINATOR: 'Coordinator', SUPER_ADMIN: 'Admin', ACCOUNTS: 'Accounts' };
+const ROLE: Record<string, string> = { BD: 'BD', OPERATIONS: 'Operations', RECCE_COORDINATOR: 'Coordinator', SUPER_ADMIN: 'Admin', CLIENT_SERVICING: 'Client Servicing', FINANCE: 'Accounts' };
 
 /** These already send their own, more specific notification to the other side, so only Admin gets the generic one. */
 function alreadyAnnounced(i: AuditInput) {
