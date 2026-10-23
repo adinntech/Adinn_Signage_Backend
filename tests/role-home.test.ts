@@ -8,6 +8,7 @@ describe('role home', () => {
 
   it('routes web roles to their own dashboard', () => {
     expect(ROLE_HOME.BD).toBe('/bd/dashboard');
+    expect(ROLE_HOME.CLIENT_SERVICING).toBe('/client-servicing/dashboard');
     expect(ROLE_HOME.OPERATIONS).toBe('/operations/dashboard');
     expect(ROLE_HOME.RECCE_COORDINATOR).toBe('/operations/dashboard');
     expect(ROLE_HOME.FINANCE).toBe('/finance/dashboard');
@@ -19,6 +20,7 @@ describe('role home', () => {
     const area = (p: string) => p.split('/')[1];
     const owners: Record<string, string[]> = {
       bd: ['BD', 'SUPER_ADMIN'],
+      'client-servicing': ['CLIENT_SERVICING', 'SUPER_ADMIN'],
       operations: ['OPERATIONS', 'RECCE_COORDINATOR', 'SUPER_ADMIN'],
       finance: ['FINANCE', 'SUPER_ADMIN'],
       admin: ['SUPER_ADMIN', 'MANAGEMENT'],

@@ -37,7 +37,7 @@ async function main() {
     ['BD User', 'bd@e2e.test', 'BD', '9000000010'],
     ['Devi Ops', 'ops@e2e.test', 'OPERATIONS', '9000000001'],
     ['Karthik Ops', 'ops2@e2e.test', 'OPERATIONS', '9000000002'],
-    ['Finance User', 'fin@e2e.test', 'FINANCE', '9000000020'],
+    ['Client Servicing User', 'fin@e2e.test', 'CLIENT_SERVICING', '9000000020'],
   ];
   for (const [name, email, role, phone] of seed) {
     await User.create({ name, email, phone, role: role as 'BD', authMethod: 'PASSWORD', passwordHash: await hashPassword('Passw0rd!x') });
