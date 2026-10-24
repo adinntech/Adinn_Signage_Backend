@@ -41,8 +41,9 @@ export type Permission = (typeof PERMISSIONS)[number];
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS,
-  // Client Servicing starts with no access at all. Add its permissions here as its modules are built.
-  CLIENT_SERVICING: [],
+  // Client Servicing: the orders BD hands over to them (scoped to their own orders in the sales module) and the clients.
+  // Add more permissions here as its modules are built.
+  CLIENT_SERVICING: ['sales:read', 'clients:read'],
   BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',

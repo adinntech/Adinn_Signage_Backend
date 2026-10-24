@@ -19,6 +19,7 @@ export const FILE_CATEGORIES = [
   'SALES_COMMENT_ATTACHMENT',
   'SALES_APPROVAL_PROOF',
   'SALES_RATE_CARD_PDF',
+  'SALES_HANDOVER_DOCUMENT',
   'TEMPLATE_COMPANY_PROFILE',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
@@ -60,6 +61,8 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   SALES_COMMENT_ATTACHMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Comments`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
   SALES_APPROVAL_PROOF: { folder: (c, p) => `BD/Sales/${c}/${p}/Approval_Proof`, write: 'sales:write', read: ['sales:read'], kinds: ['document', 'image'], evidence: true, standalone: true },
   SALES_RATE_CARD_PDF: { folder: (c, p) => `BD/Sales/${c}/${p}/Rate_Card`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: true, standalone: true },
+  // BD -> Client Servicing handover: shop list Excel and client documents. Removable only until the order is handed over.
+  SALES_HANDOVER_DOCUMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
   TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
@@ -74,6 +77,7 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   SALES_COMMENT_ATTACHMENT: 'Sales - Comment Attachments',
   SALES_APPROVAL_PROOF: 'Sales - Approval Proof',
   SALES_RATE_CARD_PDF: 'Sales - Rate Card PDF',
+  SALES_HANDOVER_DOCUMENT: 'Sales - Handover Documents',
   TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
 };
 

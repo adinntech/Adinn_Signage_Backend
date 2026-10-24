@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { nextSeq } from '../../common/counter.model';
-import { escapeRegex, type Actor } from '../../common/query';
+import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { registerCompany } from '../clients/client.service';
@@ -11,7 +11,8 @@ import type { StoredFile } from '../files/storedFile.schema';
 import { EmailTemplate } from '../templates/template.model';
 import { User } from '../users/user.model';
 import { ORDER_STAGES, SalesOrder, WITHOUT_ARRAYS, type OrderStage } from './sales.model';
-import type { boardQuery, createOrderBody, registerBody } from './sales.validators';
+import { revisionLabel } from '../ratecards/ratecard.model';
+import type { boardQuery, createOrderBody, orderListQuery, registerBody } from './sales.validators';
 
 const CLIENT_FIELDS = 'name clientNo code email industry address city district state pincode gstin contacts clientType status';
 export const STAGE_LABELS: Record<OrderStage, string> = {
@@ -85,16 +86,19 @@ export async function registerNewClient(input: z.infer<typeof registerBody>, act
   }
 }
 
-/** Existing Client: another order for a registered company. The company record itself is not modified (except its NEW/EXISTING type). */
+/**
+ * Order Management: a new order for a registered client, flagged New / Existing client by the BD (default: New for
+ * the client's first order, Existing after that). The client record itself is not modified; a client can have many orders.
+ */
 export async function createOrderForClient(input: z.infer<typeof createOrderBody>, actor: Actor) {
   const again = await replay(input.requestKey);
   if (again) return again;
   const client = await Client.findOne({ _id: input.clientId, deletedAt: null }).lean();
   if (!client) throw AppError.notFound('Client not found');
   if (client.status !== 'ACTIVE') throw AppError.badRequest('This client is inactive. Reactivate it before creating an order.');
+  const flag = input.clientType ?? ((await SalesOrder.exists({ client: client._id, deletedAt: null })) ? 'EXISTING' : 'NEW');
   try {
-    const order = await createOrder(client, 'EXISTING', input.requestKey, actor);
-    if (client.clientType === 'NEW') await Client.updateOne({ _id: client._id }, { clientType: 'EXISTING' });
+    const order = await createOrder(client, flag, input.requestKey, actor);
     return { client, order: await getOrder(String(order._id)), replayed: false };
   } catch (e) {
     if ((e as { code?: number }).code === 11000 && input.requestKey) {
@@ -103,6 +107,39 @@ export async function createOrderForClient(input: z.infer<typeof createOrderBody
     }
     throw e;
   }
+}
+
+/**
+ * Order Management list: newest first, searchable by order no / client name / Client ID, with the rate card and
+ * handover status. A Client Servicing person sees only the orders handed to them ("My Orders").
+ */
+export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor) {
+  const filter: Record<string, unknown> = { deletedAt: null };
+  if (actor.role === 'CLIENT_SERVICING') filter.csAssignee = new Types.ObjectId(actor.id);
+  else if (q.handover === 'ASSIGNED') filter.csAssignee = { $ne: null };
+  else if (q.handover === 'PENDING') filter.csAssignee = null;
+  if (q.ownerId) filter.owner = new Types.ObjectId(q.ownerId);
+  if (q.clientId) filter.client = new Types.ObjectId(q.clientId);
+  if (q.clientType) filter.clientType = q.clientType;
+  if (q.q) {
+    const re = new RegExp(escapeRegex(q.q), 'i');
+    const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
+    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+  }
+  const [rows, total] = await Promise.all([
+    SalesOrder.find(filter)
+      .select('orderNo client clientType owner currentRevision rateCardPdf csAssignee handover shopList createdBy createdAt updatedAt')
+      .sort(parseSort(q.sort, ['createdAt', 'orderNo', 'updatedAt', 'handover.assignedAt'], '-createdAt'))
+      .skip((q.page - 1) * q.limit)
+      .limit(q.limit)
+      .populate('client', 'name clientNo city')
+      .populate('owner', 'name')
+      .populate('csAssignee', 'name')
+      .lean(),
+    SalesOrder.countDocuments(filter),
+  ]);
+  const items = rows.map((o) => ({ ...o, rateCardLabel: o.currentRevision ? revisionLabel(o.currentRevision) : null }));
+  return { items, meta: pageMeta(q.page, q.limit, total) };
 }
 
 /** Kanban: each column's newest cards plus its total, with the same filters applied to every column. */
@@ -140,6 +177,7 @@ export async function getOrder(id: string) {
     .select(WITHOUT_ARRAYS)
     .populate('client', CLIENT_FIELDS)
     .populate('owner', 'name email phone role')
+    .populate('csAssignee', 'name email phone')
     .populate('createdBy', 'name role')
     .populate('approvalCompletedBy', 'name role')
     .lean();
@@ -188,7 +226,11 @@ export async function reassignOwner(id: string, ownerId: string, actor: Actor) {
 }
 
 /** Loads one activity array of an order (with user names), newest first by `dateField`. */
-export async function orderArray(id: string, key: 'salescommentsArray' | 'salesprofile' | 'rateCardArray' | 'approvalDocumentsArray' | 'salespipelineLogs', userPaths: string[]) {
+export async function orderArray(
+  id: string,
+  key: 'salescommentsArray' | 'salesprofile' | 'rateCardArray' | 'approvalDocumentsArray' | 'salespipelineLogs' | 'handoverDocumentsArray',
+  userPaths: string[],
+) {
   let q = SalesOrder.findOne({ _id: id, deletedAt: null }).select(`${key} client orderNo stage clientType approvalStatus currentRevision rateCardPdf`);
   for (const p of userPaths) q = q.populate(`${key}.${p}`, 'name role');
   const o = await q.lean();
@@ -291,11 +333,11 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
 
 /**
  * Signed link for any file shown on an order: comment attachments, approval proof, rate card PDFs, sent email
- * attachments, and the Company Profile PDF shown in the email draft.
+ * attachments, handover documents / shop list, and the Company Profile PDF shown in the email draft.
  */
 export async function orderFileUrl(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments')
+    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
   const all: (StoredFile | null | undefined)[] = [
@@ -304,6 +346,7 @@ export async function orderFileUrl(id: string, fileId: string) {
     ...(o.rateCardArray ?? []).map((r) => r.pdf),
     o.rateCardPdf,
     ...(o.salesprofile ?? []).flatMap((e) => e.attachments ?? []),
+    ...(o.handoverDocumentsArray ?? []).map((d) => d.file),
   ];
   let file = all.find((f) => f && String(f.fileId) === fileId);
   if (!file) {

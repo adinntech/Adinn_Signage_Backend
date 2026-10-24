@@ -47,7 +47,8 @@ export const quotationBody = z.object({
   terms: z.string().trim().max(20000).default(''),
   regards: z.object({
     name: z.string().trim().min(1, 'Enter the name').max(120),
-    designation: z.string().trim().min(1, 'Enter the designation').max(120),
+    // Not printed on the ADINN rate card (Business Analyst shows name, email and phone); kept for older revisions.
+    designation: optStr(120),
     mobile: mobileRule,
     email: z.string().trim().toLowerCase().email('Enter a valid email address'),
   }),

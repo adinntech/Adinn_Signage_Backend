@@ -34,18 +34,26 @@ afterAll(async () => {
   await mongod.stop();
 });
 
-describe('Client Servicing has no modules yet', () => {
-  it('holds no permissions and lands on its own empty page', () => {
-    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual([]);
+describe('Client Servicing (handed-over orders only)', () => {
+  it('reads sales orders and clients only, and lands on its own page', () => {
+    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read']);
     expect(ROLE_HOME.CLIENT_SERVICING).toBe('/client-servicing/dashboard');
   });
 
-  it('can sign in but cannot reach the BD dashboard data, clients, projects or sales', async () => {
+  it('cannot reach projects, the BD Kanban, templates or any write', async () => {
     const as = { Authorization: `Bearer ${token}` };
-    for (const url of ['/api/v1/clients', '/api/v1/projects', '/api/v1/projects/summary', '/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
+    for (const url of ['/api/v1/projects', '/api/v1/projects/summary', '/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
       expect((await api().get(url).set(as)).status, url).toBe(403);
     }
     expect((await api().post('/api/v1/clients').set(as).send({ name: 'X', code: 'XX' })).status).toBe(403);
+    expect((await api().post('/api/v1/sales/orders').set(as).send({})).status).toBe(403);
+  });
+
+  it('sees only the orders handed over to them', async () => {
+    const as = { Authorization: `Bearer ${token}` };
+    const list = await api().get('/api/v1/sales/orders').set(as);
+    expect(list.status).toBe(200);
+    expect(list.body.data).toEqual([]);
   });
 
   it('leaves BD untouched', async () => {

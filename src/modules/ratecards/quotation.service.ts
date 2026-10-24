@@ -1,5 +1,6 @@
 import { Types } from 'mongoose';
 import type { z } from 'zod';
+import { COMPANY } from '../../config/company';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { htmlToText, sanitizeHtml } from '../../common/html';
@@ -17,17 +18,25 @@ import { RATE_UNIT_LABELS, revisionLabel } from './ratecard.model';
 import { masterRatesById } from './rateItem.service';
 import type { quotationBody } from './ratecard.validators';
 
-const EDITABLE_STAGES = ['RATE_CARD', 'CLIENT_APPROVAL'];
+/** The rate card can be prepared and revised (negotiation) at any time; only a completed legacy client approval locks it. */
+const isEditable = (order: { approvalStatus?: string | null }) => order.approvalStatus !== 'COMPLETED';
 
-export const DEFAULT_TERMS = [
-  '<ol>',
-  '<li>Rates are exclusive of GST (18%).</li>',
-  '<li>Artwork/design shall be provided by the client or will be charged extra.</li>',
-  '<li>Installation, scaffolding and electrical work (if required) will be charged separately.</li>',
-  '<li>This quotation is valid for 30 days from the date of issue.</li>',
-  '<li>Payment terms: 50% advance, 50% before installation.</li>',
-  '</ol>',
-].join('');
+/** ADINN's standard rate card terms (one per numbered row in the PDF). */
+export const DEFAULT_TERMS = `<ol>${[
+  'Purchase Order Should Be Issued In The Name Of “ADINN ADVERTISING SERVICES LIMITED”.',
+  'GST At 18% Will Be Applicable On The Quoted Rates.',
+  'Purchase Order Is Required To Initiate The Project.',
+  '100% Advance Payment Is Mandatory Before Project Initiation.',
+  'Branding, Fabrication, And Preparation Require 2 To 3 Working Days From Final Design Confirmation.',
+  'Innovative Or Customized Designs May Require 5 To 7 Working Days, Based On Design Complexity.',
+  'Standard Working Time Is 8 Hours Per Day, Usually Between 10:00 AM And 7:00 PM, Including 1 Hour Lunch Break.',
+  'The Campaign Period Includes Sundays And Government Holidays Unless Agreed Otherwise In Writing.',
+  'The Permitted Distance Is 60 Km/Day Per Vehicle; Extra Kilometers Will Be Charged At ₹ 12 / KM.',
+  'GPS Tracking And WhatsApp Campaign Updates With Geo-Tagged Photos/videos Will Be Shared As Proof Of Execution.',
+  'Confirm The Quotation In Writing Within 7 Days.',
+]
+  .map((t) => `<li>${t}</li>`)
+  .join('')}</ol>`;
 
 /** ORD-2026-0001 -> ADINN/QTN/2026/0001 (stable across revisions). */
 const quotationRefOf = (orderNo: string) => {
@@ -135,10 +144,11 @@ export async function getQuotation(orderId: string, actor: Actor) {
     ? null
     : {
         clientName: client.name,
-        clientAddress: addressOf(client),
+        // "Bill To" shows the city under the company name, as on the ADINN rate card.
+        clientAddress: client.city || addressOf(client),
         contact: primary ? { name: primary.name, designation: primary.designation ?? '', phone: primary.phone ?? '', email: primary.email ?? '' } : { name: '', designation: '', phone: '', email: '' },
         quotationDate: new Date(),
-        subject: `Signage Solutions for ${client.name}`,
+        subject: 'Signage Rate Card',
         items: [],
         terms: DEFAULT_TERMS,
         regards: { name: me?.name ?? '', designation: 'Business Development Manager', mobile: me?.phone ?? '', email: me?.email ?? '' },
@@ -147,8 +157,9 @@ export async function getQuotation(orderId: string, actor: Actor) {
     orderId: String(order._id),
     orderNo: order.orderNo,
     stage: order.stage,
-    editable: EDITABLE_STAGES.includes(order.stage) && order.approvalStatus !== 'COMPLETED',
+    editable: isEditable(order),
     quotationRef: quotationRefOf(order.orderNo),
+    company: COMPANY,
     clientName: client.name,
     contacts: client.contacts ?? [],
     latest,
@@ -173,8 +184,7 @@ export async function getQuotation(orderId: string, actor: Actor) {
  */
 export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor) {
   const { order, client } = await orderWithClient(orderId);
-  if (!EDITABLE_STAGES.includes(order.stage)) throw AppError.conflict('The rate card can be edited once the order reaches the Rate Card stage');
-  if (order.approvalStatus === 'COMPLETED') throw AppError.conflict('Client approval is complete; the rate card is locked');
+  if (!isEditable(order)) throw AppError.conflict('Client approval is complete; the rate card is locked');
 
   // Copied lines must point at a real master item; the master rate snapshot comes from the request (taken at copy time).
   const ids = input.items.map((i) => i.masterItemId).filter((x): x is string => !!x);

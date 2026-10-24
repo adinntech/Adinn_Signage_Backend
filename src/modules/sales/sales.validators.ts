@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectId } from '../../common/query';
+import { listQuery, objectId } from '../../common/query';
 import { CLIENT_TYPES } from '../clients/client.model';
 import { clientRegistration } from '../clients/client.validators';
 import { APPROVAL_DOC_TYPES, EMAIL_KINDS, ORDER_STAGES } from './sales.model';
@@ -8,9 +8,31 @@ import { APPROVAL_DOC_TYPES, EMAIL_KINDS, ORDER_STAGES } from './sales.model';
 const requestKey = z.string().trim().regex(/^[A-Za-z0-9-]{8,64}$/, 'Invalid request key').optional();
 
 export const registerBody = clientRegistration.extend({ requestKey });
-export const createOrderBody = z.object({ clientId: objectId, requestKey });
+/** Order Management: BD picks the client and flags the order New / Existing client (suggested from the client's order count). */
+export const createOrderBody = z.object({
+  clientId: objectId,
+  clientType: z.enum(CLIENT_TYPES, { message: 'Choose New Client or Existing Client' }).optional(),
+  requestKey,
+});
 
 const optDate = z.coerce.date().optional().or(z.literal('').transform(() => undefined));
+export const orderListQuery = listQuery.extend({
+  ownerId: objectId.optional().or(z.literal('').transform(() => undefined)),
+  clientId: objectId.optional().or(z.literal('').transform(() => undefined)),
+  clientType: z.enum(CLIENT_TYPES).optional().or(z.literal('').transform(() => undefined)),
+  /** BD view: handed over to Client Servicing or not yet. */
+  handover: z.enum(['ASSIGNED', 'PENDING']).optional().or(z.literal('').transform(() => undefined)),
+});
+
+export const assignCsBody = z.object({
+  csUserId: objectId,
+  note: z.string().trim().max(1000).optional().or(z.literal('').transform(() => undefined)),
+});
+export const shopRowsQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  state: z.enum(['VALID', 'WARNING', 'ERROR']).optional().or(z.literal('').transform(() => undefined)),
+});
 export const boardQuery = z.object({
   q: z.string().trim().max(100).optional(),
   ownerId: objectId.optional().or(z.literal('').transform(() => undefined)),

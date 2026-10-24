@@ -77,12 +77,17 @@ export async function listClients(q: z.infer<typeof clientListQuery>) {
 
 /** Client list summary cards; counted from live records. */
 export async function clientSummary() {
-  const [newClientOrders, existingClientOrders, totalClients] = await Promise.all([
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const [newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth] = await Promise.all([
     SalesOrder.countDocuments({ deletedAt: null, clientType: 'NEW' }),
     SalesOrder.countDocuments({ deletedAt: null, clientType: 'EXISTING' }),
     Client.countDocuments({ deletedAt: null }),
+    Client.countDocuments({ deletedAt: null, status: 'ACTIVE' }),
+    Client.countDocuments({ deletedAt: null, createdAt: { $gte: monthStart } }),
   ]);
-  return { newClientOrders, existingClientOrders, totalClients };
+  return { newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth };
 }
 
 export async function getClient(id: string) {

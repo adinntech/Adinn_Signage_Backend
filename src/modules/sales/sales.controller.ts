@@ -1,22 +1,27 @@
-import type { Request } from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { AppError } from '../../common/errors';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { quotationBody } from '../ratecards/ratecard.validators';
 import * as quotation from '../ratecards/quotation.service';
 import * as approval from './approval.service';
+import * as handover from './handover.service';
 import * as mail from './salesMail.service';
 import * as orders from './order.service';
 import {
   approvalPatchBody,
   approvalUploadBody,
+  assignCsBody,
   boardQuery,
   commentBody,
   createOrderBody,
   emailListQuery,
   moveBody,
+  orderListQuery,
   ownerBody,
   registerBody,
   sendEmailBody,
+  shopRowsQuery,
 } from './sales.validators';
 
 const id = (req: Request) => objectId.parse(req.params.id);
@@ -31,8 +36,43 @@ export const createOrder = asyncHandler(async (req, res) => {
   const r = await orders.createOrderForClient(createOrderBody.parse(req.body), actorOf(req));
   ok(res, r, undefined, r.replayed ? 200 : 201);
 });
-export const board = asyncHandler(async (req, res) => ok(res, await orders.orderBoard(boardQuery.parse(req.query))));
-export const get = asyncHandler(async (req, res) => ok(res, await orders.getOrder(id(req))));
+export const list = asyncHandler(async (req, res) => {
+  const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
+  ok(res, items, meta);
+});
+export const board = asyncHandler(async (req, res) => {
+  if (handover.isCs(actorOf(req))) throw AppError.forbidden();
+  ok(res, await orders.orderBoard(boardQuery.parse(req.query)));
+});
+export const get = asyncHandler(async (req, res) => {
+  await handover.markSeen(id(req), actorOf(req));
+  ok(res, await orders.getOrder(id(req)));
+});
+
+/** Client Servicing may only open orders handed to them (runs for every `/orders/:id...` route). */
+export const scopeOrder = (req: Request, _res: Response, next: NextFunction, value: string) => {
+  handover.assertOrderAccess(objectId.parse(value), actorOf(req)).then(() => next(), next);
+};
+
+/* --------------------------------- handover --------------------------------- */
+
+export const csUsers = asyncHandler(async (_req, res) => ok(res, await handover.csUsers()));
+export const shopTemplate = asyncHandler(async (_req, res) => {
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="shop-list-template.xlsx"');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(await handover.shopTemplate());
+});
+export const getHandover = asyncHandler(async (req, res) => ok(res, await handover.getHandover(id(req))));
+export const shops = asyncHandler(async (req, res) => {
+  const { items, meta } = await handover.listShops(id(req), shopRowsQuery.parse(req.query));
+  ok(res, items, meta);
+});
+export const uploadShops = asyncHandler(async (req, res) => ok(res, await handover.uploadShopList(id(req), uploaded(req)[0], actorOf(req)), undefined, 201));
+export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
+export const addDocuments = asyncHandler(async (req, res) => ok(res, await handover.addDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
+export const removeDocument = asyncHandler(async (req, res) => ok(res, await handover.removeDocument(id(req), objectId.parse(req.params.docId), actorOf(req))));
+export const assignCs = asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));
 export const move = asyncHandler(async (req, res) => ok(res, await orders.moveStage(id(req), moveBody.parse(req.body).stage, actorOf(req))));
 export const reassign = asyncHandler(async (req, res) => ok(res, await orders.reassignOwner(id(req), ownerBody.parse(req.body).ownerId, actorOf(req))));
 export const history = asyncHandler(async (req, res) => ok(res, await orders.orderHistory(id(req))));

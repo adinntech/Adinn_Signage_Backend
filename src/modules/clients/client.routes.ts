@@ -8,5 +8,6 @@ clientRouter.get('/', requirePermission('clients:read'), c.list);
 clientRouter.get('/summary', requirePermission('clients:read'), c.summary);
 clientRouter.get('/:id',requirePermission('clients:read'), c.get);
 clientRouter.post('/', requirePermission('clients:write'), c.create);
+clientRouter.post('/company', requirePermission('clients:write'), c.register);
 clientRouter.patch('/:id', requirePermission('clients:write'), c.update);
 clientRouter.delete('/:id', requirePermission('clients:write'), c.remove);

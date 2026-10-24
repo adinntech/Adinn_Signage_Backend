@@ -11,7 +11,7 @@ import { pushAvailable, sendPush, subscriptionCount } from './push.service';
 import { Notification, type NotificationKind } from './notification.model';
 
 /** Kinds that need someone to act, so they are also emailed. The rest stay in the app to avoid inbox noise. */
-const EMAIL_KINDS = new Set<NotificationKind>(['PROJECT_ASSIGNED', 'PROJECT_REASSIGNED', 'PROJECT_CANCELLED', 'APPROVAL_CORRECTION']);
+const EMAIL_KINDS = new Set<NotificationKind>(['PROJECT_ASSIGNED', 'PROJECT_REASSIGNED', 'PROJECT_CANCELLED', 'APPROVAL_CORRECTION', 'ORDER_ASSIGNED']);
 const MAX_ATTEMPTS = 3;
 const OPS_ROLES = new Set(['OPERATIONS', 'RECCE_COORDINATOR']);
 
@@ -20,14 +20,20 @@ export interface NotifySpec {
   kind: NotificationKind;
   title: string;
   body: string;
-  project: { _id: Types.ObjectId | string; code: string; clientName?: string | undefined };
+  /** What the notification is about: a project, or (BD CRM) a sales order. */
+  project?: { _id: Types.ObjectId | string; code: string; clientName?: string | undefined };
+  order?: { _id: Types.ObjectId | string; orderNo: string; clientName?: string | undefined };
   actorId?: string | undefined;
   /** Stable key per recipient for this event; the same key never creates a second notification. */
   dedupe: (recipientId: string) => string;
 }
 
+/** Where a notification opens: the sales order for order events, otherwise the project in the person's own area. */
+const linkOf = (role: string, n: { project?: unknown; salesOrder?: unknown; kind?: string }) =>
+  n.salesOrder ? `${env.webBaseUrl}/orders/${String(n.salesOrder)}?tab=handover` : linkFor(role, String(n.project), n.kind);
+
 const linkFor = (role: string, projectId: string, kind?: string) =>
-  OPS_ROLES.has(role) ? `${env.webBaseUrl}/operations/projects/${projectId}${kind === 'DOCUMENTS_ADDED' ? '?tab=documents' : ''}` : role === 'BD' ? `${env.webBaseUrl}/bd/dashboard?view=${projectId}` : `${env.webBaseUrl}/dashboard`;
+  OPS_ROLES.has(role) ?`${env.webBaseUrl}/operations/projects/${projectId}${kind === 'DOCUMENTS_ADDED' ? '?tab=documents' : ''}` : role === 'BD' ? `${env.webBaseUrl}/bd/dashboard?view=${projectId}` : `${env.webBaseUrl}/dashboard`;
 
 /**
  * Records a notification for each recipient (never the person who caused the event) and starts email delivery.
@@ -54,9 +60,11 @@ export async function notify(spec: NotifySpec): Promise<void> {
           kind: spec.kind,
           title: spec.title,
           body: spec.body,
-          project: spec.project._id,
-          projectCode: spec.project.code,
-          clientName: spec.project.clientName,
+          project: spec.project?._id,
+          projectCode: spec.project?.code,
+          salesOrder: spec.order?._id,
+          orderNo: spec.order?.orderNo,
+          clientName: spec.project?.clientName ?? spec.order?.clientName,
           dedupeKey: spec.dedupe(String(u._id)),
           deliveries: delivery,
         });
@@ -102,7 +110,7 @@ export async function deliverPush(notificationId: string, role: string): Promise
   d.attempts = (d.attempts ?? 0) + 1;
   d.updatedAt = new Date();
   try {
-    const r = await sendPush(String(n.recipient), { title: n.title, body: n.body, url: linkFor(role, String(n.project), n.kind), tag: String(n._id) });
+    const r = await sendPush(String(n.recipient), { title: n.title, body: n.body, url: linkOf(role, n), tag: String(n._id) });
     if (r.sent > 0) {
       d.status = 'SENT';
       d.sentAt = new Date();
@@ -127,7 +135,7 @@ export async function deliverEmail(notificationId: string): Promise<void> {
   d.attempts = (d.attempts ?? 0) + 1;
   d.updatedAt = new Date();
   try {
-    const mail = renderMail(n.title, n.body, linkFor(user?.role ?? '', String(n.project), n.kind));
+    const mail = renderMail(n.title, n.body, linkOf(user?.role ?? '', n));
     await sendMail({ to: d.to, ...mail });
     d.status = 'SENT';
     d.sentAt = new Date();
@@ -192,6 +200,7 @@ const WEB_KIND: Record<NotificationKind, string> = {
   STAGE_CHANGED: 'stage',
   APPROVAL_CORRECTION: 'approval',
   PROJECT_CANCELLED: 'cancelled',
+  ORDER_ASSIGNED: 'order',
   ACTIVITY: 'activity',
   ADMIN_ACTIVITY: 'activity',
 };
@@ -204,6 +213,8 @@ type NotificationRow = {
   createdAt: Date;
   project?: unknown;
   projectCode?: string | null | undefined;
+  salesOrder?: unknown;
+  orderNo?: string | null | undefined;
   clientName?: string | null | undefined;
   readAt?: Date | null | undefined;
 };
@@ -216,8 +227,9 @@ export function toItem(n: NotificationRow) {
     title: n.title,
     text: n.body,
     at: n.createdAt.toISOString(),
-    projectId: String(n.project),
-    projectCode: n.projectCode ?? '',
+    projectId: n.project ? String(n.project) : '',
+    projectCode: n.projectCode ?? n.orderNo ?? '',
+    orderId: n.salesOrder ? String(n.salesOrder) : null,
     client: n.clientName ?? '',
     read: !!n.readAt,
   };

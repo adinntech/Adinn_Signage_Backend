@@ -10,7 +10,8 @@ export type OrderStage = (typeof ORDER_STAGES)[number];
 export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD'] as const;
 export const DELIVERY_STATUSES = ['SENT', 'FAILED', 'SKIPPED'] as const;
 export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN'] as const;
-export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE'] as const;
+export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE', 'HANDOVER'] as const;
+export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST'] as const;
 
 /** Files keep their full metadata inside the order (no FileAsset row); see storedFile.schema. */
 const fileRef = storedFileSchema;
@@ -75,6 +76,50 @@ const pipelineLogSchema = new Schema({
   notes: String,
 });
 
+/** handoverDocumentsArray: files the BD hands to Client Servicing (client documents, and the shop list Excel). */
+const handoverDocSchema = new Schema({
+  kind: { type: String, enum: HANDOVER_DOC_KINDS, required: true },
+  file: { type: fileRef, required: true },
+  /** Added after the order was handed over (shown as "added later" to Client Servicing). */
+  afterHandover: { type: Boolean, default: false },
+  uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  role: String,
+  createdAt: { type: Date, default: Date.now },
+});
+
+/**
+ * handoverShopsArray: shop rows from the BD's shop list, cleaned with the same rules as the project site import
+ * (sites/site.fields). They become project sites when Client Servicing creates the project.
+ */
+const handoverShopSchema = new Schema(
+  {
+    rowNumber: Number,
+    shopName: String,
+    dealerName: String,
+    location: String,
+    district: String,
+    address1: String,
+    address2: String,
+    pincode: String,
+    mobile: String,
+    mobileAlt: String,
+    gstin: String,
+    contactPerson: String,
+    width: Number,
+    height: Number,
+    unit: String,
+    boardType: String,
+    quantity: Number,
+    remarks: String,
+    clientSiteCode: String,
+    /** Columns that did not match a known field, kept as-is. */
+    extra: { type: Schema.Types.Mixed, default: undefined },
+    state: { type: String, enum: ['VALID', 'WARNING', 'ERROR'] },
+    issues: [String],
+  },
+  { _id: false },
+);
+
 /**
  * One order per client enquiry, holding all of its sales activity in arrays. The company (Client) stays the master
  * record; an order only links to it, so a client can have many orders and editing an order never touches the company.
@@ -99,11 +144,37 @@ const orderSchema = new Schema(
     currentRevision: { type: Number, default: 0 },
     rateCardPdf: { type: fileRef, default: null },
 
+    /** Client Servicing person the BD handed this order to (set once; the BD cannot reassign). */
+    csAssignee: { type: Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    handover: {
+      type: new Schema(
+        {
+          assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          assignedAt: Date,
+          note: String,
+          /** First time the Client Servicing person opened the order ("New" badge until then). */
+          seenAt: Date,
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+    /** Summary of the current shop list (rows are in handoverShopsArray). */
+    shopList: {
+      type: new Schema(
+        { fileId: Schema.Types.ObjectId, fileName: String, total: Number, valid: Number, warning: Number, error: Number, uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' }, uploadedAt: Date },
+        { _id: false },
+      ),
+      default: null,
+    },
+
     salescommentsArray: { type: [commentSchema], default: [] },
     salesprofile: { type: [emailSchema], default: [] },
     rateCardArray: { type: [rateCardRevisionSchema], default: [] },
     approvalDocumentsArray: { type: [approvalDocSchema], default: [] },
     salespipelineLogs: { type: [pipelineLogSchema], default: [] },
+    handoverDocumentsArray: { type: [handoverDocSchema], default: [] },
+    handoverShopsArray: { type: [handoverShopSchema], default: [] },
 
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -112,6 +183,7 @@ const orderSchema = new Schema(
   { timestamps: true },
 );
 orderSchema.index({ stage: 1, createdAt: -1 });
+orderSchema.index({ csAssignee: 1, createdAt: -1 });
 // Resend / edit-details look orders up by an array item's id.
 orderSchema.index({ 'salesprofile._id': 1 });
 orderSchema.index({ 'approvalDocumentsArray._id': 1 });
@@ -120,4 +192,4 @@ orderSchema.index({ 'salesprofile.attachments.fileId': 1 });
 export const SalesOrder = model('SalesOrder', orderSchema);
 
 /** Projection that leaves out the activity arrays (Kanban, overview, checks). */
-export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs';
+export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray';

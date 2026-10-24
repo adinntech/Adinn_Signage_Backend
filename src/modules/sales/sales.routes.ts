@@ -9,13 +9,25 @@ const write = requirePermission('sales:write');
 /** BD sales pipeline: client registration -> orders -> Company Profile -> Rate Card -> Client Approval Proof. */
 export const salesRouter = Router();
 salesRouter.use(authenticate);
+salesRouter.param('id', c.scopeOrder);
 salesRouter.post('/orders/new-client', write, requirePermission('clients:write'), c.registerClient);
+salesRouter.get('/client-servicing-users', write, c.csUsers);
+salesRouter.get('/shop-list-template', read, c.shopTemplate);
+salesRouter.get('/orders', read, c.list);
 salesRouter.post('/orders', write, c.createOrder);
 salesRouter.get('/orders/board', read, c.board);
 salesRouter.get('/orders/:id', read, c.get);
 salesRouter.post('/orders/:id/stage', write, c.move);
 salesRouter.patch('/orders/:id/owner', write, c.reassign);
 salesRouter.get('/orders/:id/history', read, c.history);
+// BD -> Client Servicing handover (shop list and documents are optional; documents can still be added after handover)
+salesRouter.get('/orders/:id/handover', read, c.getHandover);
+salesRouter.get('/orders/:id/handover/shops', read, c.shops);
+salesRouter.post('/orders/:id/handover/shops', write, receive, c.uploadShops);
+salesRouter.delete('/orders/:id/handover/shops', write, c.removeShops);
+salesRouter.post('/orders/:id/handover/documents', write, receive, c.addDocuments);
+salesRouter.delete('/orders/:id/handover/documents/:docId', write, c.removeDocument);
+salesRouter.post('/orders/:id/handover/assign', write, c.assignCs);
 salesRouter.get('/orders/:id/comments', read, c.comments);
 salesRouter.post('/orders/:id/comments', write, receive, c.addComment);
 salesRouter.delete('/orders/:id/comments/:commentId', write, c.deleteComment);

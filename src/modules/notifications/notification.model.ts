@@ -8,6 +8,8 @@ export const NOTIFICATION_KINDS = [
   'STAGE_CHANGED',
   'APPROVAL_CORRECTION',
   'PROJECT_CANCELLED',
+  /** BD handed a sales order to a Client Servicing person (links to the order, not a project). */
+  'ORDER_ASSIGNED',
   /** Any other create / edit / delete on a project, sent to the people working on it. */
   'ACTIVITY',
   /** The same, for Super Admin: everything everyone does, in the app only. */
@@ -45,6 +47,9 @@ const notificationSchema = new Schema(
     body: { type: String, required: true },
     project: { type: Schema.Types.ObjectId, ref: 'Project', index: true },
     projectCode: String,
+    /** Set instead of `project` for sales order events. */
+    salesOrder: { type: Schema.Types.ObjectId, ref: 'SalesOrder' },
+    orderNo: String,
     clientName: String,
     /** Same event for the same person is stored once, so retries and double clicks never notify twice. */
     dedupeKey: { type: String, required: true, unique: true },
