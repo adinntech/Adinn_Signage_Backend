@@ -51,6 +51,8 @@ beforeAll(async () => {
   process.env.NODE_ENV = 'test';
   process.env.MONGODB_URI = mongod.getUri();
   process.env.JWT_ACCESS_SECRET = 'test-secret-test-secret-test-secret-123';
+  process.env.ROUTING_URL = ''; // no network in tests: distances fall back to the straight-line estimate
+  process.env.GEOCODER_URL = '';
   const db = await import('../src/config/db');
   disconnectDb = db.disconnectDb;
   await db.connectDb();
@@ -175,27 +177,28 @@ describe('shop allocation', () => {
     expect(applied.body.data.overview.unassigned).toBe(0);
   });
 
-  it('plans the in-house days and pushes the km into the cost comparison', async () => {
+  it('plans the in-house days as round trips from the start point', async () => {
     const it = await api().get(`${A()}/itinerary?shopsPerDay=1`).set(as('OPS'));
     expect(it.status).toBe(200);
     expect(it.body.data.totalShops).toBeGreaterThan(0);
     expect(it.body.data.days.length).toBe(it.body.data.totalShops);
     expect(it.body.data.estimate.days).toBe(it.body.data.days.length);
-    const applied = await api().post(`${A()}/itinerary/apply-to-cost`).set(as('OPS')).send({ shopsPerDay: 1 });
-    expect(applied.status).toBe(200);
-    const cost = await api().get(`/api/v1/projects/${projectId}/cost`).set(as('OPS'));
-    expect(cost.body.data.saved).toBe(true);
-    expect(cost.body.data.plan.totalKm).toBe(it.body.data.totalKm);
-    expect(cost.body.data.plan.shopsCovered).toBe(it.body.data.totalShops);
+    expect(it.body.data.estimate.fuel).toBe(Math.round(it.body.data.totalKm * 3));
+    expect(it.body.data.days[0].googleUrl).toContain('https://www.google.com/maps/dir/');
   });
 
-  it('prices the cost plan with a registered vendor rate card', async () => {
-    const r = await api().put(`/api/v1/projects/${projectId}/cost`).set(as('OPS')).send({ shops: 6, vendorId: orgId, vendorDistanceKm: 10 });
+  it('prices an area with a registered vendor\'s own rate card', async () => {
+    const district = 'Madurai';
+    const plan = await api().post(`/api/v1/projects/${projectId}/cost/sync`).set(as('OPS'));
+    expect(plan.status).toBe(200);
+    const leg = plan.body.data.plan.legs.find((l: { name: string }) => l.name === district);
+    const r = await api().put(`/api/v1/projects/${projectId}/cost`).set(as('OPS')).send({ legs: [{ key: leg.key, name: leg.name, district, shops: leg.shops, distanceKm: 10, channel: 'VENDOR', vendorId: orgId }] });
     expect(r.status).toBe(200);
-    expect(r.body.data.plan.vendorName).toBe('SRN Media Pvt Ltd');
-    expect(r.body.data.calc.vendor.perShopRate).toBe(220);
+    const saved = r.body.data.plan.legs[0];
+    expect(saved.vendorName).toBe('SRN Media Pvt Ltd');
+    expect(saved.calc.vendor.perShopRate).toBe(220);
     const pending = (await api().get('/api/v1/vendors?status=PENDING_KYC').set(as('OPS'))).body.data[0]._id;
-    expect((await api().put(`/api/v1/projects/${projectId}/cost`).set(as('OPS')).send({ shops: 6, vendorId: pending })).status).toBe(409);
+    expect((await api().put(`/api/v1/projects/${projectId}/cost`).set(as('OPS')).send({ legs: [{ key: leg.key, name: leg.name, district, shops: leg.shops, channel: 'VENDOR', vendorId: pending }] })).status).toBe(409);
   });
 
   it('is removed with the project, and the vendor survives', async () => {

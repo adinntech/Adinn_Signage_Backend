@@ -8,6 +8,12 @@ export const NOTIFICATION_KINDS = [
   'STAGE_CHANGED',
   'APPROVAL_CORRECTION',
   'PROJECT_CANCELLED',
+  /** A cost plan needs special approval, was decided, or an expense claim was submitted. */
+  'COST_APPROVAL',
+  /** The client rejected the cost, so the project moved to LOSS. */
+  'PROJECT_LOSS',
+  /** More shops were added to a job the recce person or vendor already has. */
+  'SHOPS_ADDED',
   /** Any other create / edit / delete on a project, sent to the people working on it. */
   'ACTIVITY',
   /** The same, for Super Admin: everything everyone does, in the app only. */

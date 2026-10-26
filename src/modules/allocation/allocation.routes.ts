@@ -21,7 +21,7 @@ const scopeSite = asyncHandler(async (req, _res, next) => {
 });
 
 // Operations / coordinators (verification:manage + sites:write) allocate; BD may look.
-const read = [authenticate, requireAnyPermission('verification:manage', 'sites:read'), scopeProj];
+const read = [authenticate, requireAnyPermission('verification:manage', 'projects:read'), scopeProj];
 const write = [authenticate, requirePermission('sites:write', 'verification:manage'), scopeProj];
 const P = '/projects/:projectId/allocation';
 
@@ -33,6 +33,6 @@ allocationRouter.put(`${P}/origin`, ...write, asyncHandler(async (req, res) => o
 allocationRouter.post(`${P}/assign`, ...write, asyncHandler(async (req, res) => ok(res, await svc.assign(pid(req), svc.assignBody.parse(req.body), actorOf(req)))));
 allocationRouter.post(`${P}/split/preview`, ...write, asyncHandler(async (req, res) => ok(res, await svc.previewSplit(pid(req), svc.splitBody.parse(req.body)))));
 allocationRouter.post(`${P}/split/apply`, ...write, asyncHandler(async (req, res) => ok(res, await svc.applySplit(pid(req), svc.applySplitBody.parse(req.body), actorOf(req)))));
+allocationRouter.post(`${P}/geocode`, ...write, asyncHandler(async (req, res) => ok(res, await svc.geocodeSites(pid(req), svc.geocodeBody.parse(req.body ?? {}), actorOf(req)))));
 allocationRouter.get(`${P}/itinerary`, ...read, asyncHandler(async (req, res) => ok(res, await svc.itinerary(pid(req), svc.itineraryQuery.parse(req.query)))));
-allocationRouter.post(`${P}/itinerary/apply-to-cost`, ...write, asyncHandler(async (req, res) => ok(res, await svc.applyItineraryToCost(pid(req), svc.itineraryQuery.parse(req.body ?? {}), actorOf(req)))));
 allocationRouter.put('/sites/:id/coords', authenticate, requirePermission('sites:write', 'verification:manage'), scopeSite, asyncHandler(async (req, res) => ok(res, await svc.setSiteCoords(String(req.params.id), svc.coordsBody.parse(req.body), actorOf(req)))));

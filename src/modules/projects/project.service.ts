@@ -14,7 +14,7 @@ import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import { SurveyArea } from './surveyArea.model';
 import { PROJECT_STATUSES, Project, Requirement, type RequirementType } from './project.model';
-import type { assignBody, projectCreate, projectListQuery, projectPatch, requirementBody, stageBody } from './project.validators';
+import type { additionalShopsBody, assignBody, projectCreate, projectListQuery, projectPatch, requirementBody, stageBody } from './project.validators';
 
 const POPULATE_CLIENT = { path: 'client', select: 'name code' };
 const POPULATE_USERS = [
@@ -62,7 +62,7 @@ async function notifyProject(p: { _id: Types.ObjectId; code: string; client: unk
 }
 
 /** Tells the new owner (and the previous one, if the project moved) about an assignment. Email + in-app, stored per person. */
-async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor) {
+async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS') {
   const [client, by] = await Promise.all([Client.findById(p.client).select('name').lean(), User.findById(actor.id).select('name').lean()]);
   const when = p.assignedAt!.getTime();
   const shops = p.requirementType === 'ASO' ? 'Shop count unknown (ASO survey)' : p.expectedShops ? `${p.expectedShops} shops` : '';
@@ -72,8 +72,8 @@ async function notifyAssignment(p: InstanceType<typeof Project>, previous: strin
   await notifyProject(p, {
     kind: 'PROJECT_ASSIGNED',
     recipients: [String(p.assignedTo)],
-    title: 'New Project Assigned',
-    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.`,
+    title: assigneeRole === 'RECCE_EXECUTIVE' ? 'New Recce Job Assigned' : 'New Project Assigned',
+    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.${assigneeRole === 'RECCE_EXECUTIVE' ? ' Go to the area and add each shop\'s details as you reach it.' : ''}`,
     dedupe: (r) => `assigned:${id}:${r}:${when}`,
     actor,
   });
@@ -168,7 +168,7 @@ export async function listProjects(q: z.infer<typeof projectListQuery>, actor: A
   if (q.assigned === 'false') filter.assignedTo = null;
   if (q.overdue) Object.assign(filter, overdueFilter());
   // ANDed with everything above, so no query parameter (assigned, assigneeId) can widen what an Operations user may see.
-  const scope = projectScope(actor);
+  const scope = await projectScope(actor);
   if (Object.keys(scope).length) filter.$and = [scope];
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
@@ -189,12 +189,12 @@ export async function listProjects(q: z.infer<typeof projectListQuery>, actor: A
 
 export async function projectSummary(actor: Actor) {
   const rows = await Project.aggregate<{ _id: string; n: number }>([
-    { $match: { deletedAt: null, ...projectScope(actor) } },
+    { $match: { deletedAt: null, ...(await projectScope(actor)) } },
     { $group: { _id: '$status', n: { $sum: 1 } } },
   ]);
   const byStatus = Object.fromEntries(PROJECT_STATUSES.map((s) => [s, 0])) as Record<string, number>;
   for (const r of rows) byStatus[r._id] = r.n;
-  const overdue = await Project.countDocuments({ deletedAt: null, ...projectScope(actor), ...overdueFilter() } as Record<string, unknown>);
+  const overdue = await Project.countDocuments({ deletedAt: null, ...(await projectScope(actor)), ...overdueFilter() } as Record<string, unknown>);
   return { total: Object.values(byStatus).reduce((a, b) => a + b, 0), newRequests: byStatus.NEW ?? 0, overdue, byStatus };
 }
 
@@ -246,6 +246,9 @@ export async function changeStatus(id: string, status: string, reason: string | 
   if (status === 'CANCELLED' && p.assignedTo) {
     await notifyProject(p, { kind: 'PROJECT_CANCELLED', recipients: [p.assignedTo], title: `Project ${p.code} was cancelled`, body: `BD cancelled project ${p.code}${reason ? `: ${reason}` : '.'} No further work is needed.`, dedupe: (r) => `cancelled:${id}:${r}`, actor });
   }
+  if (status === 'LOSS') {
+    await notifyProject(p, { kind: 'PROJECT_LOSS', recipients: [p.assignedTo, p.owner ?? p.createdBy], title: `Project ${p.code} moved to LOSS`, body: `The client rejected the cost for ${p.code}${reason ? `: ${reason}` : '.'} No further work is needed.`, dedupe: (r) => `loss:${id}:${r}`, actor });
+  }
   return getProject(id);
 }
 
@@ -267,7 +270,8 @@ export async function deleteProject(id: string, actor: Actor) {
 /* ------------------------- BD -> Operations assignment ------------------------- */
 
 export async function listAssignees() {
-  const users = await User.find({ role: { $in: ['OPERATIONS', 'RECCE_COORDINATOR'] }, isActive: true, deletedAt: null }).select('name role email phone').sort({ name: 1 }).lean();
+  // Recce executives are listed too: an ASO project can be given straight to them (the web app shows them only for ASO).
+  const users = await User.find({ role: { $in: ['OPERATIONS', 'RECCE_COORDINATOR', 'RECCE_EXECUTIVE'] }, isActive: true, deletedAt: null }).select('name role email phone').sort({ name: 1 }).lean();
   return users.map((u) => ({ id: String(u._id), name: u.name, role: u.role, email: u.email, phone: u.phone ?? null }));
 }
 
@@ -289,8 +293,10 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   if (['CANCELLED', 'COMPLETED', 'CLIENT_APPROVAL', 'IN_PROGRESS'].includes(p.status)) throw AppError.conflict(`A ${p.status.toLowerCase().replace('_', ' ')} project cannot be (re)assigned`);
   const missing = missingForAssignment(p);
   if (missing.length) throw new AppError(422, 'VALIDATION_ERROR', `Complete the project before assigning: ${missing.join(', ')}`, missing.map((m) => ({ path: m, message: `Missing ${m}` })));
-  const assignee = await User.findOne({ _id: body.assigneeId, isActive: true, deletedAt: null, role: { $in: ['OPERATIONS', 'RECCE_COORDINATOR'] } }).select('name role').lean();
-  if (!assignee) throw AppError.badRequest('Choose an active Operations or Recce Coordinator user');
+  // An ASO survey has no shop list, so it can go straight to a recce executive on the mobile app.
+  const roles = p.requirementType === 'ASO' ? ['OPERATIONS', 'RECCE_COORDINATOR', 'RECCE_EXECUTIVE'] : ['OPERATIONS', 'RECCE_COORDINATOR'];
+  const assignee = await User.findOne({ _id: body.assigneeId, isActive: true, deletedAt: null, role: { $in: roles as never } }).select('name role').lean();
+  if (!assignee) throw AppError.badRequest(p.requirementType === 'ASO' ? 'Choose an active Operations, Recce Coordinator or Recce executive user' : 'Choose an active Operations or Recce Coordinator user');
 
   const previous = p.assignedTo ? String(p.assignedTo) : null;
   if (previous === body.assigneeId) return getProject(id); // idempotent: no duplicate notification
@@ -301,7 +307,7 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   await p.save();
   await recordAudit({ actor, action: 'ASSIGN', entity: 'Project', entityId: id, project: id, changes: [{ field: 'assignedTo', oldValue: previous, newValue: body.assigneeId }], reason: `Assigned to ${assignee.name}` });
   await systemMessage(id, `Assigned to ${assignee.name} (${assignee.role.toLowerCase().replace('_', ' ')})`, actor);
-  await notifyAssignment(p, previous, assignee.name, actor);
+  await notifyAssignment(p, previous, assignee.name, actor, assignee.role);
   return getProject(id);
 }
 
@@ -320,6 +326,10 @@ export async function advanceStage(id: string, body: z.infer<typeof stageBody>, 
       if (!sites && !(await SurveyArea.countDocuments({ project: id }))) throw AppError.conflict('Record at least one survey area (or shop) before starting the recce');
     } else {
       if (!sites) throw AppError.conflict('Import or add shops before starting the recce');
+      if (p.requirementType === 'SHOP_DETAILS') {
+        const unverified = await Site.countDocuments({ project: id, deletedAt: null, opsApproval: { $ne: 'APPROVED' } });
+        if (unverified) throw AppError.conflict(`${unverified} shop(s) are not verified yet. Verify the shop details before starting the recce`);
+      }
       if (p.requirementType === 'SHOP_MEASUREMENT') {
         const pending = await Site.countDocuments({ project: id, deletedAt: null, $or: [{ opsApproval: { $ne: 'APPROVED' } }, { bdApproval: { $ne: 'APPROVED' } }] });
         if (pending) throw AppError.conflict(`${pending} shop(s) still need both approvals (Operations and BD) before the recce can start`);
@@ -362,7 +372,7 @@ export const projectHistory = (id: string) => listAudit({ project: new Types.Obj
 export async function recentActivity(actor: Actor, limit = 8) {
   const logs = await listAudit({ entity: { $in: ['Project', 'FileAsset', 'ImportBatch'] } }, 40);
   const ids = [...new Set(logs.map((l) => (l.project ? String(l.project) : '')).filter(Boolean))];
-  const projects = await Project.find({ _id: { $in: ids }, deletedAt: null, ...projectScope(actor) }).populate<{ client: { name: string } }>('client', 'name').select('code client').lean();
+  const projects = await Project.find({ _id: { $in: ids }, deletedAt: null, ...(await projectScope(actor)) }).populate<{ client: { name: string } }>('client', 'name').select('code client').lean();
   const byId = new Map(projects.map((p) => [String(p._id), p]));
   const text = (l: (typeof logs)[number]) =>
     l.action === 'CREATE' ? 'Project created'
@@ -379,4 +389,20 @@ export async function recentActivity(actor: Actor, limit = 8) {
       const p = byId.get(String(l.project))!;
       return { id: String(l._id), at: l.at, text: text(l), by: (l.user as unknown as { name?: string } | null)?.name ?? '', projectId: String(p._id), code: p.code, client: p.client?.name ?? '' };
     });
+}
+
+/** Shops found beyond the client's list (details-only and measurement projects). Raises the total expected shop count. */
+export async function setAdditionalShops(id: string, body: z.infer<typeof additionalShopsBody>, actor: Actor) {
+  const p = await Project.findOne({ _id: id, deletedAt: null });
+  if (!p) throw AppError.notFound('Project not found');
+  if (p.requirementType === 'ASO') throw AppError.badRequest('ASO projects have no fixed shop count, so there is nothing to add to');
+  if (p.status === 'CANCELLED') throw AppError.conflict('This project is cancelled');
+  const old = p.additionalShops ?? 0;
+  p.set({ additionalShops: body.count, additionalShopsNote: body.note, updatedBy: actor.id });
+  await p.save();
+  await recordAudit({
+    actor, action: 'UPDATE', entity: 'Project', entityId: id, project: id,
+    changes: [{ field: 'additionalShops', oldValue: old, newValue: body.count }], reason: body.note ?? `Additional shops: ${body.count}`,
+  });
+  return getProject(id);
 }

@@ -43,6 +43,15 @@ const schema = z
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
     /** Public URL of the web CRM, used for links inside notification emails. */
     WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
+    /** Map services for shop allocation. Both are open services that need no key; point them at your own server if you host one. Empty disables the lookup. */
+    ROUTING_URL: z.string().default('https://router.project-osrm.org'),
+    GEOCODER_URL: z.string().default('https://nominatim.openstreetmap.org'),
+    /** Sent with every map lookup (the open services ask for an identifying name and contact). */
+    MAPS_USER_AGENT: z.string().default('AdinnSignageRecceCRM/1.0'),
+    /** Optional. With a Google Maps Platform key (Geocoding API + Routes API enabled) addresses and routes come from Google instead of the open services. Keep it on the backend only. */
+    GOOGLE_MAPS_API_KEY: z.string().default(''),
+    /** Route type used with the Google key. TWO_WHEELER matches a recce person on a bike. */
+    GOOGLE_TRAVEL_MODE: z.enum(['TWO_WHEELER', 'DRIVE']).default('TWO_WHEELER'),
     /** Email notifications. Leave SMTP_HOST empty to keep notifications in-app only (deliveries are recorded as SKIPPED). */
     /** Browser push (Chrome/Edge/Firefox) for people who have allowed notifications. Generate with `npx web-push generate-vapid-keys`. */
     VAPID_PUBLIC_KEY: optional,
@@ -103,6 +112,8 @@ export const env = {
   isProd: parsed.data.NODE_ENV === 'production',
   /** `production` is accepted as an alias for `space`. */
   storage: parsed.data.STORAGE_TYPE === 'local' ? ('local' as const) : ('space' as const),
+  routingUrl: parsed.data.ROUTING_URL.replace(/\/+$/, ''),
+  geocoderUrl: parsed.data.GEOCODER_URL.replace(/\/+$/, ''),
   publicBaseUrl: parsed.data.PUBLIC_BASE_URL.replace(/\/+$/, ''),
   webBaseUrl: parsed.data.WEB_BASE_URL.replace(/\/+$/, ''),
   /** Email is sent only when an SMTP server and a From address are configured. */

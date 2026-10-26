@@ -13,7 +13,7 @@ const userSchema = new Schema(
     passwordHash: { type: String, select: false },
     role: { type: String, enum: ROLES, required: true, index: true },
     isActive: { type: Boolean, default: true },
-    vendorId: { type: Schema.Types.ObjectId, index: true }, // set for VENDOR users (Phase 10)
+    vendorId: { type: Schema.Types.ObjectId, index: true }, // the vendor company a VENDOR login belongs to; sees only that vendor's shops
     failedLogins: { type: Number, default: 0 },
     lockedUntil: Date,
     lastLoginAt: Date,
@@ -33,6 +33,7 @@ export const toPublicUser = (u: UserDoc) => ({
   employeeId: u.employeeId ?? null,
   phone: u.phone ?? null,
   role: u.role,
+  vendorId: u.vendorId ? String(u.vendorId) : null,
   isActive: u.isActive,
   authMethod: u.authMethod ?? 'PASSWORD',
   lastLoginAt: u.lastLoginAt ?? null,

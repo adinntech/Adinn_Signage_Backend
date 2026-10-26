@@ -58,6 +58,7 @@ export function checkVendor(raw: Partial<VendorInput>): { value: Partial<VendorI
   if (raw.gstin) { const g = raw.gstin.toUpperCase().replace(/\s/g, ''); if (GST_RE.test(g)) v.gstin = g; else errors.push({ field: 'gstin', message: `Invalid GST number "${raw.gstin}"` }); }
   if (raw.pan) { const p = raw.pan.toUpperCase().replace(/\s/g, ''); if (PAN_RE.test(p)) v.pan = p; else errors.push({ field: 'pan', message: `Invalid PAN "${raw.pan}"` }); }
   if (raw.bank?.ifsc) { const i = raw.bank.ifsc.toUpperCase().replace(/\s/g, ''); if (IFSC_RE.test(i)) v.bank = { ...raw.bank, ifsc: i }; else errors.push({ field: 'bank.ifsc', message: 'Invalid IFSC code' }); }
+  if (raw.bank?.accountNo && !/^\d{9,18}$/.test(raw.bank.accountNo)) errors.push({ field: 'bank.accountNo', message: 'Account number must be 9 to 18 digits' });
   if (raw.ratePerShop != null && raw.farRatePerShop != null && raw.farRatePerShop < raw.ratePerShop) errors.push({ field: 'farRatePerShop', message: 'Far rate cannot be lower than the normal rate' });
   return { value: v, errors };
 }

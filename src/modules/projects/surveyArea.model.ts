@@ -7,6 +7,10 @@ const surveyAreaSchema = new Schema(
     area: { type: String, required: true, trim: true },
     areaKey: { type: String, required: true }, // normalised name, used for the duplicate check
     notes: String,
+    /** Where to go: the location or the approximate shop BD (or Operations) gives the recce person, e.g. "Near Theppakulam, Madurai". */
+    address: String,
+    /** BD's rough idea of how many shops are there. shopsFound is what the recce person actually finds. */
+    approxShops: { type: Number, min: 0 },
     shopsFound: { type: Number, default: 0, min: 0 },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },

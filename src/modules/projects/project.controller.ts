@@ -3,7 +3,7 @@ import { actorOf } from '../../common/query';
 import { projectNotificationLog } from '../notifications/notification.service';
 import * as s from './project.service';
 import * as areaSvc from './surveyArea.service';
-import { assignBody, projectCreate, projectListQuery, projectPatch, requirementBody, stageBody, statusBody } from './project.validators';
+import { additionalShopsBody, assignBody, projectCreate, projectListQuery, projectPatch, requirementBody, stageBody, statusBody } from './project.validators';
 
 const id = (req: { params: Record<string, string | string[] | undefined> }) => String(req.params.id);
 
@@ -57,3 +57,5 @@ export const notificationLog = asyncHandler(async (req, res) => {
   await s.getProject(id(req));
   ok(res, await projectNotificationLog(id(req)));
 });
+
+export const additionalShops = asyncHandler(async (req, res) => ok(res, await s.setAdditionalShops(id(req), additionalShopsBody.parse(req.body), actorOf(req))));

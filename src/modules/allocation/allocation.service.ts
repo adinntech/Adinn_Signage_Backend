@@ -4,13 +4,14 @@ import { AppError } from '../../common/errors';
 import { assertNotCancelled } from '../../common/project-access';
 import { escapeRegex, objectId, pageMeta, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { getPlan, getPolicy, savePlan } from '../costing/costing.service';
-import { travelCost } from '../costing/costing.calc';
-import { CostPlan } from '../costing/costing.model';
+import { getPolicy } from '../costing/costing.service';
 import { Project } from '../projects/project.model';
 import { Site } from '../sites/site.model';
 import { Vendor } from '../vendors/vendor.model';
-import { buildItinerary, hasCoords, roadKm, splitSites, type LatLng, type SplitBy } from './allocation.geo';
+import { hasCoords, roadKm, splitSites, type LatLng, type SplitBy } from './allocation.geo';
+import { geocode } from './allocation.maps';
+import { notifyNewShops } from './allocation.notify';
+import { planRoute } from './allocation.route';
 
 const coord = (name: string, max: number) => z.coerce.number().min(-max, `${name} is out of range`).max(max, `${name} is out of range`);
 export const originBody = z.object({ name: z.string().trim().max(120).optional(), lat: coord('Latitude', 90), lng: coord('Longitude', 180) });
@@ -37,7 +38,8 @@ export const splitBody = z.object({
   onlyUnassigned: z.boolean().default(true),
 });
 export const applySplitBody = z.object({ groups: z.array(z.object({ vendorId: objectId.nullable(), siteIds: z.array(objectId).min(1) })).min(1).max(100) });
-export const itineraryQuery = z.object({ shopsPerDay: z.coerce.number().int().min(1).max(60).default(12) });
+export const itineraryQuery = z.object({ shopsPerDay: z.coerce.number().int().min(1).max(60).default(8) });
+export const geocodeBody = z.object({ limit: z.coerce.number().int().min(1).max(40).default(12), onlyMissing: z.boolean().default(true) });
 
 async function requireProject(projectId: string) {
   const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('code originName originLat originLng status').lean();
@@ -46,8 +48,8 @@ async function requireProject(projectId: string) {
 }
 const originOf = (p: { originLat?: number | null; originLng?: number | null }): LatLng | null => (hasCoords({ lat: p.originLat, lng: p.originLng }) ? { lat: p.originLat as number, lng: p.originLng as number } : null);
 
-interface Row { _id: Types.ObjectId; seq: number; siteCode: string; shopName?: string; dealerName?: string; location?: string; district?: string; mobile?: string; lat?: number | null; lng?: number | null; channel?: string; vendor?: Types.ObjectId | null }
-const LIGHT = 'seq siteCode shopName dealerName location district mobile lat lng channel vendor';
+interface Row { _id: Types.ObjectId; seq: number; siteCode: string; shopName?: string; dealerName?: string; location?: string; district?: string; mobile?: string; address1?: string; address2?: string; address3?: string; pincode?: string; geoQuality?: string; lat?: number | null; lng?: number | null; channel?: string; vendor?: Types.ObjectId | null }
+const LIGHT = 'seq siteCode shopName dealerName location district mobile address1 address2 address3 pincode geoQuality lat lng channel vendor';
 
 async function loadSites(projectId: string, extra: Record<string, unknown> = {}) {
   return Site.find({ project: projectId, deletedAt: null, ...extra }).select(LIGHT).sort({ seq: 1 }).limit(20000).lean<Row[]>();
@@ -66,7 +68,7 @@ export async function setSiteCoords(siteId: string, body: z.infer<typeof coordsB
   const s = await Site.findOne({ _id: siteId, deletedAt: null });
   if (!s) throw AppError.notFound('Shop not found');
   await assertNotCancelled(s.project);
-  if (body.lat === null) { s.set({ lat: undefined, lng: undefined }); } else { s.set({ lat: body.lat, lng: body.lng }); }
+  if (body.lat === null) { s.set({ lat: undefined, lng: undefined, geoQuality: undefined }); } else { s.set({ lat: body.lat, lng: body.lng, geoQuality: 'MANUAL' }); }
   await s.save();
   await recordAudit({ actor, action: 'UPDATE', entity: 'Site', entityId: s._id, project: s.project, changes: [{ field: 'location', oldValue: null, newValue: body.lat === null ? null : `${body.lat}, ${body.lng}` }] });
   return { _id: s._id, lat: s.lat ?? null, lng: s.lng ?? null };
@@ -146,10 +148,14 @@ export async function assign(projectId: string, body: z.infer<typeof assignBody>
   await assertNotCancelled(projectId);
   const vendor = body.channel === 'VENDOR' ? await assertActiveVendor(body.vendorId as string) : null;
   const filter = { project: projectId, deletedAt: null, _id: { $in: body.siteIds } };
+  // Shops that are new to this team or vendor (those already theirs are not news).
+  const fresh = body.channel === 'NONE' ? 0 : await Site.countDocuments({ ...filter, ...(body.channel === 'VENDOR' ? { $or: [{ channel: { $ne: 'VENDOR' } }, { vendor: { $ne: new Types.ObjectId(body.vendorId as string) } }] } : { channel: { $ne: 'IN_HOUSE' } }) });
   const set = body.channel === 'NONE'
     ? { $unset: { channel: 1, vendor: 1, allocatedAt: 1, allocatedBy: 1 } }
     : { $set: { channel: body.channel, allocatedAt: new Date(), allocatedBy: actor.id, ...(vendor ? { vendor: body.vendorId } : {}) }, ...(body.channel === 'IN_HOUSE' ? { $unset: { vendor: 1 } } : {}) };
   const r = await Site.updateMany(filter, set);
+  if (body.channel === 'VENDOR') await notifyNewShops(projectId, { kind: 'VENDOR', vendorId: body.vendorId as string }, fresh, actor);
+  else if (body.channel === 'IN_HOUSE') await notifyNewShops(projectId, { kind: 'IN_HOUSE' }, fresh, actor);
   await recordAudit({ actor, action: 'ALLOCATE', entity: 'Project', entityId: projectId, project: projectId, reason: `${r.modifiedCount} shop(s) → ${body.channel === 'VENDOR' ? vendor?.name : body.channel === 'IN_HOUSE' ? 'in-house team' : 'unassigned'}` });
   return { affected: r.modifiedCount, overview: await getOverview(projectId) };
 }
@@ -185,42 +191,57 @@ export async function applySplit(projectId: string, body: z.infer<typeof applySp
   return { affected, overview: await getOverview(projectId) };
 }
 
-/** Day-wise route for the in-house team's shops, with the km and cost it implies. */
+/**
+ * Looks up the map position of shops that have none, from their address, area and pincode. The free address service allows
+ * about one request a second, so this works through a few shops per call and the screen calls it again until none are left.
+ */
+export async function geocodeSites(projectId: string, body: z.infer<typeof geocodeBody>, actor: Actor) {
+  await requireProject(projectId);
+  await assertNotCancelled(projectId);
+  const rows = (await loadSites(projectId)).filter((s) => !hasCoords(s));
+  const batch = rows.slice(0, body.limit);
+  const pause = () => new Promise<void>((r) => setTimeout(r, process.env.NODE_ENV === 'test' ? 0 : 1100));
+  let found = 0;
+  const notFound: { id: Types.ObjectId; name: string }[] = [];
+  let unavailable = false;
+  for (const s of batch) {
+    let hit = null;
+    try {
+      hit = await geocode({ address: [s.address1, s.address2].filter(Boolean).join(', '), area: s.location ?? s.address3, district: s.district, pincode: s.pincode }, pause);
+    } catch {
+      unavailable = true;
+      break;
+    }
+    if (hit) {
+      await Site.updateOne({ _id: s._id }, { lat: hit.lat, lng: hit.lng, geoQuality: hit.quality });
+      found++;
+    } else notFound.push({ id: s._id, name: s.shopName || s.dealerName || s.siteCode });
+    await pause();
+  }
+  if (found) await recordAudit({ actor, action: 'GEOCODE', entity: 'Project', entityId: projectId, project: projectId, reason: `${found} shop(s) located from their address` });
+  return { tried: batch.length, found, notFound, remaining: Math.max(0, rows.length - found - notFound.length), unavailable };
+}
+
+/** Day-wise round trips for the in-house team's shops (see planRoute for how the distance is found). */
 export async function itinerary(projectId: string, q: z.infer<typeof itineraryQuery>) {
   const project = await requireProject(projectId);
   const origin = originOf(project);
   if (!origin) throw AppError.conflict('Set the start point (office / hub) on the map first');
   const sites = await loadSites(projectId, { channel: 'IN_HOUSE' });
   const located = sites.filter(hasCoords) as (Row & LatLng)[];
-  const plan = buildItinerary(origin, located, q.shopsPerDay);
-  const rates = (await getPlan(projectId)).rates ?? (await getPolicy());
-  const days = plan.days.length;
-  const nights = Math.max(0, days - 1);
-  const travel = travelCost(plan.totalKm, rates);
-  const food = days * rates.foodPerDay;
-  const stay = nights * rates.stayPerNight;
+  const rates = await getPolicy();
+  const route = await planRoute(origin, located, q.shopsPerDay);
+  const food = route.days.length * rates.foodPerDay;
+  const fuel = Math.round(route.totalKm * rates.fuelRatePerKm);
   return {
     origin: { name: project.originName ?? 'Start point', ...origin },
     shopsPerDay: q.shopsPerDay,
     totalShops: located.length,
     withoutCoords: sites.length - located.length,
-    days: plan.days.map((d) => ({ day: d.day, km: d.km, stops: d.stops.map((s) => ({ id: s.stop._id, name: s.stop.shopName || s.stop.dealerName || s.stop.siteCode, district: s.stop.district ?? null, lat: s.stop.lat, lng: s.stop.lng, legKm: s.legKm })) })),
-    totalKm: plan.totalKm,
-    estimate: { days, nights, food, stay, travel: travel.amount, total: Math.round(food + stay + travel.amount) },
+    roadDistance: route.roadDistance,
+    days: route.days,
+    totalKm: route.totalKm,
+    // Every day is a round trip from the start point, so no night stays are assumed; the cost plan has the real trip dates.
+    estimate: { days: route.days.length, nights: 0, food, stay: 0, fuel, total: food + fuel },
   };
-}
-
-/** Puts the itinerary's days, nights, km and shops into the project's cost comparison. */
-export async function applyItineraryToCost(projectId: string, q: z.infer<typeof itineraryQuery>, actor: Actor) {
-  const it = await itinerary(projectId, q);
-  if (!it.totalShops) throw AppError.conflict('No in-house shops with a map position yet');
-  const existing = await CostPlan.findOne({ project: projectId }).lean();
-  const project = await Project.findById(projectId).select('expectedShops additionalShops siteCount').lean();
-  const shops = existing?.shops ?? ((project?.expectedShops ?? 0) + (project?.additionalShops ?? 0) || project?.siteCount || it.totalShops);
-  await savePlan(projectId, {
-    shops, shopsCovered: it.totalShops, vendorDistanceKm: existing?.vendorDistanceKm ?? 0, vendorOther: existing?.vendorOther ?? 0,
-    days: it.estimate.days, nights: it.estimate.nights, totalKm: it.totalKm, fuelAmount: existing?.fuelAmount ?? 0, otherAmount: existing?.otherAmount ?? 0, clientsShared: existing?.clientsShared ?? 1,
-    ...(existing?.vendorType ? { vendorType: existing.vendorType } : {}), ...(existing?.vendorName ? { vendorName: existing.vendorName } : {}), ...(existing?.vendor ? { vendorId: String(existing.vendor) } : {}),
-  }, actor);
-  return it;
 }

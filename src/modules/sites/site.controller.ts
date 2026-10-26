@@ -57,6 +57,7 @@ export const uploadSheet = asyncHandler(async (req, res) => {
   checkContent(req.file);
   ok(res, await imp.uploadSheet(p(req), req.file, actorOf(req)), undefined, 201);
 });
+export const extractFromFile = asyncHandler(async (req, res) => ok(res, await imp.uploadFromProjectFile(p(req), v.fromFileBody.parse(req.body).fileId, actorOf(req)), undefined, 201));
 export const getImport = asyncHandler(async (req, res) => ok(res, await imp.getImport(p(req), p(req, 'batchId'))));
 export const preview = asyncHandler(async (req, res) => ok(res, await imp.previewImport(p(req), p(req, 'batchId'), v.previewBody.parse(req.body))));
 export const rows = asyncHandler(async (req, res) => {

@@ -23,7 +23,7 @@ const scopeExpense = asyncHandler(async (req, _res, next) => {
 const P = '/projects/:projectId/expenses';
 export const expenseRouter = Router();
 // The mobile app (field:execute) submits claims; Operations may enter one for the team; Finance / Admin review them.
-expenseRouter.get(P, authenticate, requireAnyPermission('sites:read', 'finance:manage'), scopeProj, asyncHandler(async (req, res) => ok(res, await svc.listExpenses(pid(req)))));
+expenseRouter.get(P, authenticate, requireAnyPermission('projects:read', 'finance:manage'), scopeProj, asyncHandler(async (req, res) => ok(res, await svc.listExpenses(pid(req)))));
 expenseRouter.post(P, authenticate, requireAnyPermission('field:execute', 'sites:write'), scopeProj, asyncHandler(async (req, res) => ok(res, await svc.createExpense(pid(req), svc.expenseBody.parse(req.body), actorOf(req)), undefined, 201)));
 expenseRouter.post('/expenses/:id/review', authenticate, requirePermission('finance:manage'), scopeExpense, asyncHandler(async (req, res) => ok(res, await svc.reviewExpense(String(req.params.id), svc.reviewBody.parse(req.body), actorOf(req)))));
 expenseRouter.delete('/expenses/:id', authenticate, requireAnyPermission('field:execute', 'sites:write', 'finance:manage'), scopeExpense, asyncHandler(async (req, res) => { await svc.deleteExpense(String(req.params.id), actorOf(req)); ok(res, { deleted: true }); }));

@@ -17,6 +17,7 @@ const siteSchema = new Schema(
     district: String,
     address1: String,
     address2: String,
+    address3: String,
     pincode: String,
     mobile: String,
     mobileAlt: String,
@@ -36,6 +37,20 @@ const siteSchema = new Schema(
     /** Two independent pre-recce approvals of the shop details / board measurement. */
     opsApproval: { type: String, enum: APPROVAL_STATES, default: 'PENDING' },
     bdApproval: { type: String, enum: APPROVAL_STATES, default: 'PENDING' },
+    /** Map position, used for distance and routes. Set by Operations in Shop Allocation. */
+    lat: Number,
+    lng: Number,
+    /** How the position was found: typed / clicked by a person, or looked up from the address. */
+    geoQuality: { type: String, enum: ['MANUAL', 'GPS', 'ADDRESS', 'AREA', 'PINCODE'] },
+    /** Who will do the recce: a vendor or the in-house team. Empty = not allocated yet. */
+    channel: { type: String, enum: ['VENDOR', 'IN_HOUSE'] },
+    vendor: { type: Schema.Types.ObjectId, ref: 'Vendor' },
+    allocatedAt: Date,
+    allocatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    opsApprovalAt: Date,
+    opsApprovalBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    bdApprovalAt: Date,
+    bdApprovalBy: { type: Schema.Types.ObjectId, ref: 'User' },
     approvalNote: String,
     approvalUpdatedAt: Date,
     approvalUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },

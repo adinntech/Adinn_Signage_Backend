@@ -6,6 +6,8 @@ import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import * as svc from './vendor.service';
+import { createUser, listVendorLogins } from '../users/user.service';
+import { createUserSchema } from '../users/user.validators';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -38,3 +40,11 @@ vendorRouter.patch('/:id', ...write, asyncHandler(async (req, res) => ok(res, aw
 vendorRouter.put('/:id/kyc', ...write, asyncHandler(async (req, res) => ok(res, await svc.setKyc(objectId.parse(req.params.id), svc.kycBody.parse(req.body), actorOf(req)))));
 vendorRouter.post('/:id/status', ...write, asyncHandler(async (req, res) => ok(res, await svc.setStatus(objectId.parse(req.params.id), svc.statusBody.parse(req.body), actorOf(req)))));
 vendorRouter.delete('/:id', ...write, asyncHandler(async (req, res) => { await svc.deleteVendor(objectId.parse(req.params.id), actorOf(req)); ok(res, { deleted: true }); }));
+
+// Logins of a vendor company (mobile app users). Created here so Operations can link them without the user-admin screen.
+vendorRouter.get('/:id/logins', ...read, asyncHandler(async (req, res) => ok(res, await listVendorLogins(objectId.parse(req.params.id)))));
+vendorRouter.post('/:id/logins', ...write, asyncHandler(async (req, res) => {
+  const id = objectId.parse(req.params.id);
+  await svc.getVendor(id);
+  ok(res, await createUser(createUserSchema.parse({ ...req.body, role: 'VENDOR', vendorId: id }), actorOf(req)), undefined, 201);
+}));

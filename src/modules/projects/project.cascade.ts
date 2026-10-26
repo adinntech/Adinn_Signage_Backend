@@ -5,6 +5,9 @@ import { CommunicationChannel, CommunicationMessage } from '../communications/co
 import { Notification } from '../notifications/notification.model';
 import { ImportBatch, ImportRow, Site } from '../sites/site.model';
 import { Requirement, Project } from './project.model';
+import { BoardOption } from '../boards/boardOption.model';
+import { CostPlan } from '../costing/costing.model';
+import { Expense } from '../expenses/expense.model';
 import { SurveyArea } from './surveyArea.model';
 
 /**
@@ -19,6 +22,9 @@ import { SurveyArea } from './surveyArea.model';
 export const PROJECT_OWNED: { name: string; model: Model<any>; field: string }[] = [
   { name: 'Shops', model: Site, field: 'project' },
   { name: 'Survey areas', model: SurveyArea, field: 'project' },
+  { name: 'Board options', model: BoardOption, field: 'project' },
+  { name: 'Cost plans', model: CostPlan, field: 'project' },
+  { name: 'Expense claims', model: Expense, field: 'project' },
   { name: 'Requirements', model: Requirement, field: 'project' },
   { name: 'Chat messages', model: CommunicationMessage, field: 'project' },
   { name: 'Chat channels', model: CommunicationChannel, field: 'project' },

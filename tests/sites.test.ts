@@ -152,7 +152,7 @@ describe('Scenario 2: 260-row client sheet', () => {
     expect(s.body.data.total).toBe(252);
     expect(s.body.data.districts.length).toBeGreaterThanOrEqual(5);
     expect((await api().get(`${base('s2')}?limit=1000`).set(as('BD'))).status).toBe(422);
-    expect((await api().get(`${base('s2')}`).set(as('RECCE_EXECUTIVE'))).status).toBe(403);
+    expect((await api().get(`${base('s2')}`).set(as('RECCE_EXECUTIVE'))).status).toBe(404); // not their project: it is not even revealed to them
   });
 
   it('revised sheet with policy=update changes existing sites without duplicating', async () => {

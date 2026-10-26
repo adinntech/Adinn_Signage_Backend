@@ -36,6 +36,10 @@ export const PERMISSIONS = [
   'ratecards:manage',
   // Client-side approval of shop details, measurements and board decisions (BD and Client Servicing).
   'approvals:client',
+  // Recce staff add and correct the shops of an ASO project assigned to them, one by one, while they are at each shop.
+  'sites:capture',
+  // See the projects assigned to you (and their shops) without the commercial side: documents, cost, approvals. Recce staff.
+  'jobs:read',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -48,7 +52,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',
     'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read',
   ],
-  RECCE_EXECUTIVE: ['dashboard:view', 'sites:read', 'field:execute'],
+  RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute'],
   VENDOR: ['dashboard:view', 'sites:read', 'field:execute'],
   OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read'],
   FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read'],

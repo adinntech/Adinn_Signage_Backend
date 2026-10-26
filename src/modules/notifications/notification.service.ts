@@ -11,7 +11,7 @@ import { pushAvailable, sendPush, subscriptionCount } from './push.service';
 import { Notification, type NotificationKind } from './notification.model';
 
 /** Kinds that need someone to act, so they are also emailed. The rest stay in the app to avoid inbox noise. */
-const EMAIL_KINDS = new Set<NotificationKind>(['PROJECT_ASSIGNED', 'PROJECT_REASSIGNED', 'PROJECT_CANCELLED', 'APPROVAL_CORRECTION']);
+const EMAIL_KINDS = new Set<NotificationKind>(['PROJECT_ASSIGNED', 'PROJECT_REASSIGNED', 'PROJECT_CANCELLED', 'PROJECT_LOSS', 'APPROVAL_CORRECTION']);
 const MAX_ATTEMPTS = 3;
 const OPS_ROLES = new Set(['OPERATIONS', 'RECCE_COORDINATOR']);
 
@@ -192,6 +192,9 @@ const WEB_KIND: Record<NotificationKind, string> = {
   STAGE_CHANGED: 'stage',
   APPROVAL_CORRECTION: 'approval',
   PROJECT_CANCELLED: 'cancelled',
+  COST_APPROVAL: 'approval',
+  PROJECT_LOSS: 'cancelled',
+  SHOPS_ADDED: 'imported',
   ACTIVITY: 'activity',
   ADMIN_ACTIVITY: 'activity',
 };

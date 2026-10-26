@@ -244,7 +244,7 @@ describe('BD -> Operations assignment', () => {
   it('lists assignees for BD only', async () => {
     const r = await api().get('/api/v1/projects/assignees').set(as('BD'));
     expect(r.status).toBe(200);
-    expect(r.body.data.map((u: { name: string }) => u.name).sort()).toEqual(['OPERATIONS', 'OPS1']);
+    expect(r.body.data.map((u: { name: string }) => u.name).sort()).toEqual(['OPERATIONS', 'OPS1', 'RECCE_EXECUTIVE']); // recce executives can take an ASO survey
     expect((await api().get('/api/v1/projects/assignees').set(as('OPERATIONS'))).status).toBe(403);
   });
 
@@ -298,6 +298,18 @@ describe('Operations stages', () => {
     expect(none.status).toBe(409);
     expect(none.body.error.message).toContain('shops');
     await addSite(id);
+    // Shop-details projects also need every shop verified (Operations approval); extra shops can be declared.
+    const unverified = await stage(id, 'IN_PROGRESS');
+    expect(unverified.status).toBe(409);
+    expect(unverified.body.error.message).toContain('verified');
+    const extra = await api().put(`/api/v1/projects/${id}/additional-shops`).set(as('OPERATIONS')).send({ count: 25, note: 'Found near the bus stand' });
+    expect(extra.body.data.additionalShops).toBe(25);
+    const verified = await api().post(`/api/v1/projects/${id}/sites/approve-all`).set(as('OPERATIONS')).send({ level: 'ops' });
+    expect(verified.body.data.approved).toBe(1);
+    const sum = await api().get(`/api/v1/projects/${id}/sites/approval-summary`).set(as('OPERATIONS'));
+    expect(sum.body.data.ops).toMatchObject({ approved: 1, pending: 0, total: 1 });
+    expect(sum.body.data.ops.lastBy).toBeTruthy();
+    expect(sum.body.data.bd).toMatchObject({ approved: 0, pending: 1 });
     expect((await stage(id, 'IN_PROGRESS')).body.data.status).toBe('IN_PROGRESS');
     expect((await stage(id, 'CLIENT_APPROVAL')).body.data.status).toBe('CLIENT_APPROVAL');
     expect((await stage(id, 'COMPLETED')).body.data.status).toBe('COMPLETED');

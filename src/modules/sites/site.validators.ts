@@ -7,12 +7,13 @@ const num = z.union([z.number(), z.string()]).optional();
 
 /** Raw (un-normalised) site fields; normalisation/validation happens in site.fields.normalise. */
 export const siteFields = z.object({
-  shopName: t(250), dealerName: t(250), location: t(250), district: t(250), address1: t(250), address2: t(250),
+  shopName: t(250), dealerName: t(250), location: t(250), district: t(250), address1: t(250), address2: t(250), address3: t(250),
   pincode: t(20), mobile: t(60), gstin: t(30), contactPerson: t(250), boardType: t(120), remarks: t(1000), clientSiteCode: t(120),
   width: num, height: num, quantity: num, unit: z.enum(UNITS).optional(), scenario: z.enum(SCENARIOS).optional(),
 });
 
-export const siteCreate = siteFields.extend({ allowDuplicate: z.boolean().default(false) });
+// lat / lng: the recce person's position when they add the shop on the spot.
+export const siteCreate = siteFields.extend({ allowDuplicate: z.boolean().default(false), lat: z.coerce.number().min(-90).max(90).optional(), lng: z.coerce.number().min(-180).max(180).optional() });
 export const sitePatch = siteFields;
 
 const bool = z.enum(['true', 'false']);
@@ -56,6 +57,7 @@ export const previewBody = z.object({
   defaultUnit: z.enum(UNITS).default('ft'),
   duplicatePolicy: z.enum(['skip', 'import', 'update']).default('skip'),
 });
+export const fromFileBody = z.object({ fileId: objectId });
 export const commitBody = z.object({ duplicatePolicy: z.enum(['skip', 'import', 'update']).optional() });
 export const rowListQuery = listQuery.extend({
   limit: z.coerce.number().int().min(1).max(200).default(50),

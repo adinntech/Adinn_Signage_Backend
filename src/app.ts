@@ -11,6 +11,12 @@ import { projectRouter } from './modules/projects/project.routes';
 import { communicationRouter } from './modules/communications/communication.routes';
 import { userRouter } from './modules/users/user.routes';
 import { siteRouter } from './modules/sites/site.routes';
+import { boardRouter } from './modules/boards/boardOption.routes';
+import { costRouter } from './modules/costing/costing.routes';
+import { expenseRouter } from './modules/expenses/expense.routes';
+import { vendorRouter } from './modules/vendors/vendor.routes';
+import { vendorJobsRouter } from './modules/vendor-jobs/vendorJobs.routes';
+import { allocationRouter } from './modules/allocation/allocation.routes';
 import { notificationRouter } from './modules/notifications/notification.routes';
 import { fileRouter } from './modules/files/file.routes';
 import { salesRouter } from './modules/sales/sales.routes';
@@ -49,6 +55,12 @@ export function createApp() {
   app.use('/api/v1/email-templates', templateRouter);
   app.use('/api/v1/rate-items', rateItemRouter);
   app.use('/api/v1', siteRouter);
+  app.use('/api/v1', boardRouter);
+  app.use('/api/v1', costRouter);
+  app.use('/api/v1', expenseRouter);
+  app.use('/api/v1/vendors', vendorRouter);
+  app.use('/api/v1/vendor', vendorJobsRouter);
+  app.use('/api/v1', allocationRouter);
   app.use('/api/v1', fileRouter);
 
   app.use(notFoundHandler);

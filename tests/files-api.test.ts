@@ -43,6 +43,9 @@ beforeAll(async () => {
   const p = await api().post('/api/v1/projects').set(as('BD')).send({ clientId: c.body.data._id, campaign: 'Files', requirement: { source: 'EMAIL', siteDataScenario: 'CLIENT_PROVIDED' } });
   projectId = p.body.data._id;
   projectCode = p.body.data.code;
+  // Recce staff work only on projects with in-house shops (or assigned to them), so give this project one.
+  const { Site } = await import('../src/modules/sites/site.model');
+  await Site.create({ project: projectId, siteCode: 'FILES-S001', seq: 1, scenario: 'MEASUREMENT_REQUIRED', shopName: 'Test shop', channel: 'IN_HOUSE' });
 });
 afterAll(async () => {
   await disconnectDb();
