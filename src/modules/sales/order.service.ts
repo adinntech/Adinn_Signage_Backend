@@ -14,7 +14,7 @@ import { ORDER_STAGES, SalesOrder, WITHOUT_ARRAYS, type OrderStage } from './sal
 import { revisionLabel } from '../ratecards/ratecard.model';
 import type { boardQuery, createOrderBody, orderListQuery, registerBody } from './sales.validators';
 
-const CLIENT_FIELDS = 'name clientNo code email industry address city district state pincode gstin contacts clientType status';
+const CLIENT_FIELDS = 'name clientName clientNo code email industry address city district state pincode gstin contacts clientType status';
 export const STAGE_LABELS: Record<OrderStage, string> = {
   NEW_ORDER: 'New Order',
   COMPANY_PROFILE: 'Company Profile',
@@ -34,9 +34,10 @@ export const pipelineLog = (actor: Actor, action: string, fromStage: string | nu
   notes,
 });
 
+/** 20261025ORD#1: India date + a counter that starts again at 1 every day. */
 async function nextOrderNo() {
-  const year = new Date().getFullYear();
-  return `ORD-${year}-${String(await nextSeq(`salesOrder:${year}`)).padStart(4, '0')}`;
+  const day = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).replaceAll('-', '');
+  return `${day}ORD#${await nextSeq(`salesOrder:${day}`)}`;
 }
 
 /** Existing BD ownership rule (same as projects): the BD who creates it owns it; others leave it unassigned. */
@@ -123,7 +124,7 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
   if (q.clientType) filter.clientType = q.clientType;
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
+    const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientName: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
     filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
   }
   const [rows, total] = await Promise.all([
@@ -132,7 +133,7 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
       .sort(parseSort(q.sort, ['createdAt', 'orderNo', 'updatedAt', 'handover.assignedAt'], '-createdAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
-      .populate('client', 'name clientNo city')
+      .populate('client', 'name clientName clientNo city')
       .populate('owner', 'name')
       .populate('csAssignee', 'name')
       .lean(),
@@ -332,21 +333,24 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
 /* ----------------------------------- files ----------------------------------- */
 
 /**
- * Signed link for any file shown on an order: comment attachments, approval proof, rate card PDFs, sent email
+ * Signed link for any file shown on an order: comment and requirement note attachments, approval proof, rate card PDFs, sent email
  * attachments, handover documents / shop list, and the Company Profile PDF shown in the email draft.
  */
 export async function orderFileUrl(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file')
+    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments requirementNotesArray.attachments onboardingPdf')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
   const all: (StoredFile | null | undefined)[] = [
+    o.onboardingPdf,
     ...(o.salescommentsArray ?? []).flatMap((c) => c.attachments ?? []),
+    ...(o.requirementNotesArray ?? []).flatMap((n) => n.attachments ?? []),
     ...(o.approvalDocumentsArray ?? []).map((d) => d.file),
     ...(o.rateCardArray ?? []).map((r) => r.pdf),
     o.rateCardPdf,
     ...(o.salesprofile ?? []).flatMap((e) => e.attachments ?? []),
     ...(o.handoverDocumentsArray ?? []).map((d) => d.file),
+    ...(o.handoverShopsArray ?? []).flatMap((s) => s.attachments ?? []),
   ];
   let file = all.find((f) => f && String(f.fileId) === fileId);
   if (!file) {

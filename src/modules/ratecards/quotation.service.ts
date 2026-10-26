@@ -18,8 +18,19 @@ import { RATE_UNIT_LABELS, revisionLabel } from './ratecard.model';
 import { masterRatesById } from './rateItem.service';
 import type { quotationBody } from './ratecard.validators';
 
-/** The rate card can be prepared and revised (negotiation) at any time; only a completed legacy client approval locks it. */
-const isEditable = (order: { approvalStatus?: string | null }) => order.approvalStatus !== 'COMPLETED';
+/**
+ * Why the rate card cannot be edited now (null = editable). A completed client approval always locks it. An order in
+ * Lead Management is edited only in Rate Card Preparation and Negotiation, while the lead is open.
+ */
+const lockedReason = (order: { approvalStatus?: string | null; lead?: { stage?: string | null; status?: string | null } | null }) => {
+  if (order.approvalStatus === 'COMPLETED') return 'Client approval is complete; the rate card is locked';
+  const l = order.lead;
+  if (!l) return null;
+  if (l.status === 'CLOSED') return 'This lead is closed. Reopen it to edit the rate card.';
+  if (l.stage !== 'RATE_CARD' && l.stage !== 'NEGOTIATION') return 'The rate card is edited in Rate Card Preparation and Negotiation. Move the lead back to change it.';
+  return null;
+};
+const isEditable = (order: Parameters<typeof lockedReason>[0]) => !lockedReason(order);
 
 /** ADINN's standard rate card terms (one per numbered row in the PDF). */
 export const DEFAULT_TERMS = `<ol>${[
@@ -38,9 +49,9 @@ export const DEFAULT_TERMS = `<ol>${[
   .map((t) => `<li>${t}</li>`)
   .join('')}</ol>`;
 
-/** ORD-2026-0001 -> ADINN/QTN/2026/0001 (stable across revisions). */
+/** 20261025ORD#1 -> ADINN/QTN/20261025/1, ORD-2026-0001 -> ADINN/QTN/2026/0001 (stable across revisions). */
 const quotationRefOf = (orderNo: string) => {
-  const m = /^ORD-(\d{4})-(\d+)$/.exec(orderNo);
+  const m = /^(\d{8})ORD#(\d+)$/.exec(orderNo) ?? /^ORD-(\d{4})-(\d+)$/.exec(orderNo);
   return m ? `ADINN/QTN/${m[1]}/${m[2]}` : `ADINN/QTN/${orderNo}`;
 };
 
@@ -158,6 +169,9 @@ export async function getQuotation(orderId: string, actor: Actor) {
     orderNo: order.orderNo,
     stage: order.stage,
     editable: isEditable(order),
+    lockedReason: lockedReason(order),
+    /** Lead stage (RATE_CARD / NEGOTIATION / ...) or null for an order outside Lead Management. */
+    leadStage: order.lead?.stage ?? null,
     quotationRef: quotationRefOf(order.orderNo),
     company: COMPANY,
     clientName: client.name,
@@ -184,7 +198,8 @@ export async function getQuotation(orderId: string, actor: Actor) {
  */
 export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor) {
   const { order, client } = await orderWithClient(orderId);
-  if (!isEditable(order)) throw AppError.conflict('Client approval is complete; the rate card is locked');
+  const locked = lockedReason(order);
+  if (locked) throw AppError.conflict(locked);
 
   // Copied lines must point at a real master item; the master rate snapshot comes from the request (taken at copy time).
   const ids = input.items.map((i) => i.masterItemId).filter((x): x is string => !!x);
@@ -233,7 +248,18 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
     { _id: order._id, $or: [{ currentRevision: prevNo }, ...(prevNo === 0 ? [{ currentRevision: { $exists: false } }] : [])] },
     {
       $push: {
-        rateCardArray: { ...next, _id: revisionId, revision, quotationRef, clientName: client.name, changes, pdf: pdfRef, editedBy: actor.id, createdAt: new Date() },
+        rateCardArray: {
+          ...next,
+          _id: revisionId,
+          revision,
+          quotationRef,
+          clientName: client.name,
+          changes,
+          pdf: pdfRef,
+          phase: order.lead?.stage === 'NEGOTIATION' ? 'NEGOTIATION' : 'PREPARATION',
+          editedBy: actor.id,
+          createdAt: new Date(),
+        },
       },
       $set: { currentRevision: revision, rateCardPdf: pdfRef, updatedBy: actor.id },
     },

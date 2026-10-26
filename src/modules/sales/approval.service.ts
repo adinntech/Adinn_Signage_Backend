@@ -13,13 +13,17 @@ import type { approvalPatchBody, approvalUploadBody } from './sales.validators';
 
 /** What is still missing before approval can be marked complete (empty = ready). */
 export function approvalGaps(clientType: string, activeTypes: string[]): string[] {
-  if (clientType === 'NEW') return activeTypes.includes('PURCHASE_ORDER') ? [] : ['A Purchase Order is mandatory for a new client'];
-  return activeTypes.length ? [] : ['Upload at least one written approval (PO, email, WhatsApp or other written approval)'];
+  if (clientType === 'NEW') return activeTypes.includes('PURCHASE_ORDER') ? [] : ['Upload the Purchase Order (mandatory for a new client)'];
+  return activeTypes.length ? [] : ['Upload at least one approval document or photo'];
 }
 
 async function editableOrder(orderId: string) {
   const o = await liveOrder(orderId);
-  if (o.stage !== 'CLIENT_APPROVAL') throw AppError.conflict('Move the order to Client Approval Proof before uploading approval documents');
+  // Lead Management orders follow the lead's stage; older orders the BD pipeline stage.
+  if (o.lead) {
+    if (o.lead.stage !== 'CLIENT_APPROVAL') throw AppError.conflict('Move the lead to Client Rate Approval before uploading approval documents');
+    if (o.lead.status === 'CLOSED') throw AppError.conflict('This lead is closed. Reopen it to continue.');
+  } else if (o.stage !== 'CLIENT_APPROVAL') throw AppError.conflict('Move the order to Client Approval Proof before uploading approval documents');
   if (o.approvalStatus === 'COMPLETED') throw AppError.conflict('Client approval is already complete');
   return o;
 }

@@ -64,6 +64,10 @@ const schema = z
     SMTP_USER: optional,
     SMTP_PASS: optional,
     MAIL_FROM: optional,
+    /** PHP mail service for client emails (Customer Onboarding Form). JSON is POSTed here; the PDF goes as a link. Empty = not sent. */
+    PHP_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
+    /** Optional key sent to the PHP mail service in the X-Api-Key header. */
+    PHP_MAIL_KEY: optional,
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -107,5 +111,6 @@ export const env = {
   webBaseUrl: parsed.data.WEB_BASE_URL.replace(/\/+$/, ''),
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
+  phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
   pushEnabled: !!(parsed.data.VAPID_PUBLIC_KEY && parsed.data.VAPID_PRIVATE_KEY),
 };

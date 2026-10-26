@@ -28,7 +28,7 @@ async function assertUnique(input: { name?: string | undefined; gstin?: string |
   }
 }
 
-const FIELDS = ['name', 'email', 'industry', 'contacts', 'address', 'city', 'district', 'state', 'pincode', 'gstin', 'notes', 'status'];
+const FIELDS = ['name', 'clientName', 'email', 'industry', 'contacts', 'address', 'city', 'district', 'state', 'pincode', 'gstin', 'notes', 'status'];
 
 const nextClientNo = async () => `CLI-${String(await nextSeq('clientNo')).padStart(4, '0')}`;
 
@@ -66,7 +66,7 @@ export async function listClients(q: z.infer<typeof clientListQuery>) {
   if (q.clientType === 'EXISTING') filter.clientType = { $ne: 'NEW' };
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    filter.$or = [{ name: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
+    filter.$or = [{ name: re }, { clientName: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
   }
   const [items, total] = await Promise.all([
     Client.find(filter).sort(parseSort(q.sort, ['name', 'code', 'clientNo', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),

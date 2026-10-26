@@ -7,11 +7,23 @@ import { rateCardRevisionSchema } from '../ratecards/ratecard.model';
 export const ORDER_STAGES = ['NEW_ORDER', 'COMPANY_PROFILE', 'RATE_CARD', 'CLIENT_APPROVAL'] as const;
 export type OrderStage = (typeof ORDER_STAGES)[number];
 
-export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD'] as const;
+/** ONBOARDING = Customer Onboarding Form (Lead Management > Client Registered), sent through the PHP mail service. */
+export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING'] as const;
 export const DELIVERY_STATUSES = ['SENT', 'FAILED', 'SKIPPED'] as const;
-export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN'] as const;
+export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN', 'PHOTO', 'SUPPORTING_DOCUMENT'] as const;
 export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE', 'HANDOVER'] as const;
 export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST'] as const;
+/**
+ * What the BD hands to Client Servicing: ASO (client and contacts only; CS collects the shops by phone), the shop list
+ * only, or the shop list with measurements and per-shop photos / documents.
+ */
+export const HANDOVER_TYPES = ['ASO', 'SHOP_DETAILS', 'SHOP_MEASUREMENT'] as const;
+export type HandoverType = (typeof HANDOVER_TYPES)[number];
+
+/** Lead Management mind map, in order. Client Registered applies to new clients only (existing clients skip it). */
+export const LEAD_STAGES = ['NEW_LEAD', 'CLIENT_REGISTERED', 'REQUIREMENT_DISCUSSION', 'RATE_CARD', 'NEGOTIATION', 'CLIENT_APPROVAL'] as const;
+export type LeadStage = (typeof LEAD_STAGES)[number];
+export const LEAD_ACTIONS = ['START', 'COMPLETE', 'BACK', 'CLOSE', 'REOPEN', 'NOTES'] as const;
 
 /** Files keep their full metadata inside the order (no FileAsset row); see storedFile.schema. */
 const fileRef = storedFileSchema;
@@ -76,6 +88,26 @@ const pipelineLogSchema = new Schema({
   notes: String,
 });
 
+/** leadLogsArray: every Lead Management move (start, stage completed, back to a previous stage, close / reopen). */
+const leadLogSchema = new Schema({
+  action: { type: String, enum: LEAD_ACTIONS, required: true },
+  fromStage: { type: String, enum: LEAD_STAGES, default: null },
+  toStage: { type: String, enum: LEAD_STAGES, default: null },
+  by: { type: Schema.Types.ObjectId, ref: 'User' },
+  role: String,
+  at: { type: Date, default: Date.now },
+  note: String,
+});
+
+/** requirementNotesArray: Requirement Discussion notes, each with optional documents / reference images. */
+const requirementNoteSchema = new Schema({
+  body: { type: String, trim: true },
+  attachments: [fileRef],
+  createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  role: String,
+  createdAt: { type: Date, default: Date.now },
+});
+
 /** handoverDocumentsArray: files the BD hands to Client Servicing (client documents, and the shop list Excel). */
 const handoverDocSchema = new Schema({
   kind: { type: String, enum: HANDOVER_DOC_KINDS, required: true },
@@ -116,6 +148,8 @@ const handoverShopSchema = new Schema(
     extra: { type: Schema.Types.Mixed, default: undefined },
     state: { type: String, enum: ['VALID', 'WARNING', 'ERROR'] },
     issues: [String],
+    /** Shop + Measurement: photos / documents the client shared for this shop (where the board goes, measurements). */
+    attachments: { type: [fileRef], default: undefined },
   },
   { _id: false },
 );
@@ -126,7 +160,7 @@ const handoverShopSchema = new Schema(
  */
 const orderSchema = new Schema(
   {
-    orderNo: { type: String, required: true, unique: true }, // ORD-2026-0001
+    orderNo: { type: String, required: true, unique: true }, // 20261025ORD#1 (older orders: ORD-2026-0001)
     client: { type: Schema.Types.ObjectId, ref: 'Client', required: true, index: true },
     /** Snapshot at creation: NEW for the order created with a new client registration, EXISTING for repeat orders. */
     clientType: { type: String, enum: CLIENT_TYPES, required: true, index: true },
@@ -159,10 +193,55 @@ const orderSchema = new Schema(
       ),
       default: null,
     },
+    handoverType: { type: String, enum: HANDOVER_TYPES, default: null },
+    /** Total Shops the BD typed; the uploaded list must have exactly this many rows to be verified. */
+    declaredShopTotal: { type: Number, default: null },
+    /** Set by Verify (count matches); cleared whenever the list or the declared total changes. */
+    shopsVerifiedAt: { type: Date, default: null },
+    shopsVerifiedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     /** Summary of the current shop list (rows are in handoverShopsArray). */
     shopList: {
       type: new Schema(
-        { fileId: Schema.Types.ObjectId, fileName: String, total: Number, valid: Number, warning: Number, error: Number, uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' }, uploadedAt: Date },
+        {
+          fileId: Schema.Types.ObjectId,
+          fileName: String,
+          total: Number,
+          valid: Number,
+          warning: Number,
+          error: Number,
+          /** Rows that repeat an earlier row of the same file. */
+          duplicates: Number,
+          uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          uploadedAt: Date,
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+
+    /** Latest Customer Onboarding Form PDF for this order (sent emails keep their own copy of the file record). */
+    onboardingPdf: { type: fileRef, default: null },
+    onboardingPdfAt: Date,
+    onboardingPdfBy: { type: Schema.Types.ObjectId, ref: 'User' },
+
+    /** Lead Management state (null until the order is taken up as a lead). */
+    lead: {
+      type: new Schema(
+        {
+          stage: { type: String, enum: LEAD_STAGES, required: true },
+          stageChangedAt: Date,
+          startedAt: Date,
+          startedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          /** Stage 1 "Initial Notes". */
+          initialNotes: String,
+          /** COMPLETED = Client Rate Approval done: the lead is won and its rate card and approval proof are locked. */
+          status: { type: String, enum: ['OPEN', 'CLOSED', 'COMPLETED'], default: 'OPEN' },
+          completedAt: Date,
+          completedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          closedAt: Date,
+          closedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          closeReason: String,
+        },
         { _id: false },
       ),
       default: null,
@@ -175,6 +254,8 @@ const orderSchema = new Schema(
     salespipelineLogs: { type: [pipelineLogSchema], default: [] },
     handoverDocumentsArray: { type: [handoverDocSchema], default: [] },
     handoverShopsArray: { type: [handoverShopSchema], default: [] },
+    leadLogsArray: { type: [leadLogSchema], default: [] },
+    requirementNotesArray: { type: [requirementNoteSchema], default: [] },
 
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -184,6 +265,7 @@ const orderSchema = new Schema(
 );
 orderSchema.index({ stage: 1, createdAt: -1 });
 orderSchema.index({ csAssignee: 1, createdAt: -1 });
+orderSchema.index({ 'lead.stage': 1, 'lead.stageChangedAt': -1 });
 // Resend / edit-details look orders up by an array item's id.
 orderSchema.index({ 'salesprofile._id': 1 });
 orderSchema.index({ 'approvalDocumentsArray._id': 1 });
@@ -192,4 +274,4 @@ orderSchema.index({ 'salesprofile.attachments.fileId': 1 });
 export const SalesOrder = model('SalesOrder', orderSchema);
 
 /** Projection that leaves out the activity arrays (Kanban, overview, checks). */
-export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray';
+export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -leadLogsArray -requirementNotesArray';

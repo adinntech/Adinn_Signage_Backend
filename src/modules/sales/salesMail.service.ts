@@ -6,7 +6,7 @@ import { escapeHtml, htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { readStoredFile } from '../files/file.service';
+import { readStoredFile, storedFileUrl } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { mailAvailable, sendMail } from '../notifications/mail.service';
 import { latestRevision } from '../ratecards/quotation.service';
@@ -15,20 +15,23 @@ import { ensureTemplate } from '../templates/template.service';
 import { User } from '../users/user.model';
 import { ORDER_STAGES, SalesOrder, type OrderStage } from './sales.model';
 import { liveOrder, orderArray } from './order.service';
+import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
-type Kind = 'COMPANY_PROFILE' | 'RATE_CARD';
+export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING';
+const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form' };
 
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
 
 /**
- * Sends one email and stores exactly what was sent. When SMTP is not configured the record says SKIPPED (never a
- * fake "sent"); an SMTP failure is stored as FAILED with the reason.
+ * Sends one email and stores exactly what was sent. Customer onboarding emails go through the PHP mail service (the
+ * PDF as a link); the others through SMTP. When the transport is not configured the record says SKIPPED (never a
+ * fake "sent"); a failure is stored as FAILED with the reason.
  */
-async function deliver(rec: {
+export async function deliver(rec: {
   order: Types.ObjectId;
   client: Types.ObjectId;
   kind: Kind;
@@ -52,20 +55,27 @@ async function deliver(rec: {
   }
   let status: 'SENT' | 'FAILED' | 'SKIPPED' = 'SENT';
   let error: string | undefined;
-  if (!mailAvailable()) {
+  const php = rec.kind === 'ONBOARDING';
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
+  if (php ? !phpMailAvailable() : !mailAvailable()) {
     status = 'SKIPPED';
-    error = 'Email is not configured on the server (SMTP), so nothing was sent';
+    error = php ? 'The PHP mail service is not configured on the server (PHP_MAIL_URL), so nothing was sent' : 'Email is not configured on the server (SMTP), so nothing was sent';
   } else {
     try {
-      const files = await Promise.all(rec.attachments.map((a) => readStoredFile(a)));
-      await sendMail({
-        to: rec.to.join(', '),
-        cc: rec.cc,
-        subject: rec.subject,
-        html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`,
-        text: htmlToText(rec.body),
-        attachments: files.map((f) => ({ filename: f.name, content: f.content, contentType: f.mimeType })),
-      });
+      if (php) {
+        const links = await Promise.all(rec.attachments.map(async (a) => ({ name: a.name ?? 'attachment.pdf', url: (await storedFileUrl(a)).url })));
+        await sendViaPhpMail({ from: env.MAIL_FROM, to: rec.to, cc: rec.cc, subject: rec.subject, html, text: htmlToText(rec.body), attachments: links });
+      } else {
+        const files = await Promise.all(rec.attachments.map((a) => readStoredFile(a)));
+        await sendMail({
+          to: rec.to.join(', '),
+          cc: rec.cc,
+          subject: rec.subject,
+          html,
+          text: htmlToText(rec.body),
+          attachments: files.map((f) => ({ filename: f.name, content: f.content, contentType: f.mimeType })),
+        });
+      }
     } catch (e) {
       status = 'FAILED';
       error = e instanceof Error ? e.message.slice(0, 500) : 'Sending failed';
@@ -93,7 +103,7 @@ async function deliver(rec: {
   const filter = rec.requestKey ? { _id: rec.order, 'salesprofile.requestKey': { $ne: rec.requestKey } } : { _id: rec.order };
   const r = await SalesOrder.updateOne(filter, { $push: { salesprofile: entry } });
   if (!r.modifiedCount && rec.requestKey) return sentWithKey();
-  await recordAudit({ actor: rec.actor, action: 'EMAIL_SENT', entity: 'SalesOrder', entityId: rec.order, reason: `${rec.kind === 'RATE_CARD' ? 'Rate card' : 'Company profile'} email ${status.toLowerCase()} to ${rec.to.join(', ')}` });
+  await recordAudit({ actor: rec.actor, action: 'EMAIL_SENT', entity: 'SalesOrder', entityId: rec.order, reason: `${KIND_LABEL[rec.kind]} email ${status.toLowerCase()} to ${rec.to.join(', ')}` });
   const o = await orderArray(String(rec.order), 'salesprofile', ['sentBy']);
   return (o.salesprofile ?? []).find((e) => String(e._id) === String(emailId)) ?? null;
 }

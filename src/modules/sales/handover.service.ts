@@ -9,8 +9,10 @@ import { notify } from '../notifications/notification.service';
 import { buildTemplate, parseWorkbook } from '../sites/excel.service';
 import { autoMap, dupKeyOf, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
 import { User } from '../users/user.model';
+import { handoverUnlocked } from './lead.service';
 import { liveOrder, pipelineLog } from './order.service';
-import { SalesOrder } from './sales.model';
+import { SalesOrder, type HandoverType } from './sales.model';
+import type { Scenario } from '../sites/site.fields';
 
 /** Client Servicing only sees orders handed to them; everyone else with sales access sees all. */
 export const isCs = (actor: Actor) => actor.role === 'CLIENT_SERVICING';
@@ -31,17 +33,145 @@ const ownerOf = (id: Types.ObjectId) => ({ entity: 'SalesOrder' as const, id });
 /** Active Client Servicing people the BD can hand an order to. */
 export const csUsers = () => User.find({ role: 'CLIENT_SERVICING', isActive: true, deletedAt: null }).select('name email phone').sort({ name: 1 }).lean();
 
-/** Handover tab: who it went to, the documents, and the shop list summary (rows come from listShops). */
+export const HANDOVER_TYPE_LABELS: Record<HandoverType, string> = { ASO: 'ASO', SHOP_DETAILS: 'Shop Details Only', SHOP_MEASUREMENT: 'Shop + Measurement' };
+const shopTypes: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
+/** Shop + Measurement lists must carry sizes (the client measured); Shop Details lists may leave them for the recce. */
+const scenarioOf = (type: string | null | undefined): Scenario => (type === 'SHOP_MEASUREMENT' ? 'CLIENT_PROVIDED' : 'MEASUREMENT_REQUIRED');
+
+type GapInput = {
+  handoverType?: string | null;
+  shopList?: { total?: number | null } | null;
+  declaredShopTotal?: number | null;
+  shopsVerifiedAt?: Date | null;
+};
+/** What is still missing before the order can be handed over (empty = ready). */
+export function handoverGaps(o: GapInput, contactCount: number): string[] {
+  if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
+  if (o.handoverType === 'ASO') {
+    const g: string[] = [];
+    if (!contactCount) g.push('Add at least one contact person');
+    if (o.shopList) g.push('Remove the shop list: an ASO handover goes without one');
+    return g;
+  }
+  if (!o.shopList) return ['Upload the shop list (Excel)'];
+  if (!o.declaredShopTotal) return ['Enter the Total Shops'];
+  if (o.declaredShopTotal !== o.shopList.total) return [`Total Shops (${o.declaredShopTotal}) does not match the shops in the Excel (${o.shopList.total})`];
+  if (!o.shopsVerifiedAt) return ['Verify the shop list'];
+  return [];
+}
+
+/** Handover tab: type, who it went to, the documents, the shop list summary and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover shopList handoverDocumentsArray')
+    .select('orderNo client csAssignee handover handoverType declaredShopTotal shopsVerifiedAt shopsVerifiedBy shopList handoverDocumentsArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
+    .populate('shopsVerifiedBy', 'name')
     .populate('handoverDocumentsArray.uploadedBy', 'name role')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
+  const client = await Client.findById(o.client).select('contacts').lean();
   const documents = [...(o.handoverDocumentsArray ?? [])].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
-  return { orderId: String(o._id), orderNo: o.orderNo, assignee: o.csAssignee ?? null, handover: o.handover ?? null, shopList: o.shopList ?? null, documents };
+  const shops = o.handoverShopsArray ?? [];
+  return {
+    orderId: String(o._id),
+    orderNo: o.orderNo,
+    assignee: o.csAssignee ?? null,
+    handover: o.handover ?? null,
+    type: (o.handoverType ?? null) as HandoverType | null,
+    shopList: o.shopList ?? null,
+    declaredShopTotal: o.declaredShopTotal ?? null,
+    verified: o.shopsVerifiedAt ? { at: o.shopsVerifiedAt, by: (o.shopsVerifiedBy as unknown as { name?: string } | null)?.name ?? null } : null,
+    shopsWithFiles: shops.filter((s) => s.attachments?.length).length,
+    shopFiles: shops.reduce((n, s) => n + (s.attachments?.length ?? 0), 0),
+    documents,
+    missing: o.csAssignee ? [] : handoverGaps(o, client?.contacts?.length ?? 0),
+  };
+}
+
+/** Changes are only made while nobody has handed the order over; a parallel handover makes them no-ops (409). */
+const stillOpen = (o: { _id: Types.ObjectId }) => ({ _id: o._id, csAssignee: null });
+
+export async function setHandoverType(id: string, type: HandoverType, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  if (o.handoverType === type) return getHandover(id);
+  // A list uploaded before handover types existed (type still empty) may get its first type; it must be verified again.
+  if (o.shopList && o.handoverType) throw AppError.conflict('Remove the shop list before changing the handover type (the list is checked by the type).');
+  const r = await SalesOrder.updateOne(stillOpen(o), { $set: { handoverType: type, shopsVerifiedAt: null, shopsVerifiedBy: null, updatedBy: actor.id } });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  return getHandover(id);
+}
+
+/** Total Shops typed by the BD (checked against the uploaded list). Clears an earlier verification. */
+export async function setShopTotal(id: string, total: number, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  const r = await SalesOrder.updateOne(stillOpen(o), { $set: { declaredShopTotal: total, shopsVerifiedAt: null, shopsVerifiedBy: null, updatedBy: actor.id } });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  return getHandover(id);
+}
+
+/** Verify: the Excel has exactly the Total Shops the BD entered. */
+export async function verifyShops(id: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Only shop handovers have a shop list to verify');
+  if (!o.shopList) throw AppError.conflict('Upload the shop list first');
+  if (!o.declaredShopTotal) throw new AppError(422, 'VALIDATION_ERROR', 'Enter the Total Shops first', [{ path: 'total', message: 'Enter the Total Shops first' }]);
+  if (o.declaredShopTotal !== o.shopList.total)
+    throw AppError.conflict(`Total Shops (${o.declaredShopTotal}) does not match the shops in the Excel (${o.shopList.total}). Correct the count or the file.`);
+  // Conditional on the same list and count, so a replaced file in between is not marked verified.
+  const r = await SalesOrder.updateOne(
+    { ...stillOpen(o), 'shopList.fileId': o.shopList.fileId, declaredShopTotal: o.declaredShopTotal },
+    { $set: { shopsVerifiedAt: new Date(), shopsVerifiedBy: actor.id, updatedBy: actor.id } },
+  );
+  if (!r.matchedCount) throw AppError.conflict('The shop list changed meanwhile. Reload and verify again.');
+  await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, reason: `Shop list verified: ${o.shopList.total} shops` });
+  return getHandover(id);
+}
+
+/** Files attached to shop rows (erased when the list is replaced or removed). */
+async function rowFiles(orderId: Types.ObjectId) {
+  const doc = await SalesOrder.findById(orderId).select('handoverShopsArray.attachments').lean();
+  return (doc?.handoverShopsArray ?? []).flatMap((s) => (s.attachments ?? []) as StoredFile[]);
+}
+
+/** Shop + Measurement: photos / documents for one shop row. Allowed before and after handover. */
+export async function addShopFiles(id: string, rowNumber: number, files: UploadedFile[], actor: Actor) {
+  if (!files.length) throw new AppError(422, 'VALIDATION_ERROR', 'Choose at least one file', [{ path: 'files', message: 'Choose at least one file' }]);
+  const o = await liveOrder(id);
+  if (o.handoverType !== 'SHOP_MEASUREMENT') throw AppError.conflict('Shop photos and documents are for Shop + Measurement handovers');
+  if (!(await SalesOrder.exists({ _id: o._id, 'handoverShopsArray.rowNumber': rowNumber }))) throw AppError.notFound(`Shop row ${rowNumber} not found`);
+  const stored: StoredFile[] = [];
+  try {
+    for (const f of files) stored.push(await storeHandoverFile(o, f, actor));
+    await SalesOrder.updateOne(
+      { _id: o._id },
+      { $push: { 'handoverShopsArray.$[r].attachments': { $each: stored } }, $set: { updatedBy: actor.id } },
+      { arrayFilters: [{ 'r.rowNumber': rowNumber }] },
+    );
+  } catch (e) {
+    await discardStoredFiles(stored);
+    throw e;
+  }
+  return { rowNumber, added: stored.length };
+}
+
+export async function removeShopFile(id: string, rowNumber: number, fileId: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  const doc = await SalesOrder.findOne({ _id: o._id, 'handoverShopsArray.rowNumber': rowNumber }, { 'handoverShopsArray.$': 1 }).lean();
+  const file = (doc?.handoverShopsArray?.[0]?.attachments ?? []).find((a) => String(a.fileId) === fileId) as StoredFile | undefined;
+  if (!file) throw AppError.notFound('File not found');
+  const r = await SalesOrder.updateOne(
+    stillOpen(o),
+    { $pull: { 'handoverShopsArray.$[r].attachments': { fileId: file.fileId } } },
+    { arrayFilters: [{ 'r.rowNumber': rowNumber }] },
+  );
+  if (!r.modifiedCount) assertNotHandedOver({ csAssignee: true });
+  await eraseStoredFile(file, actor, ownerOf(o._id));
+  return { rowNumber, removed: true };
 }
 
 /** Shop rows of the current shop list, filtered by state and paged (the list can be thousands of rows). */
@@ -70,15 +200,17 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   if (!/\.(xlsx|csv)$/i.test(file.originalname)) throw AppError.badRequest('Upload the shop list as an .xlsx or .csv file');
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Choose Shop Details Only or Shop + Measurement before uploading a shop list');
+  const scenario = scenarioOf(o.handoverType);
 
   const parsed = await parseWorkbook(file.buffer, file.originalname);
   const mapping = autoMap(parsed.headers);
-  // Measurements are optional at handover: the requirement type is chosen later, when the project is created.
-  const problems = validateMapping(mapping, 'MEASUREMENT_REQUIRED');
+  // Shop Details Only: sizes are optional (measured later). Shop + Measurement: the client's sizes are required.
+  const problems = validateMapping(mapping, scenario);
   if (problems.length) throw new AppError(422, 'VALIDATION_ERROR', `${problems.join('. ')}. Use the shop list template columns.`, problems.map((message) => ({ path: 'file', message })));
 
   const seen = new Map<string, number>();
-  const summary = { total: 0, valid: 0, warning: 0, error: 0 };
+  const summary = { total: 0, valid: 0, warning: 0, error: 0, duplicates: 0 };
   const shops = parsed.rows.map((row) => {
     const values: Partial<Record<MappableField, string>> = {};
     const extra: Record<string, string> = {};
@@ -89,11 +221,13 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
         if (v) extra[header] = v;
       } else values[target] = v;
     }
-    const n = normalise(values, { scenario: 'MEASUREMENT_REQUIRED', defaultUnit: 'ft' });
+    const n = normalise(values, { scenario, defaultUnit: 'ft' });
     const issues = [...n.errors, ...n.warnings].map((i) => i.message);
     const key = dupKeyOf(n.value);
-    if (key && seen.has(key)) issues.push(`Duplicate of row ${seen.get(key)} in this file`);
-    else if (key) seen.set(key, row.rowNumber);
+    if (key && seen.has(key)) {
+      issues.push(`Duplicate of row ${seen.get(key)} in this file`);
+      summary.duplicates++;
+    } else if (key) seen.set(key, row.rowNumber);
     const state = n.errors.length ? 'ERROR' : issues.length ? 'WARNING' : 'VALID';
     summary.total++;
     summary[state === 'ERROR' ? 'error' : state === 'WARNING' ? 'warning' : 'valid']++;
@@ -103,12 +237,16 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const stored = await storeHandoverFile(o, file, actor);
   const previous = await SalesOrder.findById(o._id).select('handoverDocumentsArray').lean();
   const oldLists = (previous?.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SHOP_LIST');
+  const oldRowFiles = await rowFiles(o._id);
   const r = await SalesOrder.updateOne(
     { _id: o._id, csAssignee: null },
     {
       $set: {
         handoverShopsArray: shops,
         shopList: { fileId: stored.fileId, fileName: file.originalname.slice(0, 200), ...summary, uploadedBy: actor.id, uploadedAt: new Date() },
+        // A new file has to be verified again.
+        shopsVerifiedAt: null,
+        shopsVerifiedBy: null,
         updatedBy: actor.id,
       },
       $pull: { handoverDocumentsArray: { kind: 'SHOP_LIST' } },
@@ -123,7 +261,8 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   }
   await SalesOrder.updateOne({ _id: o._id }, { $push: { handoverDocumentsArray: { kind: 'SHOP_LIST', file: stored, uploadedBy: actor.id, role: actor.role, createdAt: new Date() } } });
   for (const d of oldLists) await eraseStoredFile(d.file as StoredFile, actor, ownerOf(o._id));
-  await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${file.originalname}: ${summary.total} rows (${summary.error} with errors)` });
+  for (const f of oldRowFiles) await eraseStoredFile(f, actor, ownerOf(o._id));
+  await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${file.originalname}: ${summary.total} rows (${summary.error} with errors, ${summary.duplicates} duplicates)` });
   return getHandover(id);
 }
 
@@ -133,12 +272,17 @@ export async function removeShopList(id: string, actor: Actor) {
   assertNotHandedOver(o);
   const doc = await SalesOrder.findById(o._id).select('handoverDocumentsArray').lean();
   const lists = (doc?.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SHOP_LIST');
+  const oldRowFiles = await rowFiles(o._id);
   const r = await SalesOrder.updateOne(
     { _id: o._id, csAssignee: null },
-    { $set: { handoverShopsArray: [], shopList: null, updatedBy: actor.id }, $pull: { handoverDocumentsArray: { kind: 'SHOP_LIST' } } },
+    {
+      $set: { handoverShopsArray: [], shopList: null, shopsVerifiedAt: null, shopsVerifiedBy: null, updatedBy: actor.id },
+      $pull: { handoverDocumentsArray: { kind: 'SHOP_LIST' } },
+    },
   );
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   for (const d of lists) await eraseStoredFile(d.file as StoredFile, actor, ownerOf(o._id));
+  for (const f of oldRowFiles) await eraseStoredFile(f, actor, ownerOf(o._id));
   return getHandover(id);
 }
 
@@ -198,12 +342,22 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
     const who = await User.findById(o.csAssignee).select('name').lean();
     throw AppError.conflict(`This order is already handed over to ${who?.name ?? 'Client Servicing'}.`);
   }
+  if (!handoverUnlocked(o.lead)) throw AppError.conflict('Finish Requirement Discussion in Lead Management before assigning Client Servicing.');
+  const client = await Client.findById(o.client).select('name contacts').lean();
+  const gaps = handoverGaps(o, client?.contacts?.length ?? 0);
+  if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
   const cs = await User.findOne({ _id: input.csUserId, role: 'CLIENT_SERVICING', isActive: true, deletedAt: null }).select('name').lean();
   if (!cs) throw new AppError(422, 'VALIDATION_ERROR', 'Choose an active Client Servicing person', [{ path: 'csUserId', message: 'Choose an active Client Servicing person' }]);
-  const client = await Client.findById(o.client).select('name').lean();
-  const note = `Handed over to ${cs.name} (Client Servicing)`;
+  const typeLabel = HANDOVER_TYPE_LABELS[o.handoverType as HandoverType];
+  const note = `Handed over to ${cs.name} (Client Servicing) · ${typeLabel}`;
+  // Conditional on the checked state: a list replaced or a type changed meanwhile is not handed over unverified.
   const r = await SalesOrder.updateOne(
-    { _id: o._id, csAssignee: null },
+    {
+      _id: o._id,
+      csAssignee: null,
+      handoverType: o.handoverType,
+      ...(o.handoverType === 'ASO' ? {} : { 'shopList.fileId': o.shopList?.fileId, shopsVerifiedAt: { $ne: null } }),
+    },
     {
       $set: { csAssignee: cs._id, handover: { assignedBy: actor.id, assignedAt: new Date(), note: input.note }, updatedBy: actor.id },
       $push: { salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, note) },
@@ -216,7 +370,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
     recipients: [cs._id],
     kind: 'ORDER_ASSIGNED',
     title: 'New order assigned to you',
-    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
+    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}, ${typeLabel}${o.shopList ? `, ${o.shopList.total} shops` : ''}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
     order: { _id: o._id, orderNo: o.orderNo, clientName: client?.name },
     actorId: actor.id,
     dedupe: (rid) => `order-assigned:${o._id}:${rid}`,

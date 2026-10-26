@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
@@ -6,6 +7,8 @@ import { quotationBody } from '../ratecards/ratecard.validators';
 import * as quotation from '../ratecards/quotation.service';
 import * as approval from './approval.service';
 import * as handover from './handover.service';
+import * as leads from './lead.service';
+import * as onboard from './onboarding.service';
 import * as mail from './salesMail.service';
 import * as orders from './order.service';
 import {
@@ -13,15 +16,24 @@ import {
   approvalUploadBody,
   assignCsBody,
   boardQuery,
+  closeLeadBody,
   commentBody,
   createOrderBody,
   emailListQuery,
+  handoverTypeBody,
+  shopTotalBody,
+  leadCandidatesQuery,
+  leadListQuery,
+  leadMoveBody,
+  leadNotesBody,
   moveBody,
+  onboardingBody,
   orderListQuery,
   ownerBody,
   registerBody,
   sendEmailBody,
   shopRowsQuery,
+  startLeadBody,
 } from './sales.validators';
 
 const id = (req: Request) => objectId.parse(req.params.id);
@@ -72,7 +84,13 @@ export const uploadShops = asyncHandler(async (req, res) => ok(res, await handov
 export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
 export const addDocuments = asyncHandler(async (req, res) => ok(res, await handover.addDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
 export const removeDocument = asyncHandler(async (req, res) => ok(res, await handover.removeDocument(id(req), objectId.parse(req.params.docId), actorOf(req))));
-export const assignCs = asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));
+export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
+export const shopTotal = asyncHandler(async (req, res) => ok(res, await handover.setShopTotal(id(req), shopTotalBody.parse(req.body).total, actorOf(req))));
+export const verifyShops = asyncHandler(async (req, res) => ok(res, await handover.verifyShops(id(req), actorOf(req))));
+const rowNo = (req: Request) => z.coerce.number().int().min(1).parse(req.params.row);
+export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowNo(req), uploaded(req), actorOf(req)), undefined, 201));
+export const removeShopFile = asyncHandler(async (req, res) => ok(res, await handover.removeShopFile(id(req), rowNo(req), objectId.parse(req.params.fileId), actorOf(req))));
+export const assignCs =asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));
 export const move = asyncHandler(async (req, res) => ok(res, await orders.moveStage(id(req), moveBody.parse(req.body).stage, actorOf(req))));
 export const reassign = asyncHandler(async (req, res) => ok(res, await orders.reassignOwner(id(req), ownerBody.parse(req.body).ownerId, actorOf(req))));
 export const history = asyncHandler(async (req, res) => ok(res, await orders.orderHistory(id(req))));
@@ -105,3 +123,52 @@ export const updateApproval = asyncHandler(async (req, res) =>
 );
 export const deleteApproval = asyncHandler(async (req, res) => ok(res, await approval.deleteApprovalDoc(objectId.parse(req.params.docId), actorOf(req))));
 export const completeApproval =asyncHandler(async (req, res) => ok(res, await approval.completeApproval(id(req), actorOf(req))));
+
+/* ----------------------------- Lead Management ----------------------------- */
+
+/** Every lead route: not for Client Servicing. */
+const bd = (req: Request) => {
+  const actor = actorOf(req);
+  leads.assertLeadAccess(actor);
+  return actor;
+};
+export const leadList = asyncHandler(async (req, res) => {
+  bd(req);
+  const { items, meta } = await leads.listLeads(leadListQuery.parse(req.query));
+  ok(res, items, meta);
+});
+export const leadSummary = asyncHandler(async (req, res) => {
+  bd(req);
+  ok(res, await leads.leadSummary());
+});
+export const leadCandidates = asyncHandler(async (req, res) => {
+  bd(req);
+  ok(res, await leads.leadCandidates(leadCandidatesQuery.parse(req.query)));
+});
+export const startLead = asyncHandler(async (req, res) => ok(res, await leads.startLead(startLeadBody.parse(req.body), bd(req)), undefined, 201));
+export const getLead = asyncHandler(async (req, res) => {
+  bd(req);
+  ok(res, await leads.getLead(id(req)));
+});
+export const leadNotes = asyncHandler(async (req, res) => ok(res, await leads.updateInitialNotes(id(req), leadNotesBody.parse(req.body).initialNotes, bd(req))));
+export const completeLeadStage = asyncHandler(async (req, res) => {
+  const b = leadMoveBody.parse(req.body);
+  ok(res, await leads.completeStage(id(req), b.stage, b.note, bd(req)));
+});
+export const previousLeadStage = asyncHandler(async (req, res) => {
+  const b = leadMoveBody.parse(req.body);
+  ok(res, await leads.previousStage(id(req), b.stage, b.note, bd(req)));
+});
+export const closeLead = asyncHandler(async (req, res) => ok(res, await leads.closeLead(id(req), closeLeadBody.parse(req.body).reason, bd(req))));
+export const reopenLead = asyncHandler(async (req, res) => ok(res, await leads.reopenLead(id(req), bd(req))));
+export const requirementNotes = asyncHandler(async (req, res) => {
+  bd(req);
+  ok(res, await leads.listRequirementNotes(id(req)));
+});
+export const addRequirementNote = asyncHandler(async (req, res) =>
+  ok(res, await leads.addRequirementNote(id(req), commentBody.parse(req.body ?? {}).body, uploaded(req), bd(req)), undefined, 201),
+);
+export const onboarding = asyncHandler(async (req, res) => ok(res, await onboard.getOnboarding(id(req), bd(req))));
+export const saveOnboarding = asyncHandler(async (req, res) => ok(res, await onboard.saveOnboarding(id(req), onboardingBody.parse(req.body), bd(req))));
+export const sendOnboarding = asyncHandler(async (req, res) => ok(res, await onboard.sendOnboarding(id(req), sendEmailBody.parse(req.body), bd(req)), undefined, 201));
+export const deleteRequirementNote =asyncHandler(async (req, res) => ok(res, await leads.deleteRequirementNote(id(req), objectId.parse(req.params.noteId), bd(req))));

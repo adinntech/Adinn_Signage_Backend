@@ -23,11 +23,11 @@ const contact = z.object({
   isPrimary: z.boolean().default(false),
 });
 
-export const contactList = z
+const contactArray = z
   .array(contact)
   .max(20)
-  .default([])
   .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, []));
+export const contactList = contactArray.default([]);
 
 export const clientBody = z.object({
   name: z.string().trim().min(2).max(120),
@@ -41,11 +41,13 @@ export const clientBody = z.object({
   status: z.enum(['ACTIVE', 'INACTIVE']).default('ACTIVE'),
   // BD CRM company fields; optional here so the original client API keeps working unchanged.
   email: optionalEmail,
+  clientName: optStr(120),
   industry: optStr(120),
   district: optStr(80),
   pincode,
 });
-export const clientPatch = clientBody.partial().omit({ code: true });
+// No defaults on a patch: a patch without contacts / status must keep the saved ones.
+export const clientPatch = clientBody.partial().omit({ code: true }).extend({ contacts: contactArray.optional(), status: z.enum(['ACTIVE', 'INACTIVE']).optional() });
 export const clientListQuery = listQuery.extend({
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
   clientType: z.enum(CLIENT_TYPES).optional(),
@@ -55,6 +57,7 @@ export const clientListQuery = listQuery.extend({
 export const clientRegistration = z.object({
   name: z.string().trim().min(2, 'Enter the company name').max(120),
   email: z.string().trim().toLowerCase().email('Enter a valid company email'),
+  clientName: optStr(120),
   industry: optStr(120),
   address: optStr(500),
   city: optStr(80),
