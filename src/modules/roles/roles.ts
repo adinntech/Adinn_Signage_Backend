@@ -40,6 +40,8 @@ export const PERMISSIONS = [
   'sites:capture',
   // See the projects assigned to you (and their shops) without the commercial side: documents, cost, approvals. Recce staff.
   'jobs:read',
+  // Import existing clients from Zoho Books into the client master (SUPER_ADMIN).
+  'zoho:sync',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 

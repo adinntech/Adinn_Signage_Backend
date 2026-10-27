@@ -9,6 +9,12 @@ export async function nextSeq(key: string): Promise<number> {
 }
 
 
+/** Next number nextSeq would hand out, without using it (for previews; another save may take it first). */
+export async function peekSeq(key: string): Promise<number> {
+  const c = await Counter.findById(key).lean();
+  return (c?.seq ?? 0) + 1;
+}
+
 /** Reserve `n` consecutive numbers; returns the first. */
 export async function nextSeqBlock(key: string, n: number): Promise<number> {
   const c = await Counter.findOneAndUpdate({ _id: key }, { $inc: { seq: n } }, { upsert: true, returnDocument: 'after' });

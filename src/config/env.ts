@@ -73,6 +73,16 @@ const schema = z
     SMTP_USER: optional,
     SMTP_PASS: optional,
     MAIL_FROM: optional,
+    // ---- Zoho Books (existing-client import, SUPER_ADMIN only). Leave empty to disable. Self Client at api-console.zoho.com, scope ZohoBooks.contacts.READ,ZohoBooks.customerpayments.READ ----
+    ZOHO_CLIENT_ID: optional,
+    ZOHO_CLIENT_SECRET: optional,
+    ZOHO_REFRESH_TOKEN: optional,
+    ZOHO_ORGANIZATION_ID: optional,
+    /** Quick start only: a pasted access token works for about 1 hour. For permanent use set the client id, secret and refresh token instead. */
+    ZOHO_ACCESS_TOKEN: optional,
+    /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
+    ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
+    ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -118,5 +128,9 @@ export const env = {
   webBaseUrl: parsed.data.WEB_BASE_URL.replace(/\/+$/, ''),
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
+  zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
+  zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),
+  zohoAccountsUrl: parsed.data.ZOHO_ACCOUNTS_URL.replace(/\/+$/, ''),
+  zohoApiUrl: parsed.data.ZOHO_API_URL.replace(/\/+$/, ''),
   pushEnabled: !!(parsed.data.VAPID_PUBLIC_KEY && parsed.data.VAPID_PRIVATE_KEY),
 };

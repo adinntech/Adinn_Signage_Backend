@@ -7,6 +7,7 @@ import { env } from './config/env';
 import { errorHandler, notFoundHandler } from './common/http';
 import { authRouter } from './modules/auth/auth.routes';
 import { clientRouter } from './modules/clients/client.routes';
+import { zohoRouter } from './modules/zoho/zoho.routes';
 import { projectRouter } from './modules/projects/project.routes';
 import { communicationRouter } from './modules/communications/communication.routes';
 import { userRouter } from './modules/users/user.routes';
@@ -47,6 +48,7 @@ export function createApp() {
   app.get('/api/v1/health', (_req, res) => res.json({ success: true, data: { status: 'ok' } }));
   app.use('/api/v1/auth', authRouter);
   app.use('/api/v1/clients', clientRouter);
+  app.use('/api/v1/zoho', zohoRouter);
   app.use('/api/v1/projects', projectRouter);
   app.use('/api/v1/communications', communicationRouter);
   app.use('/api/v1/users', userRouter);

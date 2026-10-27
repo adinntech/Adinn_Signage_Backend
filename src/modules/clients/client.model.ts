@@ -32,6 +32,9 @@ const clientSchema = new Schema(
     pincode: String,
     gstin: { type: String, uppercase: true, trim: true },
     notes: String,
+    /** Zoho Books contact this client was imported from; one Zoho contact maps to one client. */
+    zohoContactId: { type: String, unique: true, sparse: true },
+    zohoSyncedAt: Date,
     clientType: { type: String, enum: CLIENT_TYPES },
     status: { type: String, enum: ['ACTIVE', 'INACTIVE'], default: 'ACTIVE', index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
