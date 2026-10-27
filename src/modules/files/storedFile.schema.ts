@@ -16,7 +16,7 @@ export const storedFileSchema = new Schema(
     name: String,
     size: Number,
     mimeType: String,
-    kind: { type: String, enum: ['image', 'video', 'document', 'sheet'] },
+    kind: { type: String, enum: ['image', 'video', 'document', 'sheet', 'audio'] },
     sha256: String,
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     uploadedAt: Date,

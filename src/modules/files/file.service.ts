@@ -8,6 +8,7 @@ import { recordAudit } from '../audit/audit.service';
 import { notifyProjectParty } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
+import { Client } from '../clients/client.model';
 import { SalesOrder } from '../sales/sales.model';
 import { EmailTemplate } from '../templates/template.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
@@ -32,6 +33,14 @@ function contentMatches(name: string, b: Buffer): boolean {
   if (n.endsWith('.pdf')) return b.subarray(0, 4).toString('latin1') === '%PDF';
   if (/\.(xlsx|docx|pptx)$/.test(n)) return b[0] === 0x50 && b[1] === 0x4b;
   if (n.endsWith('.mp4')) return b.subarray(4, 8).toString('latin1') === 'ftyp';
+  // Old Office formats (.doc / .xls / .ppt) are OLE compound files.
+  if (/\.(doc|xls|ppt)$/.test(n)) return b.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+  // Voice notes: WebM (Chrome / Firefox recorder), MP4 audio (Safari recorder), MP3, Ogg, WAV.
+  if (n.endsWith('.webm')) return b.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+  if (n.endsWith('.m4a')) return b.subarray(4, 8).toString('latin1') === 'ftyp';
+  if (n.endsWith('.mp3')) return b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1]! & 0xe0) === 0xe0);
+  if (n.endsWith('.ogg')) return b.subarray(0, 4).toString('latin1') === 'OggS';
+  if (n.endsWith('.wav')) return b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE';
   if (n.endsWith('.csv')) return !b.subarray(0, 4096).includes(0);
   return false;
 }
@@ -291,7 +300,7 @@ export interface EmbeddedFileInput {
   file: UploadedFile;
   actor: Actor;
   /** The record the file belongs to (audit trail). */
-  owner: { entity: 'SalesOrder' | 'EmailTemplate'; id: Types.ObjectId | string };
+  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client'; id: Types.ObjectId | string };
 }
 
 /**
@@ -393,10 +402,24 @@ function findStored(node: unknown, key: string): StoredFile | null {
 async function liveEmbeddedName(key: string): Promise<string | null> {
   const order = await SalesOrder.findOne({
     deletedAt: null,
-    $or: ['salescommentsArray.attachments.key', 'approvalDocumentsArray.file.key', 'rateCardArray.pdf.key', 'salesprofile.attachments.key'].map((p) => ({ [p]: key })),
+    $or: [
+      'salescommentsArray.attachments.key',
+      'approvalDocumentsArray.file.key',
+      'rateCardArray.pdf.key',
+      'rateCardPdf.key',
+      'salesprofile.attachments.key',
+      'handoverDocumentsArray.file.key',
+      'handoverShopsArray.attachments.key',
+      'handoverVoiceNotesArray.file.key',
+      'requirementNotesArray.attachments.key',
+      'onboardingPdf.key',
+    ].map((p) => ({ [p]: key })),
   }).lean();
   const inOrder = order && findStored(order, key);
   if (inOrder) return inOrder.name ?? 'file';
+  const client = await Client.findOne({ deletedAt: null, 'gstCertificates.key': key }).select('gstCertificates').lean();
+  const inClient = client && findStored(client, key);
+  if (inClient) return inClient.name ?? 'file';
   const tpl = await EmailTemplate.findOne({ 'pdf.key': key }).lean();
   const inTpl = tpl && findStored(tpl, key);
   return inTpl ? (inTpl.name ?? 'file') : null;

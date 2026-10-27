@@ -20,8 +20,8 @@ import type { sendEmailBody } from './sales.validators';
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
-export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING';
-const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form' };
+export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING' | 'PROJECT_CODE_REQUEST';
+const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form', PROJECT_CODE_REQUEST: 'Project code request' };
 
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));

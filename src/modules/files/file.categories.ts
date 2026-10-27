@@ -20,13 +20,15 @@ export const FILE_CATEGORIES = [
   'SALES_APPROVAL_PROOF',
   'SALES_RATE_CARD_PDF',
   'SALES_HANDOVER_DOCUMENT',
+  'SALES_HANDOVER_VOICE_NOTE',
   'LEAD_REQUIREMENT_DOCUMENT',
   'LEAD_ONBOARDING_FORM',
+  'CLIENT_GST_CERTIFICATE',
   'TEMPLATE_COMPANY_PROFILE',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
 
-export type FileKind = 'image' | 'video' | 'document' | 'sheet';
+export type FileKind = 'image' | 'video' | 'document' | 'sheet' | 'audio';
 
 interface CategoryRule {
   folder: (client: string, project: string) => string;
@@ -65,10 +67,14 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   SALES_RATE_CARD_PDF: { folder: (c, p) => `BD/Sales/${c}/${p}/Rate_Card`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: true, standalone: true },
   // BD -> Client Servicing handover: shop list Excel and client documents. Removable only until the order is handed over.
   SALES_HANDOVER_DOCUMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
+  // Voice notes recorded (or uploaded) for the handover. Removable only until the order is handed over.
+  SALES_HANDOVER_VOICE_NOTE: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover/Voice_Notes`, write: 'sales:write', read: ['sales:read'], kinds: ['audio'], evidence: false, standalone: true },
   // Lead Management > Requirement Discussion: documents and reference images on requirement notes. Deleting a note erases them.
   LEAD_REQUIREMENT_DOCUMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Requirements`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
   // Generated Customer Onboarding Form PDFs. A replaced PDF is erased unless an email already sent it.
   LEAD_ONBOARDING_FORM: { folder: (c, p) => `BD/Sales/${c}/${p}/Onboarding_Form`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: false, standalone: true },
+  // Client Management: GST certificate scans / PDFs, stored per client (`p` is the Client ID). Removing one erases it.
+  CLIENT_GST_CERTIFICATE: { folder: (c, p) => `BD/Clients/${c}/${p}/GST_Certificate`, write: 'clients:write', read: ['clients:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
   TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
@@ -84,8 +90,10 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   SALES_APPROVAL_PROOF: 'Sales - Approval Proof',
   SALES_RATE_CARD_PDF: 'Sales - Rate Card PDF',
   SALES_HANDOVER_DOCUMENT: 'Sales - Handover Documents',
+  SALES_HANDOVER_VOICE_NOTE: 'Sales - Handover Voice Notes',
   LEAD_REQUIREMENT_DOCUMENT: 'Lead - Requirement Documents',
   LEAD_ONBOARDING_FORM: 'Lead - Customer Onboarding Form',
+  CLIENT_GST_CERTIFICATE: 'Client - GST Certificate',
   TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
 };
 
@@ -98,6 +106,14 @@ const EXT_KIND: Record<string, FileKind> = {
   '.pdf': 'document',
   '.docx': 'document',
   '.pptx': 'document',
+  '.doc': 'document',
+  '.ppt': 'document',
+  '.xls': 'sheet',
+  '.webm': 'audio',
+  '.m4a': 'audio',
+  '.mp3': 'audio',
+  '.ogg': 'audio',
+  '.wav': 'audio',
   '.xlsx': 'sheet',
   '.csv': 'sheet',
 };

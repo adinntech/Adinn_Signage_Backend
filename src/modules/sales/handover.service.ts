@@ -10,7 +10,7 @@ import { buildTemplate, parseWorkbook } from '../sites/excel.service';
 import { autoMap, dupKeyOf, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
 import { User } from '../users/user.model';
 import { handoverUnlocked } from './lead.service';
-import { liveOrder, pipelineLog } from './order.service';
+import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import type { Scenario } from '../sites/site.fields';
 
@@ -23,9 +23,10 @@ export async function assertOrderAccess(id: string, actor: Actor) {
   if (!(await SalesOrder.exists({ _id: id, deletedAt: null, csAssignee: actor.id }))) throw AppError.notFound('Order not found');
 }
 
-/** Before handover the BD may change everything; afterwards only add documents. */
-const assertNotHandedOver = (o: { csAssignee?: unknown }) => {
+/** Before handover the BD may change everything; afterwards (to Client Servicing or the Recce team) only add documents. */
+const assertNotHandedOver = (o: { csAssignee?: unknown; recce?: { assignee?: unknown } | null }) => {
   if (o.csAssignee) throw AppError.conflict('This order is already handed over to Client Servicing. You can only add documents now.');
+  if (o.recce?.assignee) throw AppError.conflict('This order is already assigned to the Recce team. You can only add documents now.');
 };
 
 const ownerOf = (id: Types.ObjectId) => ({ entity: 'SalesOrder' as const, id });
@@ -39,13 +40,18 @@ const shopTypes: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
 const scenarioOf = (type: string | null | undefined): Scenario => (type === 'SHOP_MEASUREMENT' ? 'CLIENT_PROVIDED' : 'MEASUREMENT_REQUIRED');
 
 type GapInput = {
+  handoverFull?: boolean | null;
   handoverType?: string | null;
   shopList?: { total?: number | null } | null;
   declaredShopTotal?: number | null;
   shopsVerifiedAt?: Date | null;
 };
+/** Toggle off = client details and contact persons only. Orders from before the toggle count as full. */
+const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
+
 /** What is still missing before the order can be handed over (empty = ready). */
 export function handoverGaps(o: GapInput, contactCount: number): string[] {
+  if (!isFull(o)) return contactCount ? [] : ['Add at least one contact person'];
   if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
   if (o.handoverType === 'ASO') {
     const g: string[] = [];
@@ -63,21 +69,29 @@ export function handoverGaps(o: GapInput, contactCount: number): string[] {
 /** Handover tab: type, who it went to, the documents, the shop list summary and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverType declaredShopTotal shopsVerifiedAt shopsVerifiedBy shopList handoverDocumentsArray handoverShopsArray.attachments.fileId')
+    .select(
+      'orderNo client csAssignee handover handoverFull handoverNotes handoverType declaredShopTotal shopsVerifiedAt shopsVerifiedBy shopList handoverDocumentsArray handoverVoiceNotesArray handoverShopsArray.attachments.fileId',
+    )
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('shopsVerifiedBy', 'name')
     .populate('handoverDocumentsArray.uploadedBy', 'name role')
+    .populate('handoverVoiceNotesArray.uploadedBy', 'name role')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
   const client = await Client.findById(o.client).select('contacts').lean();
-  const documents = [...(o.handoverDocumentsArray ?? [])].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  const newest = (a: { createdAt?: Date | null }, b: { createdAt?: Date | null }) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0);
+  const documents = [...(o.handoverDocumentsArray ?? [])].sort(newest);
   const shops = o.handoverShopsArray ?? [];
   return {
     orderId: String(o._id),
     orderNo: o.orderNo,
     assignee: o.csAssignee ?? null,
     handover: o.handover ?? null,
+    /** Toggle: full handover (true) or client details and contacts only (false). */
+    full: isFull(o),
+    notes: o.handoverNotes ?? '',
+    voiceNotes: [...(o.handoverVoiceNotesArray ?? [])].sort(newest),
     type: (o.handoverType ?? null) as HandoverType | null,
     shopList: o.shopList ?? null,
     declaredShopTotal: o.declaredShopTotal ?? null,
@@ -90,7 +104,71 @@ export async function getHandover(id: string) {
 }
 
 /** Changes are only made while nobody has handed the order over; a parallel handover makes them no-ops (409). */
-const stillOpen = (o: { _id: Types.ObjectId }) => ({ _id: o._id, csAssignee: null });
+const stillOpen = (o: { _id: Types.ObjectId }) => ({ _id: o._id, csAssignee: null, 'recce.assignee': null });
+
+/** Assign to Client Servicing toggle. Switching it off keeps what was entered (type, list, notes); it is just not required. */
+export async function setHandoverScope(id: string, full: boolean, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  const r = await SalesOrder.updateOne(stillOpen(o), { $set: { handoverFull: full, updatedBy: actor.id } });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  return getHandover(id);
+}
+
+/** Additional notes for Client Servicing (before handover). */
+export async function setHandoverNotes(id: string, notes: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  const r = await SalesOrder.updateOne(stillOpen(o), { $set: { handoverNotes: notes || null, updatedBy: actor.id } });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  return getHandover(id);
+}
+
+const MAX_VOICE_NOTES = 20;
+
+/** A voice note (recorded in the browser or uploaded). Like documents, it can still be added after handover. */
+export async function addVoiceNote(id: string, file: UploadedFile | undefined, durationSec: number | undefined, actor: Actor) {
+  if (!file) throw new AppError(422, 'VALIDATION_ERROR', 'Record or choose a voice note', [{ path: 'file', message: 'Record or choose a voice note' }]);
+  const o = await liveOrder(id);
+  const count = await SalesOrder.findById(o._id).select('handoverVoiceNotesArray._id').lean();
+  if ((count?.handoverVoiceNotesArray?.length ?? 0) >= MAX_VOICE_NOTES) throw AppError.conflict(`Up to ${MAX_VOICE_NOTES} voice notes per order`);
+  const client = await Client.findById(o.client).select('name').lean();
+  const stored = await storeEmbeddedFile({ category: 'SALES_HANDOVER_VOICE_NOTE', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file, actor, owner: ownerOf(o._id) });
+  try {
+    await SalesOrder.updateOne(
+      { _id: o._id },
+      { $push: { handoverVoiceNotesArray: { file: stored, durationSec, uploadedBy: actor.id, role: actor.role, createdAt: new Date() } }, $set: { updatedBy: actor.id } },
+    );
+  } catch (e) {
+    await discardStoredFiles([stored]);
+    throw e;
+  }
+  if (o.csAssignee) {
+    await notify({
+      recipients: [o.csAssignee],
+      kind: 'ORDER_ASSIGNED',
+      title: 'Voice note added to a handed-over order',
+      body: `A voice note was added to ${o.orderNo}.`,
+      order: { _id: o._id, orderNo: o.orderNo },
+      actorId: actor.id,
+      dedupe: (r) => `order-voice:${o._id}:${stored.fileId}:${r}`,
+    });
+  }
+  return getHandover(id);
+}
+
+/** Deletes a voice note (before handover only); the audio is erased from storage. */
+export async function removeVoiceNote(id: string, noteId: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  const doc = await SalesOrder.findOne({ _id: o._id, 'handoverVoiceNotesArray._id': noteId }, { 'handoverVoiceNotesArray.$': 1 }).lean();
+  const v = doc?.handoverVoiceNotesArray?.[0];
+  if (!v) throw AppError.notFound('Voice note not found');
+  const r = await SalesOrder.updateOne({ _id: o._id, csAssignee: null }, { $pull: { handoverVoiceNotesArray: { _id: v._id } }, $set: { updatedBy: actor.id } });
+  if (!r.modifiedCount) assertNotHandedOver({ csAssignee: true });
+  await eraseStoredFile(v.file as StoredFile, actor, ownerOf(o._id));
+  return getHandover(id);
+}
 
 export async function setHandoverType(id: string, type: HandoverType, actor: Actor) {
   const o = await liveOrder(id);
@@ -342,25 +420,41 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
     const who = await User.findById(o.csAssignee).select('name').lean();
     throw AppError.conflict(`This order is already handed over to ${who?.name ?? 'Client Servicing'}.`);
   }
-  if (!handoverUnlocked(o.lead)) throw AppError.conflict('Finish Requirement Discussion in Lead Management before assigning Client Servicing.');
+  if (o.recce?.assignee) throw AppError.conflict('This project is already assigned to the Recce team.');
+  if (!handoverUnlocked(o.lead)) throw AppError.conflict('Assign Client Servicing from the Project Assign stage in Lead Management.');
   const client = await Client.findById(o.client).select('name contacts').lean();
   const gaps = handoverGaps(o, client?.contacts?.length ?? 0);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
   const cs = await User.findOne({ _id: input.csUserId, role: 'CLIENT_SERVICING', isActive: true, deletedAt: null }).select('name').lean();
   if (!cs) throw new AppError(422, 'VALIDATION_ERROR', 'Choose an active Client Servicing person', [{ path: 'csUserId', message: 'Choose an active Client Servicing person' }]);
-  const typeLabel = HANDOVER_TYPE_LABELS[o.handoverType as HandoverType];
+  const full = isFull(o);
+  const typeLabel = full ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'Client details only';
   const note = `Handed over to ${cs.name} (Client Servicing) · ${typeLabel}`;
-  // Conditional on the checked state: a list replaced or a type changed meanwhile is not handed over unverified.
+  const now = new Date();
+  // Assigning is the Project Assign step: the lead is completed in the same write.
+  const lead = o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN';
+  // Conditional on the checked state: a list replaced, a type or the toggle changed meanwhile is not handed over unverified.
   const r = await SalesOrder.updateOne(
     {
       _id: o._id,
       csAssignee: null,
-      handoverType: o.handoverType,
-      ...(o.handoverType === 'ASO' ? {} : { 'shopList.fileId': o.shopList?.fileId, shopsVerifiedAt: { $ne: null } }),
+      'recce.assignee': null,
+      ...(full
+        ? { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.fileId': o.shopList?.fileId, shopsVerifiedAt: { $ne: null } }) }
+        : { handoverFull: false }),
+      ...(lead ? { 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' } : {}),
     },
     {
-      $set: { csAssignee: cs._id, handover: { assignedBy: actor.id, assignedAt: new Date(), note: input.note }, updatedBy: actor.id },
-      $push: { salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, note) },
+      $set: {
+        csAssignee: cs._id,
+        handover: { assignedBy: actor.id, assignedAt: now, note: input.note },
+        updatedBy: actor.id,
+        ...(lead ? { 'lead.status': 'COMPLETED', 'lead.completedAt': now, 'lead.completedBy': actor.id, 'lead.stageChangedAt': now } : {}),
+      },
+      $push: {
+        salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, note),
+        ...(lead ? { leadLogsArray: leadLog(actor, 'COMPLETE', 'PROJECT_ASSIGN', null, `Assigned to Client Servicing (${cs.name}): lead completed`) } : {}),
+      },
     },
   );
   if (!r.modifiedCount) throw AppError.conflict('This order was handed over meanwhile. Reload the page.');
@@ -370,7 +464,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
     recipients: [cs._id],
     kind: 'ORDER_ASSIGNED',
     title: 'New order assigned to you',
-    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}, ${typeLabel}${o.shopList ? `, ${o.shopList.total} shops` : ''}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
+    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}, ${typeLabel}${full && o.shopList ? `, ${o.shopList.total} shops` : ''}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
     order: { _id: o._id, orderNo: o.orderNo, clientName: client?.name },
     actorId: actor.id,
     dedupe: (rid) => `order-assigned:${o._id}:${rid}`,

@@ -2,18 +2,52 @@ import { z } from 'zod';
 import { listQuery, objectId } from '../../common/query';
 import { CLIENT_TYPES, ORGANISATION_TYPES } from '../clients/client.model';
 import { clientRegistration } from '../clients/client.validators';
+import { PRIORITIES } from '../projects/project.model';
 import { APPROVAL_DOC_TYPES, EMAIL_KINDS, HANDOVER_TYPES, LEAD_STAGES, ORDER_STAGES } from './sales.model';
+
+/** Assign to Recce Team: the codes the BD received for the project. */
+export const recceCodesBody = z.object({
+  projectCode: z.string().trim().regex(/^\d{8}$/, 'Project code must be exactly 8 digits'),
+  estimationCode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^EST-\d{6}$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343'),
+});
+const day = z.coerce.date({ message: 'Choose a date' });
+/** Assign to Recce Team: the person, and what the operations project needs to be assigned. */
+export const recceAssignBody = z
+  .object({
+    assigneeId: objectId,
+    startDate: day,
+    targetDate: day,
+    district: z.string().trim().min(2, 'Enter the district / location').max(120),
+    priority: z.enum(PRIORITIES).default('MEDIUM'),
+    note: z.string().trim().max(2000).optional().or(z.literal('').transform(() => undefined)),
+  })
+  .refine((v) => v.targetDate >= v.startDate, { path: ['targetDate'], message: 'End date must be on or after the start date' });
 
 /** Generated once per form session by the web app; resubmitting the same key returns the first result. */
 const requestKey = z.string().trim().regex(/^[A-Za-z0-9-]{8,64}$/, 'Invalid request key').optional();
 
 export const registerBody = clientRegistration.extend({ requestKey });
-/** Order Management: BD picks the client and flags the order New / Existing client (suggested from the client's order count). */
-export const createOrderBody = z.object({
-  clientId: objectId,
-  clientType: z.enum(CLIENT_TYPES, { message: 'Choose New Client or Existing Client' }).optional(),
-  requestKey,
-});
+/**
+ * Order Management: BD picks the flag first, then the client. New Client = a client from Client Management
+ * (`clientId`); Existing Client = a Zoho customer (`zohoId`), which is brought into the CRM on the way.
+ */
+export const createOrderBody = z
+  .object({
+    clientId: objectId.optional(),
+    zohoId: z.string().trim().min(1).max(64).optional(),
+    clientType: z.enum(CLIENT_TYPES, { message: 'Choose New Client or Existing Client' }).optional(),
+    /** New Lead: first discussion notes, kept on the lead. */
+    initialNotes: z.string().trim().max(4000).optional().or(z.literal('').transform(() => undefined)),
+    requestKey,
+  })
+  .superRefine((v, ctx) => {
+    if (!v.clientId === !v.zohoId) ctx.addIssue({ code: 'custom', path: ['clientId'], message: 'Select the client company' });
+  });
+export const zohoClientQuery = z.object({ q: z.string().trim().max(100).default('') });
 
 const optDate = z.coerce.date().optional().or(z.literal('').transform(() => undefined));
 export const orderListQuery = listQuery.extend({
@@ -25,6 +59,10 @@ export const orderListQuery = listQuery.extend({
 });
 
 export const handoverTypeBody = z.object({ type: z.enum(HANDOVER_TYPES, { message: 'Choose ASO, Shop Details Only or Shop + Measurement' }) });
+export const handoverScopeBody = z.object({ full: z.boolean({ message: 'Choose whether to send the full handover' }) });
+export const handoverNotesBody = z.object({ notes: z.string().trim().max(4000, 'Keep the notes under 4000 characters') });
+/** Voice note upload: the length the browser measured (recordings stop at 5 minutes). */
+export const voiceNoteBody = z.object({ durationSec: z.coerce.number().min(0).max(305, 'A voice note can be at most 5 minutes').optional() });
 export const shopTotalBody = z.object({ total: z.coerce.number({ message: 'Enter the total number of shops' }).int('Enter a whole number').min(1, 'Enter at least 1 shop').max(100000) });
 export const assignCsBody = z.object({
   csUserId: objectId,

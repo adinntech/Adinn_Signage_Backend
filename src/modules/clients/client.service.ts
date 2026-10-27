@@ -4,8 +4,11 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { diff, recordAudit } from '../audit/audit.service';
 import { SalesOrder } from '../sales/sales.model';
 import { normKey } from '../sites/site.fields';
+import { discardStoredFiles, eraseStoredFile, storedFileUrl, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
+import type { StoredFile } from '../files/storedFile.schema';
 import { purgeClientData } from './client.cascade';
 import { Client } from './client.model';
+import type { ZohoClient } from '../zoho/zoho.service';
 import type { z } from 'zod';
 import type { clientBody, clientListQuery, clientPatch, clientRegistration } from './client.validators';
 
@@ -28,7 +31,7 @@ async function assertUnique(input: { name?: string | undefined; gstin?: string |
   }
 }
 
-const FIELDS = ['name', 'clientName', 'email', 'industry', 'contacts', 'address', 'city', 'district', 'state', 'pincode', 'gstin', 'notes', 'status'];
+const FIELDS = ['name', 'clientName', 'email', 'phone', 'customFields', 'industry', 'contacts', 'address', 'city', 'district', 'state', 'pincode', 'gstin', 'notes', 'status'];
 
 const nextClientNo = async () => `CLI-${String(await nextSeq('clientNo')).padStart(4, '0')}`;
 
@@ -64,9 +67,12 @@ export async function listClients(q: z.infer<typeof clientListQuery>) {
   if (q.status) filter.status = q.status;
   if (q.clientType === 'NEW') filter.clientType = 'NEW';
   if (q.clientType === 'EXISTING') filter.clientType = { $ne: 'NEW' };
+  // CRM = registered in Client Management (the New Client list); ZOHO = brought in from Zoho.
+  if (q.source === 'CRM') filter.source = { $ne: 'ZOHO' };
+  if (q.source === 'ZOHO') filter.source = 'ZOHO';
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    filter.$or = [{ name: re }, { clientName: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
+    filter.$or = [{ name: re }, { clientName: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { phone: re }, { gstin: re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
   }
   const [items, total] = await Promise.all([
     Client.find(filter).sort(parseSort(q.sort, ['name', 'code', 'clientNo', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
@@ -146,4 +152,92 @@ export async function deleteClient(id: string, actor: Actor) {
   if (!purged) await Client.updateOne({ _id: id }, { deletedAt: new Date(), status: 'INACTIVE', updatedBy: actor.id });
   await recordAudit({ actor, action: 'DELETE', entity: 'Client', entityId: id, reason: purged ? 'Erased with its sales orders and files' : 'Hidden: it still has projects' });
   return { id, purged, removed };
+}
+
+const MAX_GST_FILES = 5;
+const clientOwner = (id: unknown) => ({ entity: 'Client' as const, id: String(id) });
+
+/** GST certificate scans / PDFs. Up to five files per client. */
+export async function addGstCertificates(id: string, files: UploadedFile[], actor: Actor) {
+  if (!files.length) throw AppError.badRequest('Choose the GST certificate file');
+  const c = await getClient(id);
+  if ((c.gstCertificates?.length ?? 0) + files.length > MAX_GST_FILES) throw AppError.badRequest(`Up to ${MAX_GST_FILES} GST certificate files per client`);
+  const stored: StoredFile[] = [];
+  try {
+    for (const f of files) {
+      stored.push(await storeEmbeddedFile({ category: 'CLIENT_GST_CERTIFICATE', clientName: c.name, folderKey: c.clientNo ?? c.code, file: f, actor, owner: clientOwner(c._id) }));
+    }
+    await Client.updateOne({ _id: c._id }, { $push: { gstCertificates: { $each: stored } }, $set: { updatedBy: actor.id } });
+  } catch (e) {
+    await discardStoredFiles(stored);
+    throw e;
+  }
+  return getClientDetails(id);
+}
+
+export async function removeGstCertificate(id: string, fileId: string, actor: Actor) {
+  const c = await getClient(id);
+  const file = c.gstCertificates?.find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('File not found');
+  await Client.updateOne({ _id: c._id }, { $pull: { gstCertificates: { fileId: file.fileId } }, $set: { updatedBy: actor.id } });
+  await eraseStoredFile(file as StoredFile, actor, clientOwner(c._id));
+  return getClientDetails(id);
+}
+
+/** Short-lived link to one of the client's files. */
+export async function clientFileUrl(id: string, fileId: string) {
+  const c = await getClient(id);
+  const file = c.gstCertificates?.find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('File not found');
+  return storedFileUrl(file as StoredFile);
+}
+
+/**
+ * The local client for a Zoho customer (existing client), so orders and leads point at a normal client record.
+ * Already linked: refreshed from Zoho. Same company already in Client Management (GSTIN, email or name): linked to
+ * it. Otherwise created as an EXISTING client from Zoho.
+ */
+export async function importZohoClient(z: ZohoClient, actor: Actor) {
+  const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, city: z.city, state: z.state };
+  const linked = await Client.findOne({ zohoId: z.zohoId, deletedAt: null });
+  if (linked) {
+    // Only what Zoho actually has overwrites; a blank in Zoho keeps the CRM value.
+    const set = Object.fromEntries(Object.entries(fromZoho).filter(([, v]) => v));
+    await Client.updateOne({ _id: linked._id }, { $set: { ...set, updatedBy: actor.id } });
+    return (await Client.findById(linked._id).lean())!;
+  }
+  const or: Record<string, unknown>[] = [];
+  if (z.gstin) or.push({ gstin: z.gstin });
+  if (z.email) or.push({ email: z.email });
+  let same = or.length ? await Client.findOne({ deletedAt: null, zohoId: null, $or: or }).lean() : null;
+  if (!same) {
+    const key = normKey(z.name);
+    const unlinked = await Client.find({ deletedAt: null, zohoId: null }).select('name').lean();
+    const hit = unlinked.find((c) => normKey(c.name) === key);
+    same = hit ? await Client.findById(hit._id).lean() : null;
+  }
+  if (same) {
+    await Client.updateOne({ _id: same._id }, { $set: { zohoId: z.zohoId, updatedBy: actor.id } });
+    await recordAudit({ actor, action: 'UPDATE', entity: 'Client', entityId: same._id, changes: [{ field: 'zohoId', oldValue: null, newValue: z.zohoId }], reason: 'Linked to the Zoho customer' });
+    return (await Client.findById(same._id).lean())!;
+  }
+  const c = await Client.create({
+    ...fromZoho,
+    code: await generateCode(z.name),
+    clientNo: await nextClientNo(),
+    clientType: 'EXISTING',
+    source: 'ZOHO',
+    zohoId: z.zohoId,
+    status: 'ACTIVE',
+    createdBy: actor.id,
+    updatedBy: actor.id,
+  });
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Added from the Zoho customer list (existing client)' });
+  return c.toObject();
+}
+
+/** Local clients already linked to these Zoho ids: zohoId -> client id. */
+export async function linkedZohoClients(zohoIds: string[]) {
+  const rows = await Client.find({ deletedAt: null, zohoId: { $in: zohoIds } }).select('zohoId clientNo').lean();
+  return new Map(rows.map((r) => [r.zohoId!, { clientId: String(r._id), clientNo: r.clientNo ?? null }]));
 }

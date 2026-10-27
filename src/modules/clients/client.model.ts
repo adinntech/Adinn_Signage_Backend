@@ -1,4 +1,5 @@
 import { Schema, model } from 'mongoose';
+import { storedFileSchema } from '../files/storedFile.schema';
 
 const contactSchema = new Schema(
   {
@@ -48,8 +49,12 @@ const onboardingSchema = new Schema(
   { _id: false },
 );
 
+/** Extra details BD adds per client: a free label with its value. */
+const customFieldSchema = new Schema({ label: { type: String, required: true, trim: true }, value: { type: String, trim: true } }, { _id: false });
+
 /** NEW = registered through the BD "New Client" flow and not re-ordered yet; EXISTING = repeat client (clients created before the BD CRM count as EXISTING). */
 export const CLIENT_TYPES = ['NEW', 'EXISTING'] as const;
+export const CLIENT_SOURCES = ['CRM', 'ZOHO'] as const;
 
 const clientSchema = new Schema(
   {
@@ -60,6 +65,8 @@ const clientSchema = new Schema(
     /** Client ID shown in the BD CRM, e.g. CLI-0001. Assigned once, never reused. */
     clientNo: { type: String, unique: true, sparse: true },
     email: { type: String, lowercase: true, trim: true },
+    /** Company phone number. */
+    phone: { type: String, trim: true },
     industry: { type: String, trim: true },
     contacts: [contactSchema],
     address: String,
@@ -68,9 +75,16 @@ const clientSchema = new Schema(
     state: String,
     pincode: String,
     gstin: { type: String, uppercase: true, trim: true },
+    /** GST certificate scans / PDFs (category CLIENT_GST_CERTIFICATE). */
+    gstCertificates: { type: [storedFileSchema], default: [] },
+    customFields: { type: [customFieldSchema], default: [] },
     notes: String,
     onboarding: { type: onboardingSchema, default: null },
     clientType: { type: String, enum: CLIENT_TYPES },
+    /** CRM = registered in Client Management; ZOHO = brought in from the Zoho customer list (existing clients). */
+    source: { type: String, enum: CLIENT_SOURCES, default: 'CRM' },
+    /** Zoho customer id (Books contact_id / CRM Account id) once this client is linked to Zoho. */
+    zohoId: { type: String, trim: true },
     status: { type: String, enum: ['ACTIVE', 'INACTIVE'], default: 'ACTIVE', index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -80,4 +94,5 @@ const clientSchema = new Schema(
 );
 clientSchema.index({ name: 1 });
 clientSchema.index({ clientType: 1, createdAt: -1 });
+clientSchema.index({ zohoId: 1 }, { sparse: true });
 export const Client = model('Client', clientSchema);

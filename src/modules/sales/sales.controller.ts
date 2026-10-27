@@ -9,6 +9,7 @@ import * as approval from './approval.service';
 import * as handover from './handover.service';
 import * as leads from './lead.service';
 import * as onboard from './onboarding.service';
+import * as recce from './recce.service';
 import * as mail from './salesMail.service';
 import * as orders from './order.service';
 import {
@@ -20,8 +21,11 @@ import {
   commentBody,
   createOrderBody,
   emailListQuery,
+  handoverNotesBody,
+  handoverScopeBody,
   handoverTypeBody,
   shopTotalBody,
+  voiceNoteBody,
   leadCandidatesQuery,
   leadListQuery,
   leadMoveBody,
@@ -34,7 +38,12 @@ import {
   sendEmailBody,
   shopRowsQuery,
   startLeadBody,
+  zohoClientQuery,
+  recceAssignBody,
+  recceCodesBody,
 } from './sales.validators';
+import { linkedZohoClients } from '../clients/client.service';
+import { searchZohoClients, zohoMode } from '../zoho/zoho.service';
 
 const id = (req: Request) => objectId.parse(req.params.id);
 const uploaded = (req: Request) =>
@@ -47,6 +56,13 @@ export const registerClient = asyncHandler(async (req, res) => {
 export const createOrder = asyncHandler(async (req, res) => {
   const r = await orders.createOrderForClient(createOrderBody.parse(req.body), actorOf(req));
   ok(res, r, undefined, r.replayed ? 200 : 201);
+});
+/** Existing Client picker: Zoho customers (sample list until Zoho is connected), each with its linked CRM client if any. */
+export const zohoClients = asyncHandler(async (req, res) => {
+  const { q } = zohoClientQuery.parse(req.query);
+  const items = await searchZohoClients(q);
+  const linked = await linkedZohoClients(items.map((z) => z.zohoId));
+  ok(res, items.map((z) => ({ ...z, clientId: linked.get(z.zohoId)?.clientId ?? null, clientNo: linked.get(z.zohoId)?.clientNo ?? null })), { mode: zohoMode() });
 });
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
@@ -84,6 +100,12 @@ export const uploadShops = asyncHandler(async (req, res) => ok(res, await handov
 export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
 export const addDocuments = asyncHandler(async (req, res) => ok(res, await handover.addDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
 export const removeDocument = asyncHandler(async (req, res) => ok(res, await handover.removeDocument(id(req), objectId.parse(req.params.docId), actorOf(req))));
+export const handoverScope = asyncHandler(async (req, res) => ok(res, await handover.setHandoverScope(id(req), handoverScopeBody.parse(req.body).full, actorOf(req))));
+export const handoverNotes = asyncHandler(async (req, res) => ok(res, await handover.setHandoverNotes(id(req), handoverNotesBody.parse(req.body).notes, actorOf(req))));
+export const addVoiceNote = asyncHandler(async (req, res) =>
+  ok(res, await handover.addVoiceNote(id(req), uploaded(req)[0], voiceNoteBody.parse(req.body ?? {}).durationSec, actorOf(req)), undefined, 201),
+);
+export const removeVoiceNote = asyncHandler(async (req, res) => ok(res, await handover.removeVoiceNote(id(req), objectId.parse(req.params.noteId), actorOf(req))));
 export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
 export const shopTotal = asyncHandler(async (req, res) => ok(res, await handover.setShopTotal(id(req), shopTotalBody.parse(req.body).total, actorOf(req))));
 export const verifyShops = asyncHandler(async (req, res) => ok(res, await handover.verifyShops(id(req), actorOf(req))));
@@ -171,4 +193,23 @@ export const addRequirementNote = asyncHandler(async (req, res) =>
 export const onboarding = asyncHandler(async (req, res) => ok(res, await onboard.getOnboarding(id(req), bd(req))));
 export const saveOnboarding = asyncHandler(async (req, res) => ok(res, await onboard.saveOnboarding(id(req), onboardingBody.parse(req.body), bd(req))));
 export const sendOnboarding = asyncHandler(async (req, res) => ok(res, await onboard.sendOnboarding(id(req), sendEmailBody.parse(req.body), bd(req)), undefined, 201));
+/* ------------------------------ Project Assign > Recce team ------------------------------ */
+
+export const recceUsers = asyncHandler(async (_req, res) => ok(res, await recce.recceUsers()));
+export const getRecce = asyncHandler(async (req, res) => ok(res, await recce.getRecce(id(req), bd(req))));
+/** Multipart: the email fields arrive as JSON in `payload`, the attachments as `files`. */
+export const sendCodeRequest = asyncHandler(async (req, res) => {
+  let raw: unknown = req.body;
+  if (typeof req.body?.payload === 'string') {
+    try {
+      raw = JSON.parse(req.body.payload);
+    } catch {
+      throw AppError.badRequest('Invalid email details');
+    }
+  }
+  ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), bd(req)), undefined, 201);
+});
+export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), bd(req))));
+export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), bd(req))));
+
 export const deleteRequirementNote =asyncHandler(async (req, res) => ok(res, await leads.deleteRequirementNote(id(req), objectId.parse(req.params.noteId), bd(req))));

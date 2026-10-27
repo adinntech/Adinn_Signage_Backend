@@ -4,17 +4,19 @@ import { AppError } from '../../common/errors';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
+import { User } from '../users/user.model';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import { approvalGaps } from './approval.service';
-import { getOrder, pipelineLog } from './order.service';
+import { getOrder } from './order.service';
 import { phpMailAvailable } from './phpMail';
-import { LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
+import { LEAD_FLOW, LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
 import type { leadListQuery } from './sales.validators';
 
 export const LEAD_STAGE_LABELS: Record<LeadStage, string> = {
-  NEW_LEAD: 'New Lead / Client Approach',
+  NEW_LEAD: 'New Lead',
+  PROJECT_ASSIGN: 'Project Assign',
   CLIENT_REGISTERED: 'Client Registered',
   REQUIREMENT_DISCUSSION: 'Requirement Discussion',
   RATE_CARD: 'Rate Card Preparation',
@@ -22,16 +24,29 @@ export const LEAD_STAGE_LABELS: Record<LeadStage, string> = {
   CLIENT_APPROVAL: 'Client Rate Approval',
 };
 
-/** Stages a lead can be in (all six are built; kept so a future stage can ship switched off). */
-const AVAILABLE: readonly LeadStage[] = LEAD_STAGES;
+/** Stages that can be worked in today. The older stages are kept (switched off) for later reuse. */
+const AVAILABLE: readonly LeadStage[] = LEAD_FLOW;
 
-/** Existing clients are already registered, so their leads skip Client Registered. */
-export const stagesFor = (clientType: string): LeadStage[] => LEAD_STAGES.filter((s) => s !== 'CLIENT_REGISTERED' || clientType === 'NEW');
+/** Every lead follows New Lead -> Project Assign, for new and existing clients alike. */
+export const stagesFor = (_clientType: string): LeadStage[] => [...LEAD_FLOW];
 
-const at = (s: string) => LEAD_STAGES.indexOf(s as LeadStage);
+/** The project can be handed to Client Servicing (or the Recce team) at Project Assign. */
+export const handoverUnlocked = (lead: { stage?: string | null; status?: string | null } | null | undefined) => lead?.stage === 'PROJECT_ASSIGN';
 
-/** Client Servicing handover opens once Requirement Discussion is done. */
-export const handoverUnlocked = (lead: { stage?: string | null } | null | undefined) => !!lead?.stage && at(lead.stage) > at('REQUIREMENT_DISCUSSION');
+/**
+ * Leads still open in a stage of the previous six-stage flow move to Project Assign, keeping that stage in
+ * `lead.legacyStage` (their notes, rate cards and documents stay on the order). Runs once per server start.
+ */
+let legacyMoved: Promise<unknown> | null = null;
+const moveLegacyLeads = () =>
+  (legacyMoved ??= SalesOrder.updateMany(
+    { lead: { $ne: null }, 'lead.status': { $ne: 'COMPLETED' }, 'lead.stage': { $nin: LEAD_FLOW } },
+    [{ $set: { 'lead.legacyStage': '$lead.stage', 'lead.stage': 'PROJECT_ASSIGN' } }],
+    { updatePipeline: true },
+  ).catch((e) => {
+    legacyMoved = null;
+    throw e;
+  }));
 
 const leadLog = (actor: Actor, action: string, fromStage: string | null, toStage: string | null, note?: string) => ({
   _id: new Types.ObjectId(),
@@ -52,7 +67,7 @@ export function assertLeadAccess(actor: Actor) {
 }
 
 async function liveLead(id: string) {
-  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo client clientType stage lead currentRevision onboardingPdf requirementNotesArray._id');
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo client clientType stage lead currentRevision onboardingPdf csAssignee requirementNotesArray._id');
   if (!o) throw AppError.notFound('Order not found');
   if (!o.lead) throw AppError.notFound('This order is not a lead yet');
   return o as typeof o & { lead: NonNullable<typeof o.lead> };
@@ -70,7 +85,11 @@ async function approvalTypes(orderId: unknown) {
 }
 
 /** What still has to be done before `stage` can be completed (empty when it can). */
-async function missingFor(stage: LeadStage, o: { _id: unknown; client: unknown; clientType: string; currentRevision?: number | null; requirementNotesArray?: unknown[]; onboardingPdf?: { fileId?: unknown } | null }) {
+async function missingFor(
+  stage: LeadStage,
+  o: { _id: unknown; client: unknown; clientType: string; currentRevision?: number | null; requirementNotesArray?: unknown[]; onboardingPdf?: { fileId?: unknown } | null; csAssignee?: unknown; recceAssignee?: unknown },
+) {
+  if (stage === 'PROJECT_ASSIGN') return o.csAssignee || o.recceAssignee ? [] : ['Assign the project to Client Servicing or the Recce team'];
   if (stage === 'CLIENT_REGISTERED') {
     const c = await Client.findById(o.client).select('email contacts').lean();
     const missing: string[] = [];
@@ -110,6 +129,7 @@ export async function leadCandidates(q: { q?: string | undefined }) {
 
 /** Lead list: newest movement first, filterable by stage, status and client flag. */
 export async function listLeads(q: z.infer<typeof leadListQuery>) {
+  await moveLegacyLeads();
   const filter: Record<string, unknown> = { deletedAt: null, lead: { $ne: null } };
   if (q.stage) filter['lead.stage'] = q.stage;
   if (q.status === 'CLOSED') filter['lead.status'] = 'CLOSED';
@@ -145,6 +165,7 @@ export async function listLeads(q: z.infer<typeof leadListQuery>) {
 
 /** KPI cards: open leads per stage, completed (won) and closed leads, and orders still waiting to become a lead. */
 export async function leadSummary() {
+  await moveLegacyLeads();
   const [byStage, closed, completed, waiting] = await Promise.all([
     SalesOrder.aggregate<{ _id: LeadStage; n: number }>([
       { $match: { deletedAt: null, lead: { $ne: null }, 'lead.status': { $nin: ['CLOSED', 'COMPLETED'] } } },
@@ -154,12 +175,13 @@ export async function leadSummary() {
     SalesOrder.countDocuments({ deletedAt: null, 'lead.status': 'COMPLETED' }),
     SalesOrder.countDocuments({ deletedAt: null, lead: null }),
   ]);
-  const stages = Object.fromEntries(LEAD_STAGES.map((s) => [s, byStage.find((b) => b._id === s)?.n ?? 0])) as Record<LeadStage, number>;
+  const stages = Object.fromEntries(LEAD_FLOW.map((s) => [s, byStage.find((b) => b._id === s)?.n ?? 0])) as Record<LeadStage, number>;
   return { open: byStage.reduce((n, b) => n + b.n, 0), closed, completed, waiting, stages };
 }
 
 /** One lead for the mind map: the order, every stage with its status and dates, the handover branch and the history. */
 export async function getLead(id: string) {
+  await moveLegacyLeads();
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
     .select('lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase approvalDocumentsArray.supersededAt')
     .populate('lead.startedBy', 'name role')
@@ -170,6 +192,7 @@ export async function getLead(id: string) {
   if (!o) throw AppError.notFound('Order not found');
   if (!o.lead) throw AppError.notFound('This order is not a lead yet');
   const order = await getOrder(id);
+  const recceAssignee = order.recce?.assignee ? await User.findById(order.recce.assignee).select('name role').lean() : null;
   const lead = o.lead;
   const flow = stagesFor(o.clientType);
   const won = lead.status === 'COMPLETED';
@@ -178,14 +201,14 @@ export async function getLead(id: string) {
   const logs = [...(o.leadLogsArray ?? [])].sort((a, b) => (b.at?.getTime() ?? 0) - (a.at?.getTime() ?? 0));
   const byName = (u: unknown) => (u as { name?: string } | null)?.name ?? '';
 
-  const stages = LEAD_STAGES.map((key) => {
+  const stages = flow.map((key) => {
     const i = flow.indexOf(key);
     const status = i < 0 ? 'SKIPPED' : i < current ? 'DONE' : i === current ? 'CURRENT' : 'PENDING';
     const done = status === 'DONE' ? logs.find((l) => l.action === 'COMPLETE' && l.fromStage === key) : undefined;
     return {
       key,
       label: LEAD_STAGE_LABELS[key],
-      number: LEAD_STAGES.indexOf(key) + 1,
+      number: flow.indexOf(key) + 1,
       status,
       available: AVAILABLE.includes(key),
       startedAt: status === 'CURRENT' ? lead.stageChangedAt : null,
@@ -202,15 +225,18 @@ export async function getLead(id: string) {
     stages,
     /** Still to do before the current stage can be completed. */
     missing: open
-      ? await missingFor(lead.stage as LeadStage, { _id: o._id, client: order.client._id, clientType: o.clientType, currentRevision: o.currentRevision, requirementNotesArray: notes, onboardingPdf: order.onboardingPdf })
+      ? await missingFor(lead.stage as LeadStage, { _id: o._id, client: order.client._id, clientType: o.clientType, currentRevision: o.currentRevision, requirementNotesArray: notes, onboardingPdf: order.onboardingPdf, csAssignee: order.csAssignee, recceAssignee: order.recce?.assignee })
       : [],
     onboarding: { pdf: order.onboardingPdf ?? null, mailEnabled: phpMailAvailable() },
     nextStage: won ? null : (flow[current + 1] ?? null),
-    previousStage: won ? null : (flow[current - 1] ?? null),
+    // New Lead is done when the order is created; there is no going back to it.
+    previousStage: won || flow[current - 1] === 'NEW_LEAD' ? null : (flow[current - 1] ?? null),
     /** The current stage is the last one: completing it completes the lead. */
     lastStage: !won && current === flow.length - 1,
     nextAvailable: !!flow[current + 1] && AVAILABLE.includes(flow[current + 1]!),
     handover: { unlocked: handoverUnlocked(lead), assignee: order.csAssignee ?? null, assignedAt: order.handover?.assignedAt ?? null, type: order.handoverType ?? null },
+    /** Project Assign: Recce team branch (codes, then the operations project assigned to a Recce / Operations person). */
+    recce: { available: true, assignee: recceAssignee, assignedAt: order.recce?.assignedAt ?? null, projectCode: order.recce?.projectCode ?? null },
     summary: {
       notes: notes.length,
       documents: notes.reduce((n, x) => n + (x.attachments?.length ?? 0), 0),
@@ -271,35 +297,20 @@ export async function completeStage(id: string, stage: LeadStage, note: string |
   return getLead(id);
 }
 
-/**
- * Client Rate Approval done: the lead is completed (won). The client approval is marked complete on the order in the
- * same write, which locks the rate card and the approval proof.
- */
+/** Project Assign done (the project is handed to Client Servicing or the Recce team): the lead is completed. */
 async function completeLead(o: Awaited<ReturnType<typeof liveLead>>, stage: LeadStage, note: string | undefined, actor: Actor) {
   const missing = await missingFor(stage, o);
   if (missing.length) throw new AppError(422, 'VALIDATION_ERROR', missing.join('. '), missing.map((message) => ({ path: 'stage', message })));
   const now = new Date();
   const r = await SalesOrder.updateOne(
-    { _id: o._id, 'lead.stage': stage, 'lead.status': 'OPEN', approvalStatus: { $ne: 'COMPLETED' } },
+    { _id: o._id, 'lead.stage': stage, 'lead.status': 'OPEN' },
     {
-      $set: {
-        'lead.status': 'COMPLETED',
-        'lead.completedAt': now,
-        'lead.completedBy': actor.id,
-        'lead.stageChangedAt': now,
-        approvalStatus: 'COMPLETED',
-        approvalCompletedAt: now,
-        approvalCompletedBy: actor.id,
-        updatedBy: actor.id,
-      },
-      $push: {
-        leadLogsArray: leadLog(actor, 'COMPLETE', stage, null, note ?? 'Client approved the rate card: lead completed'),
-        salespipelineLogs: pipelineLog(actor, 'APPROVAL_COMPLETE', o.stage, o.stage, 'Client approval marked complete (Lead Management)'),
-      },
+      $set: { 'lead.status': 'COMPLETED', 'lead.completedAt': now, 'lead.completedBy': actor.id, 'lead.stageChangedAt': now, updatedBy: actor.id },
+      $push: { leadLogsArray: leadLog(actor, 'COMPLETE', stage, null, note ?? 'Project assigned: lead completed') },
     },
   );
   if (!r.modifiedCount) throw AppError.conflict('This lead was moved meanwhile. Reload to see the latest.');
-  await recordAudit({ actor, action: 'APPROVAL_COMPLETE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'lead.status', oldValue: 'OPEN', newValue: 'COMPLETED' }], reason: `${o.orderNo}: client rate approval complete` });
+  await recordAudit({ actor, action: 'STAGE_CHANGE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'lead.status', oldValue: 'OPEN', newValue: 'COMPLETED' }], reason: `${o.orderNo}: lead completed` });
   return getLead(String(o._id));
 }
 
@@ -310,7 +321,7 @@ export async function previousStage(id: string, stage: LeadStage, note: string |
   if (o.lead.stage !== stage) throw AppError.conflict(`This lead is now in ${LEAD_STAGE_LABELS[o.lead.stage as LeadStage]}. Reload to see the latest.`);
   const flow = stagesFor(o.clientType);
   const prev = flow[flow.indexOf(stage) - 1];
-  if (!prev) throw AppError.conflict('This is the first stage of the lead.');
+  if (!prev || prev === 'NEW_LEAD') throw AppError.conflict('This is the first stage of the lead.');
   const r = await SalesOrder.updateOne(
     { _id: o._id, 'lead.stage': stage, 'lead.status': { $ne: 'CLOSED' } },
     { $set: { 'lead.stage': prev, 'lead.stageChangedAt': new Date(), updatedBy: actor.id }, $push: { leadLogsArray: leadLog(actor, 'BACK', stage, prev, note) } },

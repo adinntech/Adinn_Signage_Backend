@@ -1,11 +1,21 @@
 import { asyncHandler, ok } from '../../common/http';
-import { actorOf } from '../../common/query';
+import { actorOf, objectId } from '../../common/query';
 import { projectNotificationLog } from '../notifications/notification.service';
+import { shopRowsQuery } from '../sales/sales.validators';
+import * as bd from './bdHandover.service';
 import * as s from './project.service';
 import * as areaSvc from './surveyArea.service';
 import { assignBody, projectCreate, projectListQuery, projectPatch, requirementBody, stageBody, statusBody } from './project.validators';
 
 const id = (req: { params: Record<string, string | string[] | undefined> }) => String(req.params.id);
+
+/** BD handover of a project created from Lead Management (null for other projects). */
+export const bdHandover = asyncHandler(async (req, res) => ok(res, await bd.projectHandover(id(req))));
+export const bdHandoverShops = asyncHandler(async (req, res) => {
+  const { items, meta } = await bd.projectHandoverShops(id(req), shopRowsQuery.parse(req.query));
+  ok(res, items, meta);
+});
+export const bdHandoverFileUrl = asyncHandler(async (req, res) => ok(res, await bd.projectHandoverFileUrl(id(req), objectId.parse(req.params.fileId))));
 
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await s.listProjects(projectListQuery.parse(req.query), actorOf(req));

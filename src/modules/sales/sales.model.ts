@@ -7,8 +7,11 @@ import { rateCardRevisionSchema } from '../ratecards/ratecard.model';
 export const ORDER_STAGES = ['NEW_ORDER', 'COMPANY_PROFILE', 'RATE_CARD', 'CLIENT_APPROVAL'] as const;
 export type OrderStage = (typeof ORDER_STAGES)[number];
 
-/** ONBOARDING = Customer Onboarding Form (Lead Management > Client Registered), sent through the PHP mail service. */
-export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING'] as const;
+/**
+ * ONBOARDING = Customer Onboarding Form (Lead Management > Client Registered), sent through the PHP mail service.
+ * PROJECT_CODE_REQUEST = Project Assign > Recce team: asks for the project code to be created.
+ */
+export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING', 'PROJECT_CODE_REQUEST'] as const;
 export const DELIVERY_STATUSES = ['SENT', 'FAILED', 'SKIPPED'] as const;
 export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN', 'PHOTO', 'SUPPORTING_DOCUMENT'] as const;
 export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE', 'HANDOVER'] as const;
@@ -20,9 +23,13 @@ export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST'] as const;
 export const HANDOVER_TYPES = ['ASO', 'SHOP_DETAILS', 'SHOP_MEASUREMENT'] as const;
 export type HandoverType = (typeof HANDOVER_TYPES)[number];
 
-/** Lead Management mind map, in order. Client Registered applies to new clients only (existing clients skip it). */
-export const LEAD_STAGES = ['NEW_LEAD', 'CLIENT_REGISTERED', 'REQUIREMENT_DISCUSSION', 'RATE_CARD', 'NEGOTIATION', 'CLIENT_APPROVAL'] as const;
+/**
+ * Every Lead Management stage a lead can have been in. The mind map today is New Lead -> Project Assign (LEAD_FLOW);
+ * the other stages (onboarding, requirements, rate card, negotiation, approval) are kept, switched off, for reuse.
+ */
+export const LEAD_STAGES = ['NEW_LEAD', 'PROJECT_ASSIGN', 'CLIENT_REGISTERED', 'REQUIREMENT_DISCUSSION', 'RATE_CARD', 'NEGOTIATION', 'CLIENT_APPROVAL'] as const;
 export type LeadStage = (typeof LEAD_STAGES)[number];
+export const LEAD_FLOW = ['NEW_LEAD', 'PROJECT_ASSIGN'] as const satisfies readonly LeadStage[];
 export const LEAD_ACTIONS = ['START', 'COMPLETE', 'BACK', 'CLOSE', 'REOPEN', 'NOTES'] as const;
 
 /** Files keep their full metadata inside the order (no FileAsset row); see storedFile.schema. */
@@ -119,6 +126,16 @@ const handoverDocSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+/** handoverVoiceNotesArray: voice notes for Client Servicing, recorded in the browser or uploaded. */
+const voiceNoteSchema = new Schema({
+  file: { type: fileRef, required: true },
+  /** Length in seconds as measured by the browser (at most 5 minutes). */
+  durationSec: Number,
+  uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  role: String,
+  createdAt: { type: Date, default: Date.now },
+});
+
 /**
  * handoverShopsArray: shop rows from the BD's shop list, cleaned with the same rules as the project site import
  * (sites/site.fields). They become project sites when Client Servicing creates the project.
@@ -194,6 +211,36 @@ const orderSchema = new Schema(
       default: null,
     },
     handoverType: { type: String, enum: HANDOVER_TYPES, default: null },
+    /**
+     * Assign to Client Servicing toggle: true (default) = full handover (type, notes, voice notes, documents, shop
+     * list); false = client details and contact persons only.
+     */
+    handoverFull: { type: Boolean, default: true },
+    /**
+     * Project Assign > Assign to Recce Team: the codes the BD received, and who the project went to. Assigning creates
+     * the operations project (`project`, code = projectCode) and completes the lead.
+     */
+    recce: {
+      type: new Schema(
+        {
+          /** 8 digits, e.g. 22070277. */
+          projectCode: String,
+          /** EST- and 6 digits, e.g. EST-323343. */
+          estimationCode: String,
+          codesSavedAt: Date,
+          codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          assignee: { type: Schema.Types.ObjectId, ref: 'User' },
+          assignedAt: Date,
+          assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          note: String,
+          project: { type: Schema.Types.ObjectId, ref: 'Project' },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+    /** Additional notes for Client Servicing (full handover). */
+    handoverNotes: { type: String, default: null },
     /** Total Shops the BD typed; the uploaded list must have exactly this many rows to be verified. */
     declaredShopTotal: { type: Number, default: null },
     /** Set by Verify (count matches); cleared whenever the list or the declared total changes. */
@@ -229,6 +276,8 @@ const orderSchema = new Schema(
       type: new Schema(
         {
           stage: { type: String, enum: LEAD_STAGES, required: true },
+          /** Stage of the previous (six-stage) flow a lead was in when it moved to Project Assign. */
+          legacyStage: { type: String, enum: LEAD_STAGES },
           stageChangedAt: Date,
           startedAt: Date,
           startedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -254,6 +303,7 @@ const orderSchema = new Schema(
     salespipelineLogs: { type: [pipelineLogSchema], default: [] },
     handoverDocumentsArray: { type: [handoverDocSchema], default: [] },
     handoverShopsArray: { type: [handoverShopSchema], default: [] },
+    handoverVoiceNotesArray: { type: [voiceNoteSchema], default: [] },
     leadLogsArray: { type: [leadLogSchema], default: [] },
     requirementNotesArray: { type: [requirementNoteSchema], default: [] },
 
@@ -265,6 +315,9 @@ const orderSchema = new Schema(
 );
 orderSchema.index({ stage: 1, createdAt: -1 });
 orderSchema.index({ csAssignee: 1, createdAt: -1 });
+// A project / estimation code belongs to one order only.
+orderSchema.index({ 'recce.projectCode': 1 }, { unique: true, partialFilterExpression: { 'recce.projectCode': { $type: 'string' } } });
+orderSchema.index({ 'recce.estimationCode': 1 }, { unique: true, partialFilterExpression: { 'recce.estimationCode': { $type: 'string' } } });
 orderSchema.index({ 'lead.stage': 1, 'lead.stageChangedAt': -1 });
 // Resend / edit-details look orders up by an array item's id.
 orderSchema.index({ 'salesprofile._id': 1 });
@@ -274,4 +327,4 @@ orderSchema.index({ 'salesprofile.attachments.fileId': 1 });
 export const SalesOrder = model('SalesOrder', orderSchema);
 
 /** Projection that leaves out the activity arrays (Kanban, overview, checks). */
-export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -leadLogsArray -requirementNotesArray';
+export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -handoverVoiceNotesArray -leadLogsArray -requirementNotesArray';

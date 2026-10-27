@@ -68,6 +68,19 @@ const schema = z
     PHP_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     /** Optional key sent to the PHP mail service in the X-Api-Key header. */
     PHP_MAIL_KEY: optional,
+    /**
+     * Zoho (existing client list in Order Management / Lead Management). OAuth self client: client id + secret + a
+     * refresh token. Without them a sample list is served so the screens can be used before Zoho is connected.
+     */
+    ZOHO_CLIENT_ID: optional,
+    ZOHO_CLIENT_SECRET: optional,
+    ZOHO_REFRESH_TOKEN: optional,
+    /** Which Zoho app holds the customers: `books` (contacts) or `crm` (Accounts). */
+    ZOHO_PRODUCT: z.enum(['books', 'crm']).default('books'),
+    /** Zoho data centre domain suffix: in, com, eu, com.au ... */
+    ZOHO_DC: z.string().trim().default('in'),
+    /** Zoho Books organisation id (Books only). */
+    ZOHO_ORG_ID: optional,
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -112,5 +125,6 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
+  zohoEnabled: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   pushEnabled: !!(parsed.data.VAPID_PUBLIC_KEY && parsed.data.VAPID_PRIVATE_KEY),
 };

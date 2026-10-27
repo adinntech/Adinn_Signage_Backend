@@ -5,7 +5,8 @@ import { nextSeq } from '../../common/counter.model';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { registerCompany } from '../clients/client.service';
+import { importZohoClient, registerCompany } from '../clients/client.service';
+import { getZohoClient } from '../zoho/zoho.service';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { EmailTemplate } from '../templates/template.model';
@@ -14,7 +15,7 @@ import { ORDER_STAGES, SalesOrder, WITHOUT_ARRAYS, type OrderStage } from './sal
 import { revisionLabel } from '../ratecards/ratecard.model';
 import type { boardQuery, createOrderBody, orderListQuery, registerBody } from './sales.validators';
 
-const CLIENT_FIELDS = 'name clientName clientNo code email industry address city district state pincode gstin contacts clientType status';
+const CLIENT_FIELDS = 'name clientName clientNo code email phone customFields gstCertificates industry address city district state pincode gstin contacts clientType status';
 export const STAGE_LABELS: Record<OrderStage, string> = {
   NEW_ORDER: 'New Order',
   COMPANY_PROFILE: 'Company Profile',
@@ -43,9 +44,28 @@ async function nextOrderNo() {
 /** Existing BD ownership rule (same as projects): the BD who creates it owns it; others leave it unassigned. */
 const defaultOwner = (actor: Actor) => (actor.role === 'BD' ? actor.id : undefined);
 
-async function createOrder(client: { _id: Types.ObjectId }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor) {
+/** Lead log entry (same shape as lead.service's; kept here because order.service is imported by it). */
+export const leadLog = (actor: Actor, action: string, fromStage: string | null, toStage: string | null, note?: string) => ({
+  _id: new Types.ObjectId(),
+  action,
+  fromStage,
+  toStage,
+  by: new Types.ObjectId(actor.id),
+  role: actor.role,
+  at: new Date(),
+  note,
+});
+
+/**
+ * Every order is a lead from the start: New Lead (choosing the client and creating the order) is done here, so the
+ * lead opens at Project Assign.
+ */
+async function createOrder(client: { _id: Types.ObjectId }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string) {
   const note = `Order created (${clientType === 'NEW' ? 'new' : 'existing'} client)`;
+  const now = new Date();
   const order = await SalesOrder.create({
+    lead: { stage: 'PROJECT_ASSIGN', stageChangedAt: now, startedAt: now, startedBy: actor.id, status: 'OPEN', initialNotes },
+    leadLogsArray: [leadLog(actor, 'START', null, 'NEW_LEAD', 'Lead created with the order'), leadLog(actor, 'COMPLETE', 'NEW_LEAD', 'PROJECT_ASSIGN')],
     orderNo: await nextOrderNo(),
     client: client._id,
     clientType,
@@ -88,18 +108,25 @@ export async function registerNewClient(input: z.infer<typeof registerBody>, act
 }
 
 /**
- * Order Management: a new order for a registered client, flagged New / Existing client by the BD (default: New for
- * the client's first order, Existing after that). The client record itself is not modified; a client can have many orders.
+ * Order Management / Lead Management: a new order (and its lead). New Client = a client from Client Management;
+ * Existing Client = a Zoho customer, linked to (or added as) a local client first. A client can have many orders.
  */
 export async function createOrderForClient(input: z.infer<typeof createOrderBody>, actor: Actor) {
   const again = await replay(input.requestKey);
   if (again) return again;
-  const client = await Client.findOne({ _id: input.clientId, deletedAt: null }).lean();
-  if (!client) throw AppError.notFound('Client not found');
+  let client;
+  if (input.zohoId) {
+    const z = await getZohoClient(input.zohoId);
+    if (!z) throw AppError.notFound('This customer is no longer in Zoho. Refresh the list and choose again.');
+    client = await importZohoClient(z, actor);
+  } else {
+    client = await Client.findOne({ _id: input.clientId, deletedAt: null }).lean();
+    if (!client) throw AppError.notFound('Client not found');
+  }
   if (client.status !== 'ACTIVE') throw AppError.badRequest('This client is inactive. Reactivate it before creating an order.');
-  const flag = input.clientType ?? ((await SalesOrder.exists({ client: client._id, deletedAt: null })) ? 'EXISTING' : 'NEW');
+  const flag = input.clientType ?? (input.zohoId ? 'EXISTING' : 'NEW');
   try {
-    const order = await createOrder(client, flag, input.requestKey, actor);
+    const order = await createOrder(client, flag, input.requestKey, actor, input.initialNotes);
     return { client, order: await getOrder(String(order._id)), replayed: false };
   } catch (e) {
     if ((e as { code?: number }).code === 11000 && input.requestKey) {
@@ -338,7 +365,7 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
  */
 export async function orderFileUrl(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments requirementNotesArray.attachments onboardingPdf')
+    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file requirementNotesArray.attachments onboardingPdf')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
   const all: (StoredFile | null | undefined)[] = [
@@ -351,6 +378,7 @@ export async function orderFileUrl(id: string, fileId: string) {
     ...(o.salesprofile ?? []).flatMap((e) => e.attachments ?? []),
     ...(o.handoverDocumentsArray ?? []).map((d) => d.file),
     ...(o.handoverShopsArray ?? []).flatMap((s) => s.attachments ?? []),
+    ...(o.handoverVoiceNotesArray ?? []).map((v) => v.file),
   ];
   let file = all.find((f) => f && String(f.fileId) === fileId);
   if (!file) {

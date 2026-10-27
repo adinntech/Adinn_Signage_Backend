@@ -15,8 +15,9 @@ import { AppError } from '../../common/errors';
 export async function purgeClientData(clientId: string): Promise<{ purged: boolean; removed: Record<string, number> }> {
   if (await Project.exists({ client: clientId })) return { purged: false, removed: {} };
   const orders = await SalesOrder.find({ client: clientId }).lean();
+  const client = await Client.findById(clientId).select('gstCertificates').lean();
   // Files first: if one cannot be erased from storage, nothing is deleted and the person can simply try again.
-  const { failed } = await removeStoredFiles(collectStoredFiles(orders));
+  const { failed } = await removeStoredFiles(collectStoredFiles([...orders, client]));
   if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the client was not deleted: ${failed.join(', ')}. Try again.`);
   const ids = orders.map((o) => o._id);
   const removed: Record<string, number> = {};

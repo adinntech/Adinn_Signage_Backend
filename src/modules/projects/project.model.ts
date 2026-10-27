@@ -68,6 +68,10 @@ const projectSchema = new Schema(
     targetDate: Date,
     description: String,
     recceRequired: { type: Boolean, default: true },
+    /** Estimation code from the BD (EST-323343), for projects created from Lead Management > Assign to Recce Team. */
+    estimationCode: String,
+    /** The sales order this project came from (its BD handover: shop list, notes, voice notes, documents). */
+    salesOrder: { type: Schema.Types.ObjectId, ref: 'SalesOrder' },
     owner: { type: Schema.Types.ObjectId, ref: 'User', index: true }, // BD owner
     coordinator: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     sourceMessage: { type: Schema.Types.ObjectId, ref: 'CommunicationMessage' },

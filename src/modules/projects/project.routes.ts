@@ -21,6 +21,9 @@ projectRouter.post('/:id/assign', requirePermission('projects:write'), scoped, c
 projectRouter.post('/:id/stage', requirePermission('verification:manage'), scoped, c.stage);
 projectRouter.get('/:id/notification-log', requirePermission('projects:write'), scoped, c.notificationLog);
 projectRouter.get('/:id/requirement', requirePermission('projects:read'), scoped, c.getRequirement);
+projectRouter.get('/:id/bd-handover', requirePermission('projects:read'), scoped, c.bdHandover);
+projectRouter.get('/:id/bd-handover/shops', requirePermission('projects:read'), scoped, c.bdHandoverShops);
+projectRouter.get('/:id/bd-handover/files/:fileId/url', requirePermission('projects:read'), scoped, c.bdHandoverFileUrl);
 projectRouter.put('/:id/requirement', requirePermission('projects:write'), scoped, c.putRequirement);
 projectRouter.get('/:id/history', requirePermission('projects:read'), scoped, c.history);
 projectRouter.get('/:id/survey-areas', requirePermission('projects:read'), scoped, c.areas);
