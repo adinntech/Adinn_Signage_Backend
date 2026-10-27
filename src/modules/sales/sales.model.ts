@@ -239,9 +239,32 @@ const orderSchema = new Schema(
       ),
       default: null,
     },
+    /**
+     * The client as it was handed over (to Client Servicing or the Recce team), saved with the assignment so later
+     * client edits do not change what was handed over. GST certificates and custom fields: New (CRM) clients only.
+     */
+    handoverClient: {
+      type: new Schema(
+        {
+          clientType: String,
+          name: String,
+          clientName: String,
+          clientNo: String,
+          email: String,
+          phone: String,
+          gstin: String,
+          gstCertificates: { type: [fileRef], default: undefined },
+          customFields: { type: [new Schema({ label: String, value: String }, { _id: false })], default: undefined },
+          contacts: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })],
+          takenAt: Date,
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
     /** Additional notes for Client Servicing (full handover). */
     handoverNotes: { type: String, default: null },
-    /** Total Shops the BD typed; the uploaded list must have exactly this many rows to be verified. */
+    /** Total Shops: auto-filled with the valid rows of the uploaded list (the BD may correct it); Verify checks it against them. */
     declaredShopTotal: { type: Number, default: null },
     /** Set by Verify (count matches); cleared whenever the list or the declared total changes. */
     shopsVerifiedAt: { type: Date, default: null },

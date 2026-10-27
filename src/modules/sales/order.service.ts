@@ -365,10 +365,16 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
  */
 export async function orderFileUrl(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file requirementNotesArray.attachments onboardingPdf')
+    .select(
+      'client clientType salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file requirementNotesArray.attachments onboardingPdf handoverClient.gstCertificates',
+    )
     .lean();
   if (!o) throw AppError.notFound('Order not found');
+  // GST certificates of a New client, as handed over or as on the client now (Client Servicing / Operations open them through the order).
+  const certs = o.clientType === 'EXISTING' ? [] : ((await Client.findById(o.client).select('gstCertificates').lean())?.gstCertificates ?? []);
   const all: (StoredFile | null | undefined)[] = [
+    ...((o.handoverClient?.gstCertificates ?? []) as StoredFile[]),
+    ...(certs as StoredFile[]),
     o.onboardingPdf,
     ...(o.salescommentsArray ?? []).flatMap((c) => c.attachments ?? []),
     ...(o.requirementNotesArray ?? []).flatMap((n) => n.attachments ?? []),

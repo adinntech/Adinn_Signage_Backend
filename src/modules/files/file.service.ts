@@ -413,6 +413,7 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
       'handoverVoiceNotesArray.file.key',
       'requirementNotesArray.attachments.key',
       'onboardingPdf.key',
+      'handoverClient.gstCertificates.key',
     ].map((p) => ({ [p]: key })),
   }).lean();
   const inOrder = order && findStored(order, key);

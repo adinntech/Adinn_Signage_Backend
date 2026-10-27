@@ -42,10 +42,12 @@ const scenarioOf = (type: string | null | undefined): Scenario => (type === 'SHO
 type GapInput = {
   handoverFull?: boolean | null;
   handoverType?: string | null;
-  shopList?: { total?: number | null } | null;
+  shopList?: { total?: number | null; valid?: number | null } | null;
   declaredShopTotal?: number | null;
   shopsVerifiedAt?: Date | null;
 };
+/** Total Shops counts the valid rows only (warnings, errors and duplicates are listed for Client Servicing to check). */
+const validShops = (l: { total?: number | null; valid?: number | null }) => l.valid ?? l.total ?? 0;
 /** Toggle off = client details and contact persons only. Orders from before the toggle count as full. */
 const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
 
@@ -60,8 +62,8 @@ export function handoverGaps(o: GapInput, contactCount: number): string[] {
     return g;
   }
   if (!o.shopList) return ['Upload the shop list (Excel)'];
-  if (!o.declaredShopTotal) return ['Enter the Total Shops'];
-  if (o.declaredShopTotal !== o.shopList.total) return [`Total Shops (${o.declaredShopTotal}) does not match the shops in the Excel (${o.shopList.total})`];
+  if (!o.declaredShopTotal) return [validShops(o.shopList) ? 'Enter the Total Shops' : 'The shop list has no valid rows: correct the Excel and upload it again'];
+  if (o.declaredShopTotal !== validShops(o.shopList)) return [`Total Shops (${o.declaredShopTotal}) does not match the valid shops in the Excel (${validShops(o.shopList)})`];
   if (!o.shopsVerifiedAt) return ['Verify the shop list'];
   return [];
 }
@@ -190,15 +192,15 @@ export async function setShopTotal(id: string, total: number, actor: Actor) {
   return getHandover(id);
 }
 
-/** Verify: the Excel has exactly the Total Shops the BD entered. */
+/** Verify: the Excel has exactly the Total Shops (valid rows) the BD confirmed. */
 export async function verifyShops(id: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Only shop handovers have a shop list to verify');
   if (!o.shopList) throw AppError.conflict('Upload the shop list first');
   if (!o.declaredShopTotal) throw new AppError(422, 'VALIDATION_ERROR', 'Enter the Total Shops first', [{ path: 'total', message: 'Enter the Total Shops first' }]);
-  if (o.declaredShopTotal !== o.shopList.total)
-    throw AppError.conflict(`Total Shops (${o.declaredShopTotal}) does not match the shops in the Excel (${o.shopList.total}). Correct the count or the file.`);
+  if (o.declaredShopTotal !== validShops(o.shopList))
+    throw AppError.conflict(`Total Shops (${o.declaredShopTotal}) does not match the valid shops in the Excel (${validShops(o.shopList)}). Correct the count or the file.`);
   // Conditional on the same list and count, so a replaced file in between is not marked verified.
   const r = await SalesOrder.updateOne(
     { ...stillOpen(o), 'shopList.fileId': o.shopList.fileId, declaredShopTotal: o.declaredShopTotal },
@@ -261,8 +263,12 @@ export async function listShops(id: string, q: { page: number; limit: number; st
   return { items, meta: { page: q.page, limit: q.limit, total: rows.length, totalPages: Math.max(1, Math.ceil(rows.length / q.limit)) } };
 }
 
-/** Blank shop list in the same columns the project site import understands. */
-export const shopTemplate = () => buildTemplate('CLIENT_PROVIDED');
+/**
+ * Blank shop list in the columns the project site import understands. Shop + Measurement carries Size (W x H);
+ * Shop Details Only is the same list without Size.
+ */
+export const shopTemplate = (type: 'SHOP_DETAILS' | 'SHOP_MEASUREMENT' = 'SHOP_MEASUREMENT') =>
+  buildTemplate('CLIENT_PROVIDED', type === 'SHOP_DETAILS' ? ['size'] : []);
 
 async function storeHandoverFile(o: { _id: Types.ObjectId; orderNo: string; client: unknown }, file: UploadedFile, actor: Actor) {
   const client = await Client.findById(o.client).select('name').lean();
@@ -322,6 +328,8 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
       $set: {
         handoverShopsArray: shops,
         shopList: { fileId: stored.fileId, fileName: file.originalname.slice(0, 200), ...summary, uploadedBy: actor.id, uploadedAt: new Date() },
+        // Total Shops follows the valid rows of the new file; the BD may still correct it before verifying.
+        declaredShopTotal: summary.valid || null,
         // A new file has to be verified again.
         shopsVerifiedAt: null,
         shopsVerifiedBy: null,
@@ -411,6 +419,29 @@ export async function removeDocument(id: string, docId: string, actor: Actor) {
 }
 
 /**
+ * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
+ * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
+ */
+export async function clientSnapshot(o: { client: unknown; clientType?: string | null }) {
+  const c = await Client.findById(o.client).select('name clientName clientNo email phone gstin gstCertificates customFields contacts').lean();
+  if (!c) return null;
+  const crm = o.clientType !== 'EXISTING';
+  return {
+    clientType: o.clientType ?? null,
+    name: c.name,
+    clientName: c.clientName,
+    clientNo: c.clientNo,
+    email: c.email,
+    phone: c.phone,
+    gstin: c.gstin,
+    gstCertificates: crm ? (c.gstCertificates ?? []) : undefined,
+    customFields: crm ? (c.customFields ?? []).map((f) => ({ label: f.label, value: f.value })) : undefined,
+    contacts: (c.contacts ?? []).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
+    takenAt: new Date(),
+  };
+}
+
+/**
  * Hands the order to a Client Servicing person (once; no reassignment). Client and contacts come from the client
  * record; shop list and documents are optional. The Client Servicing person is notified in the app (and by email).
  */
@@ -431,6 +462,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
   const typeLabel = full ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'Client details only';
   const note = `Handed over to ${cs.name} (Client Servicing) · ${typeLabel}`;
   const now = new Date();
+  const snapshot = await clientSnapshot(o);
   // Assigning is the Project Assign step: the lead is completed in the same write.
   const lead = o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN';
   // Conditional on the checked state: a list replaced, a type or the toggle changed meanwhile is not handed over unverified.
@@ -448,6 +480,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
       $set: {
         csAssignee: cs._id,
         handover: { assignedBy: actor.id, assignedAt: now, note: input.note },
+        handoverClient: snapshot,
         updatedBy: actor.id,
         ...(lead ? { 'lead.status': 'COMPLETED', 'lead.completedAt': now, 'lead.completedBy': actor.id, 'lead.stageChangedAt': now } : {}),
       },

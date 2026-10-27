@@ -14,7 +14,7 @@ import { Project, Requirement } from '../projects/project.model';
 import { assignProject, createProject } from '../projects/project.service';
 import { projectCreate } from '../projects/project.validators';
 import { User } from '../users/user.model';
-import { HANDOVER_TYPE_LABELS, handoverGaps } from './handover.service';
+import { clientSnapshot, HANDOVER_TYPE_LABELS, handoverGaps } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -200,6 +200,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
 
   const now = new Date();
   const note = `Assigned to ${person.name} (Recce team) · project ${codes.projectCode}`;
+  const snapshot = await clientSnapshot(o);
   const r = await SalesOrder.updateOne(
     { _id: o._id, csAssignee: null, 'recce.assignee': null, 'recce.projectCode': codes.projectCode, 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' },
     {
@@ -209,6 +210,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
         'recce.assignedBy': actor.id,
         'recce.note': input.note,
         'recce.project': projectId,
+        handoverClient: snapshot,
         'lead.status': 'COMPLETED',
         'lead.completedAt': now,
         'lead.completedBy': actor.id,

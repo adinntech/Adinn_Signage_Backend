@@ -180,7 +180,9 @@ export async function removeGstCertificate(id: string, fileId: string, actor: Ac
   const file = c.gstCertificates?.find((f) => String(f.fileId) === fileId);
   if (!file) throw AppError.notFound('File not found');
   await Client.updateOne({ _id: c._id }, { $pull: { gstCertificates: { fileId: file.fileId } }, $set: { updatedBy: actor.id } });
-  await eraseStoredFile(file as StoredFile, actor, clientOwner(c._id));
+  // A certificate already handed over with an order (Lead Management) stays in storage for that handover.
+  const handedOver = await SalesOrder.exists({ 'handoverClient.gstCertificates.fileId': file.fileId });
+  if (!handedOver) await eraseStoredFile(file as StoredFile, actor, clientOwner(c._id));
   return getClientDetails(id);
 }
 

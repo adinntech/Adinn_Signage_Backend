@@ -85,11 +85,13 @@ export const scopeOrder = (req: Request, _res: Response, next: NextFunction, val
 /* --------------------------------- handover --------------------------------- */
 
 export const csUsers = asyncHandler(async (_req, res) => ok(res, await handover.csUsers()));
-export const shopTemplate = asyncHandler(async (_req, res) => {
+export const shopTemplate = asyncHandler(async (req, res) => {
+  // ?type=SHOP_DETAILS: without Size (W x H). Anything else: the Shop + Measurement template (with Size).
+  const type = req.query.type === 'SHOP_DETAILS' ? 'SHOP_DETAILS' : 'SHOP_MEASUREMENT';
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="shop-list-template.xlsx"');
+  res.setHeader('Content-Disposition', `attachment; filename="${type === 'SHOP_DETAILS' ? 'shop-details-template' : 'shop-measurement-template'}.xlsx"`);
   res.setHeader('Cache-Control', 'no-store');
-  res.send(await handover.shopTemplate());
+  res.send(await handover.shopTemplate(type));
 });
 export const getHandover = asyncHandler(async (req, res) => ok(res, await handover.getHandover(id(req))));
 export const shops = asyncHandler(async (req, res) => {

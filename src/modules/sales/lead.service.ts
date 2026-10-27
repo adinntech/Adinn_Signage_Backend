@@ -9,6 +9,7 @@ import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFi
 import type { StoredFile } from '../files/storedFile.schema';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import { approvalGaps } from './approval.service';
+import { handoverGaps } from './handover.service';
 import { getOrder } from './order.service';
 import { phpMailAvailable } from './phpMail';
 import { LEAD_FLOW, LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
@@ -183,7 +184,9 @@ export async function leadSummary() {
 export async function getLead(id: string) {
   await moveLegacyLeads();
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase approvalDocumentsArray.supersededAt')
+    .select(
+      'lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase approvalDocumentsArray.supersededAt salesprofile.kind salesprofile.status salesprofile.sentAt',
+    )
     .populate('lead.startedBy', 'name role')
     .populate('lead.closedBy', 'name role')
     .populate('lead.completedBy', 'name role')
@@ -219,6 +222,12 @@ export async function getLead(id: string) {
   const notes = o.requirementNotesArray ?? [];
   const revisions = o.rateCardArray ?? [];
   const open = (lead.status ?? 'OPEN') === 'OPEN';
+  // Mind map steps of the two Project Assign branches (what is done, what is still missing).
+  const contacts = (order.client as unknown as { contacts?: unknown[] } | null)?.contacts ?? [];
+  const csGaps = order.csAssignee ? [] : handoverGaps(order, contacts.length);
+  const recceGaps = order.recce?.assignee ? [] : handoverGaps({ ...order, handoverFull: true }, contacts.length);
+  const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
+  const shops = order.shopList ? { total: order.shopList.total ?? 0, valid: order.shopList.valid ?? 0, declared: order.declaredShopTotal ?? null, verified: !!order.shopsVerifiedAt } : null;
   return {
     order,
     lead: { ...lead, status: lead.status ?? 'OPEN' },
@@ -234,9 +243,30 @@ export async function getLead(id: string) {
     /** The current stage is the last one: completing it completes the lead. */
     lastStage: !won && current === flow.length - 1,
     nextAvailable: !!flow[current + 1] && AVAILABLE.includes(flow[current + 1]!),
-    handover: { unlocked: handoverUnlocked(lead), assignee: order.csAssignee ?? null, assignedAt: order.handover?.assignedAt ?? null, type: order.handoverType ?? null },
+    handover: {
+      unlocked: handoverUnlocked(lead),
+      assignee: order.csAssignee ?? null,
+      assignedAt: order.handover?.assignedAt ?? null,
+      type: order.handoverType ?? null,
+      /** Assign to Client Servicing toggle: full handover (true) or client details and contacts only (false). */
+      full: order.handoverFull !== false,
+      shops,
+      /** Ready for the Client Servicing person: nothing missing in the handover. */
+      ready: csGaps.length === 0,
+      missing: csGaps[0] ?? null,
+    },
     /** Project Assign: Recce team branch (codes, then the operations project assigned to a Recce / Operations person). */
-    recce: { available: true, assignee: recceAssignee, assignedAt: order.recce?.assignedAt ?? null, projectCode: order.recce?.projectCode ?? null },
+    recce: {
+      available: true,
+      assignee: recceAssignee,
+      assignedAt: order.recce?.assignedAt ?? null,
+      projectCode: order.recce?.projectCode ?? null,
+      estimationCode: order.recce?.estimationCode ?? null,
+      emails: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
+      /** The full handover (type and details) is complete. */
+      handoverReady: recceGaps.length === 0,
+      missing: recceGaps[0] ?? null,
+    },
     summary: {
       notes: notes.length,
       documents: notes.reduce((n, x) => n + (x.attachments?.length ?? 0), 0),

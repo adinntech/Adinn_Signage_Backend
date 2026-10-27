@@ -109,12 +109,14 @@ export async function buildSitesFile(sites: Record<string, any>[], columns: stri
   return Buffer.from(buf as ArrayBuffer);
 }
 
-export async function buildTemplate(scenario: Scenario) {
+/** `omit` drops columns (the BD shop list for Shop Details Only uses the client-measured columns without Size). */
+export async function buildTemplate(scenario: Scenario, omit: MappableField[] = []) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Sites');
-  const base: MappableField[] = scenario === 'CLIENT_PROVIDED'
-    ? ['dealerName', 'shopName', 'district', 'size', 'address1', 'address2', 'mobile', 'gstin']
-    : ['shopName', 'dealerName', 'location', 'district', 'address1', 'mobile', 'contactPerson'];
+  const base: MappableField[] = (scenario === 'CLIENT_PROVIDED'
+    ? (['dealerName', 'shopName', 'district', 'size', 'address1', 'address2', 'mobile', 'gstin'] as MappableField[])
+    : (['shopName', 'dealerName', 'location', 'district', 'address1', 'mobile', 'contactPerson'] as MappableField[])
+  ).filter((f) => !omit.includes(f));
   ws.columns = base.map((f) => ({ header: f === 'size' ? 'Size (W x H)' : FIELD_LABELS[f], key: f, width: 24 }));
   ws.getRow(1).font = { bold: true };
   ws.addRow(scenario === 'CLIENT_PROVIDED'

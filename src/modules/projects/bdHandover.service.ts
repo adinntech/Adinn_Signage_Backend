@@ -19,9 +19,15 @@ async function sourceOrderId(projectId: string) {
 export async function projectHandover(projectId: string) {
   const orderId = await sourceOrderId(projectId);
   if (!orderId) return null;
-  const o = await SalesOrder.findOne({ _id: orderId, deletedAt: null }).select('orderNo client recce').populate('recce.assignedBy', 'name').lean();
+  const o = await SalesOrder.findOne({ _id: orderId, deletedAt: null }).select('orderNo client clientType recce handoverClient').populate('recce.assignedBy', 'name').lean();
   if (!o) return null;
-  const [h, client] = await Promise.all([getHandover(orderId), Client.findById(o.client).select('name clientName clientNo email phone gstin contacts').lean()]);
+  // The client as handed over; projects assigned before the snapshot existed show the client as it is now.
+  const [h, live] = await Promise.all([
+    getHandover(orderId),
+    o.handoverClient ? null : Client.findById(o.client).select('name clientName clientNo email phone gstin gstCertificates customFields contacts').lean(),
+  ]);
+  const crm = o.clientType !== 'EXISTING';
+  const client = o.handoverClient ?? (live && { ...live, gstCertificates: crm ? live.gstCertificates : undefined, customFields: crm ? live.customFields : undefined });
   return {
     orderNo: o.orderNo,
     projectCode: o.recce?.projectCode ?? null,
