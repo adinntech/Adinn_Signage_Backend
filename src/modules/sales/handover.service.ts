@@ -11,7 +11,7 @@ import { autoMap, dupKeyOf, normalise, validateMapping, type MapTarget, type Map
 import { User } from '../users/user.model';
 import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
-import { SalesOrder, type HandoverType } from './sales.model';
+import { SalesOrder, type AssignRoute, type HandoverType } from './sales.model';
 import type { Scenario } from '../sites/site.fields';
 
 /** Client Servicing only sees orders handed to them; everyone else with sales access sees all. */
@@ -108,10 +108,61 @@ export async function getHandover(id: string) {
 /** Changes are only made while nobody has handed the order over; a parallel handover makes them no-ops (409). */
 const stillOpen = (o: { _id: Types.ObjectId }) => ({ _id: o._id, csAssignee: null, 'recce.assignee': null });
 
+/* ------------------------------ Project Assign route ------------------------------ */
+
+type RouteInput = {
+  _id: Types.ObjectId;
+  assignRoute?: string | null;
+  csAssignee?: unknown;
+  recce?: { assignee?: unknown; projectCode?: string | null } | null;
+  lead?: { status?: string | null; stage?: string | null } | null;
+};
+const ROUTE_LOCKED: Record<AssignRoute, string> = {
+  HANDOVER: 'This lead is on the Client Servicing route, so the Recce team route is disabled.',
+  RECCE: 'This lead is on the Recce team route, so the Client Servicing route is disabled.',
+};
+
+/** The route the order is on: the saved one or, for orders from before routes, what was already done on it. */
+export async function routeOf(o: RouteInput): Promise<AssignRoute | null> {
+  if (o.assignRoute) return o.assignRoute as AssignRoute;
+  if (o.csAssignee) return 'HANDOVER';
+  if (o.recce?.assignee || o.recce?.projectCode) return 'RECCE';
+  if (await SalesOrder.exists({ _id: o._id, 'salesprofile.kind': 'PROJECT_CODE_REQUEST' })) return 'RECCE';
+  return null;
+}
+
+/** The first save on a route takes it; the other route is then disabled (409 when the order is already on it). */
+export async function claimRoute(o: RouteInput, route: AssignRoute) {
+  const current = await routeOf(o);
+  if (current && current !== route) throw AppError.conflict(ROUTE_LOCKED[current]);
+  if (o.assignRoute) return;
+  // Conditional: two first saves at once (one per route) cannot both win.
+  const r = await SalesOrder.updateOne({ _id: o._id, assignRoute: null }, { $set: { assignRoute: route } });
+  if (!r.modifiedCount) {
+    const now = await SalesOrder.findById(o._id).select('assignRoute').lean();
+    if (now?.assignRoute && now.assignRoute !== route) throw AppError.conflict(ROUTE_LOCKED[now.assignRoute as AssignRoute]);
+  }
+}
+
+/**
+ * Handover details are step 1 of the Client Servicing route and step 3 of the Recce route. A save on an order with no
+ * route yet takes the Client Servicing route; on the Recce route it needs the codes first (steps in order).
+ */
+async function handoverRoute(o: RouteInput) {
+  if (o.csAssignee || o.recce?.assignee) return; // documents / voice notes added after handover
+  const route = await routeOf(o);
+  if (route === 'RECCE') {
+    if (!o.recce?.projectCode) throw AppError.conflict('Save the project code and estimation code first: handover details are the next step on the Recce route.');
+    return;
+  }
+  if (handoverUnlocked(o.lead)) await claimRoute(o, 'HANDOVER');
+}
+
 /** Assign to Client Servicing toggle. Switching it off keeps what was entered (type, list, notes); it is just not required. */
 export async function setHandoverScope(id: string, full: boolean, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const r = await SalesOrder.updateOne(stillOpen(o), { $set: { handoverFull: full, updatedBy: actor.id } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   return getHandover(id);
@@ -121,6 +172,7 @@ export async function setHandoverScope(id: string, full: boolean, actor: Actor) 
 export async function setHandoverNotes(id: string, notes: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const r = await SalesOrder.updateOne(stillOpen(o), { $set: { handoverNotes: notes || null, updatedBy: actor.id } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   return getHandover(id);
@@ -132,6 +184,7 @@ const MAX_VOICE_NOTES = 20;
 export async function addVoiceNote(id: string, file: UploadedFile | undefined, durationSec: number | undefined, actor: Actor) {
   if (!file) throw new AppError(422, 'VALIDATION_ERROR', 'Record or choose a voice note', [{ path: 'file', message: 'Record or choose a voice note' }]);
   const o = await liveOrder(id);
+  await handoverRoute(o);
   const count = await SalesOrder.findById(o._id).select('handoverVoiceNotesArray._id').lean();
   if ((count?.handoverVoiceNotesArray?.length ?? 0) >= MAX_VOICE_NOTES) throw AppError.conflict(`Up to ${MAX_VOICE_NOTES} voice notes per order`);
   const client = await Client.findById(o.client).select('name').lean();
@@ -163,6 +216,7 @@ export async function addVoiceNote(id: string, file: UploadedFile | undefined, d
 export async function removeVoiceNote(id: string, noteId: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const doc = await SalesOrder.findOne({ _id: o._id, 'handoverVoiceNotesArray._id': noteId }, { 'handoverVoiceNotesArray.$': 1 }).lean();
   const v = doc?.handoverVoiceNotesArray?.[0];
   if (!v) throw AppError.notFound('Voice note not found');
@@ -175,6 +229,7 @@ export async function removeVoiceNote(id: string, noteId: string, actor: Actor) 
 export async function setHandoverType(id: string, type: HandoverType, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   if (o.handoverType === type) return getHandover(id);
   // A list uploaded before handover types existed (type still empty) may get its first type; it must be verified again.
   if (o.shopList && o.handoverType) throw AppError.conflict('Remove the shop list before changing the handover type (the list is checked by the type).');
@@ -187,6 +242,7 @@ export async function setHandoverType(id: string, type: HandoverType, actor: Act
 export async function setShopTotal(id: string, total: number, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const r = await SalesOrder.updateOne(stillOpen(o), { $set: { declaredShopTotal: total, shopsVerifiedAt: null, shopsVerifiedBy: null, updatedBy: actor.id } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   return getHandover(id);
@@ -196,6 +252,7 @@ export async function setShopTotal(id: string, total: number, actor: Actor) {
 export async function verifyShops(id: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Only shop handovers have a shop list to verify');
   if (!o.shopList) throw AppError.conflict('Upload the shop list first');
   if (!o.declaredShopTotal) throw new AppError(422, 'VALIDATION_ERROR', 'Enter the Total Shops first', [{ path: 'total', message: 'Enter the Total Shops first' }]);
@@ -222,6 +279,7 @@ export async function addShopFiles(id: string, rowNumber: number, files: Uploade
   if (!files.length) throw new AppError(422, 'VALIDATION_ERROR', 'Choose at least one file', [{ path: 'files', message: 'Choose at least one file' }]);
   const o = await liveOrder(id);
   if (o.handoverType !== 'SHOP_MEASUREMENT') throw AppError.conflict('Shop photos and documents are for Shop + Measurement handovers');
+  await handoverRoute(o);
   if (!(await SalesOrder.exists({ _id: o._id, 'handoverShopsArray.rowNumber': rowNumber }))) throw AppError.notFound(`Shop row ${rowNumber} not found`);
   const stored: StoredFile[] = [];
   try {
@@ -241,6 +299,7 @@ export async function addShopFiles(id: string, rowNumber: number, files: Uploade
 export async function removeShopFile(id: string, rowNumber: number, fileId: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const doc = await SalesOrder.findOne({ _id: o._id, 'handoverShopsArray.rowNumber': rowNumber }, { 'handoverShopsArray.$': 1 }).lean();
   const file = (doc?.handoverShopsArray?.[0]?.attachments ?? []).find((a) => String(a.fileId) === fileId) as StoredFile | undefined;
   if (!file) throw AppError.notFound('File not found');
@@ -284,6 +343,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   if (!/\.(xlsx|csv)$/i.test(file.originalname)) throw AppError.badRequest('Upload the shop list as an .xlsx or .csv file');
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Choose Shop Details Only or Shop + Measurement before uploading a shop list');
   const scenario = scenarioOf(o.handoverType);
 
@@ -356,6 +416,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
 export async function removeShopList(id: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const doc = await SalesOrder.findById(o._id).select('handoverDocumentsArray').lean();
   const lists = (doc?.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SHOP_LIST');
   const oldRowFiles = await rowFiles(o._id);
@@ -376,6 +437,7 @@ export async function removeShopList(id: string, actor: Actor) {
 export async function addDocuments(id: string, files: UploadedFile[], actor: Actor) {
   if (!files.length) throw new AppError(422, 'VALIDATION_ERROR', 'Choose at least one file', [{ path: 'files', message: 'Choose at least one file' }]);
   const o = await liveOrder(id);
+  await handoverRoute(o);
   const stored: StoredFile[] = [];
   try {
     for (const f of files) stored.push(await storeHandoverFile(o, f, actor));
@@ -409,6 +471,7 @@ export async function addDocuments(id: string, files: UploadedFile[], actor: Act
 export async function removeDocument(id: string, docId: string, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
+  await handoverRoute(o);
   const doc = await SalesOrder.findOne({ _id: o._id, 'handoverDocumentsArray._id': docId }, { 'handoverDocumentsArray.$': 1 }).lean();
   const d = doc?.handoverDocumentsArray?.[0];
   if (!d || d.kind !== 'DOCUMENT') throw AppError.notFound('Document not found');
@@ -453,6 +516,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
   }
   if (o.recce?.assignee) throw AppError.conflict('This project is already assigned to the Recce team.');
   if (!handoverUnlocked(o.lead)) throw AppError.conflict('Assign Client Servicing from the Project Assign stage in Lead Management.');
+  if ((await routeOf(o)) === 'RECCE') throw AppError.conflict(ROUTE_LOCKED.RECCE);
   const client = await Client.findById(o.client).select('name contacts').lean();
   const gaps = handoverGaps(o, client?.contacts?.length ?? 0);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
@@ -471,6 +535,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
       _id: o._id,
       csAssignee: null,
       'recce.assignee': null,
+      assignRoute: { $in: [null, 'HANDOVER'] },
       ...(full
         ? { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.fileId': o.shopList?.fileId, shopsVerifiedAt: { $ne: null } }) }
         : { handoverFull: false }),
@@ -481,6 +546,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
         csAssignee: cs._id,
         handover: { assignedBy: actor.id, assignedAt: now, note: input.note },
         handoverClient: snapshot,
+        assignRoute: 'HANDOVER',
         updatedBy: actor.id,
         ...(lead ? { 'lead.status': 'COMPLETED', 'lead.completedAt': now, 'lead.completedBy': actor.id, 'lead.stageChangedAt': now } : {}),
       },

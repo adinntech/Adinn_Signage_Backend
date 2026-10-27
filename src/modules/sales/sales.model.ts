@@ -13,6 +13,8 @@ export type OrderStage = (typeof ORDER_STAGES)[number];
  */
 export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING', 'PROJECT_CODE_REQUEST'] as const;
 export const DELIVERY_STATUSES = ['SENT', 'FAILED', 'SKIPPED'] as const;
+export const ASSIGN_ROUTES = ['HANDOVER', 'RECCE'] as const;
+export type AssignRoute = (typeof ASSIGN_ROUTES)[number];
 export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN', 'PHOTO', 'SUPPORTING_DOCUMENT'] as const;
 export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE', 'HANDOVER'] as const;
 export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST'] as const;
@@ -216,6 +218,11 @@ const orderSchema = new Schema(
      * list); false = client details and contact persons only.
      */
     handoverFull: { type: Boolean, default: true },
+    /**
+     * Project Assign route, taken by the first save on it: HANDOVER (Client Servicing: handover details) or RECCE
+     * (Recce team: project code request email). The other route is then disabled.
+     */
+    assignRoute: { type: String, enum: ASSIGN_ROUTES, default: null },
     /**
      * Project Assign > Assign to Recce Team: the codes the BD received, and who the project went to. Assigning creates
      * the operations project (`project`, code = projectCode) and completes the lead.

@@ -9,7 +9,7 @@ import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFi
 import type { StoredFile } from '../files/storedFile.schema';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import { approvalGaps } from './approval.service';
-import { handoverGaps } from './handover.service';
+import { handoverGaps, routeOf } from './handover.service';
 import { getOrder } from './order.service';
 import { phpMailAvailable } from './phpMail';
 import { LEAD_FLOW, LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
@@ -243,6 +243,8 @@ export async function getLead(id: string) {
     /** The current stage is the last one: completing it completes the lead. */
     lastStage: !won && current === flow.length - 1,
     nextAvailable: !!flow[current + 1] && AVAILABLE.includes(flow[current + 1]!),
+    /** Project Assign route taken by the first save: HANDOVER (Client Servicing) or RECCE; null while neither is started. */
+    route: await routeOf({ _id: o._id, assignRoute: order.assignRoute, csAssignee: order.csAssignee, recce: order.recce }),
     handover: {
       unlocked: handoverUnlocked(lead),
       assignee: order.csAssignee ?? null,
@@ -262,7 +264,13 @@ export async function getLead(id: string) {
       assignedAt: order.recce?.assignedAt ?? null,
       projectCode: order.recce?.projectCode ?? null,
       estimationCode: order.recce?.estimationCode ?? null,
-      emails: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
+      emails: {
+        count: requests.length,
+        lastSentAt: requests[0]?.sentAt ?? null,
+        lastStatus: requests[0]?.status ?? null,
+        /** Step 1 done: sent, or not sent only because mail is off (a failed send does not count). */
+        done: requests.some((e) => e.status === 'SENT' || e.status === 'SKIPPED'),
+      },
       /** The full handover (type and details) is complete. */
       handoverReady: recceGaps.length === 0,
       missing: recceGaps[0] ?? null,

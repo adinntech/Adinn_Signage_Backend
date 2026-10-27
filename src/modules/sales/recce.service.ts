@@ -14,7 +14,7 @@ import { Project, Requirement } from '../projects/project.model';
 import { assignProject, createProject } from '../projects/project.service';
 import { projectCreate } from '../projects/project.validators';
 import { User } from '../users/user.model';
-import { clientSnapshot, HANDOVER_TYPE_LABELS, handoverGaps } from './handover.service';
+import { claimRoute, clientSnapshot, HANDOVER_TYPE_LABELS, handoverGaps, routeOf } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -37,10 +37,17 @@ function assertBranchOpen(o: OrderDoc) {
 
 const invalid = (path: string, message: string) => new AppError(422, 'VALIDATION_ERROR', message, [{ path, message }]);
 
+/**
+ * Step 1 of the Recce route is done once a project code request email is recorded as sent, or as not sent only because
+ * email is not configured on the server (SKIPPED). A failed send does not count.
+ */
+const EMAIL_DONE = ['SENT', 'SKIPPED'];
+const emailDone = (orderId: Types.ObjectId) => SalesOrder.exists({ _id: orderId, salesprofile: { $elemMatch: { kind: 'PROJECT_CODE_REQUEST', status: { $in: EMAIL_DONE } } } });
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientType lead recce csAssignee handoverType shopList declaredShopTotal shopsVerifiedAt salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType shopList declaredShopTotal shopsVerifiedAt salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -66,6 +73,10 @@ export async function getRecce(id: string, actor: Actor) {
     unlocked: o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN' && !o.csAssignee,
     codes,
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
+    /** Step 1 done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
+    emailDone: requests.some((e) => EMAIL_DONE.includes(e.status)),
+    /** Project Assign route: HANDOVER (Client Servicing), RECCE, or null until the first save. */
+    route: await routeOf({ _id: o._id, assignRoute: o.assignRoute, csAssignee: o.csAssignee, recce: o.recce }),
     /** Contacts that can go on the operations project (name, mobile and email all present). */
     projectContacts: contacts.filter((k) => k.phone && k.email).length,
     assignee: r?.assignee ?? null,
@@ -96,6 +107,8 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     const again = (await listEmails(id, 'PROJECT_CODE_REQUEST')).find((e) => e.requestKey === input.requestKey);
     if (again) return again;
   }
+  // The first email takes the Recce route (the Client Servicing route is then disabled).
+  await claimRoute(o, 'RECCE');
   const client = await Client.findById(o.client).select('name').lean();
   const stored: StoredFile[] = [];
   try {
@@ -120,6 +133,8 @@ async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, est
 export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody>, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o);
+  await claimRoute(o, 'RECCE');
+  if (!(await emailDone(o._id))) throw invalid('projectCode', 'Send the project code request email first');
   await assertCodesFree(o._id, input.projectCode, input.estimationCode);
   const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
   try {
@@ -148,6 +163,7 @@ async function dropProject(projectId: Types.ObjectId | string) {
 export async function assignRecce(id: string, input: z.infer<typeof recceAssignBody>, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o);
+  await claimRoute(o, 'RECCE');
   const codes = o.recce?.projectCode && o.recce.estimationCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode } : null;
   if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
   const client = await Client.findById(o.client).select('name contacts').lean();
@@ -211,6 +227,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
         'recce.note': input.note,
         'recce.project': projectId,
         handoverClient: snapshot,
+        assignRoute: 'RECCE',
         'lead.status': 'COMPLETED',
         'lead.completedAt': now,
         'lead.completedBy': actor.id,
