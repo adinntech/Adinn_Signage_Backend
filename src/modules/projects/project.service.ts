@@ -38,7 +38,7 @@ export async function systemMessage(project: Types.ObjectId | string, body: stri
   });
 }
 
-/** One client cannot have two live projects with the same campaign name, and codes are globally unique. */
+/** One client cannot have two live projects with the same campaign name, and codes are globally unique. Drafts are unfinished and never count as a clash. */
 async function assertUniqueProject(input: { code?: string | undefined; clientId?: unknown; campaign?: string | undefined }, exceptId?: string) {
   const notSelf = exceptId ? { _id: { $ne: exceptId } } : {};
   if (input.code) {
@@ -46,7 +46,7 @@ async function assertUniqueProject(input: { code?: string | undefined; clientId?
     if (clash) throw AppError.conflict(`Project code ${input.code} already exists`);
   }
   if (input.clientId && input.campaign) {
-    const rows = await Project.find({ client: input.clientId, deletedAt: null, status: { $ne: 'CANCELLED' }, ...notSelf }).select('code campaign').lean();
+    const rows = await Project.find({ client: input.clientId, deletedAt: null, status: { $nin: ['CANCELLED', 'DRAFT'] }, ...notSelf }).select('code campaign').lean();
     const clash = rows.find((r) => norm(r.campaign ?? '') === norm(input.campaign!));
     if (clash) throw AppError.conflict(`This client already has a project for campaign "${clash.campaign}" (${clash.code}). Use a different campaign name.`);
   }
@@ -291,6 +291,8 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   const p = await Project.findOne({ _id: id, deletedAt: null });
   if (!p) throw AppError.notFound('Project not found');
   if (['CANCELLED', 'COMPLETED', 'CLIENT_APPROVAL', 'IN_PROGRESS'].includes(p.status)) throw AppError.conflict(`A ${p.status.toLowerCase().replace('_', ' ')} project cannot be (re)assigned`);
+  // Drafts never block a new project, so the campaign clash is checked here, when the draft becomes live.
+  if (UNASSIGNED.includes(p.status)) await assertUniqueProject({ clientId: p.client, campaign: p.campaign ?? undefined }, id);
   const missing = missingForAssignment(p);
   if (missing.length) throw new AppError(422, 'VALIDATION_ERROR', `Complete the project before assigning: ${missing.join(', ')}`, missing.map((m) => ({ path: m, message: `Missing ${m}` })));
   // An ASO survey has no shop list, so it can go straight to a recce executive on the mobile app.
