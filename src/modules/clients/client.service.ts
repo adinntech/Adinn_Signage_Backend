@@ -9,7 +9,7 @@ import { discardStoredFiles, eraseStoredFile, storedFileUrl, storeEmbeddedFile, 
 import type { StoredFile } from '../files/storedFile.schema';
 import { purgeClientData } from './client.cascade';
 import { Client } from './client.model';
-import type { ZohoClient } from '../zoho/zoho.service';
+import type { ZohoClient } from '../zoho/zoho.customers';
 import type { z } from 'zod';
 import type { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration } from './client.validators';
 
@@ -141,6 +141,8 @@ export async function registerCompany(input: z.infer<typeof clientRegistration>,
   return c;
 }
 
+/* ---------------------------------- drafts ---------------------------------- */
+
 /** Client Code for a Zoho customer: its Zoho customer number when free, otherwise a code made from the name. */
 const codeForZoho = async (name: string, zohoCustomerNo?: string) => (zohoCustomerNo && !(await Client.exists({ code: zohoCustomerNo })) ? zohoCustomerNo : generateCode(name));
 
@@ -192,6 +194,68 @@ export async function importZohoClient(zohoContactId: string, f: ZohoFields, act
   const c = await Client.create({ ...f, contacts: withPrimary(f.contacts), code: await codeForZoho(f.name, zohoCustomerNo), clientNo: await nextClientNo(), clientType: 'EXISTING', zohoContactId, zohoSyncedAt: now, createdBy: actor.id, updatedBy: actor.id });
   await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Imported from Zoho Books' });
   return { client: c.toObject(), outcome: 'CREATED' as const };
+}
+
+/** Draft values as stored: blanks cleared, so a resumed form shows exactly what was typed. */
+const draftSet = (d: z.infer<typeof clientDraft>) => ({
+  name: d.name || null,
+  clientName: d.clientName || null,
+  email: d.email.toLowerCase() || null,
+  phone: d.phone || null,
+  gstin: d.gstin.toUpperCase() || null,
+  customFields: d.customFields,
+});
+
+/** Add Client "Save Draft" (first save): no checks, no Client ID; a placeholder code until it becomes a client. */
+export async function createDraft(d: z.infer<typeof clientDraft>, actor: Actor) {
+  // `new` + save: a draft may have no name yet (the typed create() expects one).
+  const c = new Client({
+    ...draftSet(d),
+    code: `DRAFT-${new Types.ObjectId().toHexString().slice(-12)}`,
+    status: 'DRAFT',
+    clientType: 'NEW',
+    createdBy: actor.id,
+    updatedBy: actor.id,
+  });
+  await c.save();
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Saved as a draft (Add Client)' });
+  return c.toObject();
+}
+
+/** Later "Save Draft" on the same draft (never a second record). */
+export async function updateDraft(id: string, d: z.infer<typeof clientDraft>, actor: Actor) {
+  const c = await Client.findOneAndUpdate({ _id: id, deletedAt: null, status: 'DRAFT' }, { $set: { ...draftSet(d), updatedBy: actor.id } }, { returnDocument: 'after' }).lean();
+  if (!c) throw AppError.conflict('This draft was already saved as a client or deleted. Reload the client list.');
+  return c;
+}
+
+/**
+ * "Save Client" on a draft: the full Add Client checks, then the same record becomes an active client with its code
+ * and Client ID. Conditional on DRAFT, so a double click or a second tab cannot create it twice.
+ */
+export async function finalizeDraft(id: string, input: z.infer<typeof clientRegistration>, actor: Actor) {
+  const draft = await Client.findOne({ _id: id, deletedAt: null }).select('status').lean();
+  if (!draft) throw AppError.notFound('Draft not found');
+  if (draft.status !== 'DRAFT') throw AppError.conflict('This draft was already saved as a client.');
+  await assertUnique(input, id);
+  const c = await Client.findOneAndUpdate(
+    { _id: id, status: 'DRAFT', deletedAt: null },
+    {
+      $set: {
+        ...input,
+        contacts: withPrimary(input.contacts),
+        code: await generateCode(input.name),
+        clientNo: await nextClientNo(),
+        clientType: 'NEW',
+        status: 'ACTIVE',
+        updatedBy: actor.id,
+      },
+    },
+    { returnDocument: 'after', runValidators: true },
+  ).lean();
+  if (!c) throw AppError.conflict('This draft was already saved as a client.');
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Registered as a new client from a draft (BD)' });
+  return c;
 }
 
 export async function updateClient(id: string, patch: z.infer<typeof clientPatch>, actor: Actor) {

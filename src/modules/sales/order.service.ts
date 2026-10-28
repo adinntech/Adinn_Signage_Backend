@@ -6,7 +6,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { linkZohoCustomer, registerCompany } from '../clients/client.service';
-import { getZohoClient } from '../zoho/zoho.service';
+import { getZohoClient } from '../zoho/zoho.customers';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { EmailTemplate } from '../templates/template.model';

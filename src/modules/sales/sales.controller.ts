@@ -43,7 +43,7 @@ import {
   recceCodesBody,
 } from './sales.validators';
 import { linkedZohoClients } from '../clients/client.service';
-import { searchZohoClients, zohoMode } from '../zoho/zoho.service';
+import { searchZohoClients, zohoMode } from '../zoho/zoho.customers';
 
 const id = (req: Request) => objectId.parse(req.params.id);
 const uploaded = (req: Request) =>

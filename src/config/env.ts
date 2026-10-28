@@ -143,7 +143,7 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
-  zohoEnabled: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
+  zohoCustomersLive: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),
   zohoAccountsUrl: parsed.data.ZOHO_ACCOUNTS_URL.replace(/\/+$/, ''),

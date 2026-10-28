@@ -21,7 +21,7 @@ export interface ZohoClient {
   state?: string | undefined;
 }
 
-export const zohoMode = (): 'live' | 'sample' => (env.zohoEnabled ? 'live' : 'sample');
+export const zohoMode = (): 'live' | 'sample' => (env.zohoCustomersLive ? 'live' : 'sample');
 
 const SAMPLE: ZohoClient[] = [
   { zohoId: 'sample-1001', name: 'Aditya Birla Fashion and Retail Ltd', clientName: 'Suresh Kumar', email: 'accounts@abfrl.example.com', phone: '02266917000', gstin: '27AAACP7247N1ZS', city: 'Mumbai', state: 'Maharashtra' },
@@ -114,7 +114,7 @@ const fromCrm = (a: CrmAccount): ZohoClient => ({
 /** Up to 25 Zoho customers matching `q` (company or contact name), A-Z. */
 export async function searchZohoClients(q: string): Promise<ZohoClient[]> {
   const term = q.trim();
-  if (!env.zohoEnabled) {
+  if (!env.zohoCustomersLive) {
     const t = term.toLowerCase();
     return SAMPLE.filter((c) => !t || c.name.toLowerCase().includes(t) || c.clientName?.toLowerCase().includes(t) || c.gstin?.toLowerCase().includes(t)).slice(0, 25);
   }
@@ -140,7 +140,7 @@ export async function searchZohoClients(q: string): Promise<ZohoClient[]> {
 
 /** One Zoho customer by id (null when Zoho no longer has it). */
 export async function getZohoClient(zohoId: string): Promise<ZohoClient | null> {
-  if (!env.zohoEnabled) return SAMPLE.find((c) => c.zohoId === zohoId) ?? null;
+  if (!env.zohoCustomersLive) return SAMPLE.find((c) => c.zohoId === zohoId) ?? null;
   if (env.ZOHO_PRODUCT === 'books') {
     if (!env.ZOHO_ORG_ID) throw new AppError(502, 'ZOHO_ERROR', 'ZOHO_ORG_ID is not set for Zoho Books.');
     const r = await zohoGet<{ contact?: BooksContact }>(`/books/v3/contacts/${encodeURIComponent(zohoId)}`, { organization_id: env.ZOHO_ORG_ID });
