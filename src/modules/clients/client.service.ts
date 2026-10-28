@@ -1,3 +1,4 @@
+import { Types } from 'mongoose';
 import { AppError } from '../../common/errors';
 import { nextSeq } from '../../common/counter.model';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
@@ -10,11 +11,12 @@ import { purgeClientData } from './client.cascade';
 import { Client } from './client.model';
 import type { ZohoClient } from '../zoho/zoho.service';
 import type { z } from 'zod';
-import type { clientBody, clientListQuery, clientPatch, clientRegistration } from './client.validators';
+import type { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration } from './client.validators';
 
 /** Rejects a client whose name (ignoring case, spacing and punctuation), GSTIN or company email already belongs to another active client. */
 async function assertUnique(input: { name?: string | undefined; gstin?: string | undefined; email?: string | undefined }, exceptId?: string) {
-  const notSelf = exceptId ? { _id: { $ne: exceptId } } : {};
+  // Drafts are not clients yet: they never block a name, GSTIN or email.
+  const notSelf: Record<string, unknown> = { status: { $ne: 'DRAFT' }, ...(exceptId ? { _id: { $ne: exceptId } } : {}) };
   if (input.name) {
     const key = normKey(input.name);
     const others = await Client.find({ deletedAt: null, ...notSelf }).select('name code clientNo').lean();
@@ -39,8 +41,9 @@ const nextClientNo = async () => `CLI-${String(await nextSeq('clientNo')).padSta
 let numbered = false;
 async function ensureClientNumbers() {
   if (numbered) return;
-  const missing = await Client.find({ clientNo: null }).sort({ createdAt: 1 }).select('_id').lean();
-  for (const c of missing) await Client.updateOne({ _id: c._id, clientNo: null }, { clientNo: await nextClientNo() });
+  // Drafts get their Client ID when they are saved as a client.
+  const missing = await Client.find({ clientNo: null, status: { $ne: 'DRAFT' } }).sort({ createdAt: 1 }).select('_id').lean();
+  for (const c of missing) await Client.updateOne({ _id: c._id, clientNo: null, status: { $ne: 'DRAFT' } }, { clientNo: await nextClientNo() });
   numbered = true;
 }
 
@@ -63,8 +66,8 @@ const withPrimary = <T extends { isPrimary?: boolean }>(contacts: T[]) => {
 
 export async function listClients(q: z.infer<typeof clientListQuery>) {
   await ensureClientNumbers();
-  const filter: Record<string, unknown> = { deletedAt: null };
-  if (q.status) filter.status = q.status;
+  // Drafts are listed only when asked for (status=DRAFT).
+  const filter: Record<string, unknown> = { deletedAt: null, status: q.status ?? { $ne: 'DRAFT' } };
   if (q.clientType === 'NEW') filter.clientType = 'NEW';
   if (q.clientType === 'EXISTING') filter.clientType = { $ne: 'NEW' };
   // CRM = registered in Client Management (the New Client list); ZOHO = brought in from Zoho.
@@ -86,14 +89,16 @@ export async function clientSummary() {
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-  const [newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth] = await Promise.all([
+  const live: Record<string, unknown> = { deletedAt: null, status: { $ne: 'DRAFT' } };
+  const [newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth, draftClients] = await Promise.all([
     SalesOrder.countDocuments({ deletedAt: null, clientType: 'NEW' }),
     SalesOrder.countDocuments({ deletedAt: null, clientType: 'EXISTING' }),
-    Client.countDocuments({ deletedAt: null }),
+    Client.countDocuments(live),
     Client.countDocuments({ deletedAt: null, status: 'ACTIVE' }),
-    Client.countDocuments({ deletedAt: null, createdAt: { $gte: monthStart } }),
+    Client.countDocuments({ ...live, createdAt: { $gte: monthStart } }),
+    Client.countDocuments({ deletedAt: null, status: 'DRAFT' }),
   ]);
-  return { newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth };
+  return { newClientOrders, existingClientOrders, totalClients, activeClients, clientsThisMonth, draftClients };
 }
 
 export async function getClient(id: string) {
@@ -133,6 +138,70 @@ export async function registerCompany(input: z.infer<typeof clientRegistration>,
     updatedBy: actor.id,
   });
   await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Registered as a new client (BD)' });
+  return c;
+}
+
+/* ---------------------------------- drafts ---------------------------------- */
+
+/** Draft values as stored: blanks cleared, so a resumed form shows exactly what was typed. */
+const draftSet = (d: z.infer<typeof clientDraft>) => ({
+  name: d.name || null,
+  clientName: d.clientName || null,
+  email: d.email.toLowerCase() || null,
+  phone: d.phone || null,
+  gstin: d.gstin.toUpperCase() || null,
+  customFields: d.customFields,
+});
+
+/** Add Client "Save Draft" (first save): no checks, no Client ID; a placeholder code until it becomes a client. */
+export async function createDraft(d: z.infer<typeof clientDraft>, actor: Actor) {
+  // `new` + save: a draft may have no name yet (the typed create() expects one).
+  const c = new Client({
+    ...draftSet(d),
+    code: `DRAFT-${new Types.ObjectId().toHexString().slice(-12)}`,
+    status: 'DRAFT',
+    clientType: 'NEW',
+    createdBy: actor.id,
+    updatedBy: actor.id,
+  });
+  await c.save();
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Saved as a draft (Add Client)' });
+  return c.toObject();
+}
+
+/** Later "Save Draft" on the same draft (never a second record). */
+export async function updateDraft(id: string, d: z.infer<typeof clientDraft>, actor: Actor) {
+  const c = await Client.findOneAndUpdate({ _id: id, deletedAt: null, status: 'DRAFT' }, { $set: { ...draftSet(d), updatedBy: actor.id } }, { returnDocument: 'after' }).lean();
+  if (!c) throw AppError.conflict('This draft was already saved as a client or deleted. Reload the client list.');
+  return c;
+}
+
+/**
+ * "Save Client" on a draft: the full Add Client checks, then the same record becomes an active client with its code
+ * and Client ID. Conditional on DRAFT, so a double click or a second tab cannot create it twice.
+ */
+export async function finalizeDraft(id: string, input: z.infer<typeof clientRegistration>, actor: Actor) {
+  const draft = await Client.findOne({ _id: id, deletedAt: null }).select('status').lean();
+  if (!draft) throw AppError.notFound('Draft not found');
+  if (draft.status !== 'DRAFT') throw AppError.conflict('This draft was already saved as a client.');
+  await assertUnique(input, id);
+  const c = await Client.findOneAndUpdate(
+    { _id: id, status: 'DRAFT', deletedAt: null },
+    {
+      $set: {
+        ...input,
+        contacts: withPrimary(input.contacts),
+        code: await generateCode(input.name),
+        clientNo: await nextClientNo(),
+        clientType: 'NEW',
+        status: 'ACTIVE',
+        updatedBy: actor.id,
+      },
+    },
+    { returnDocument: 'after', runValidators: true },
+  ).lean();
+  if (!c) throw AppError.conflict('This draft was already saved as a client.');
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Registered as a new client from a draft (BD)' });
   return c;
 }
 
@@ -211,11 +280,13 @@ export async function importZohoClient(z: ZohoClient, actor: Actor) {
   const or: Record<string, unknown>[] = [];
   if (z.gstin) or.push({ gstin: z.gstin });
   if (z.email) or.push({ email: z.email });
-  let same = or.length ? await Client.findOne({ deletedAt: null, zohoId: null, $or: or }).lean() : null;
+  // A draft is not a client yet, so a Zoho customer never links to one.
+  const live: Record<string, unknown> = { deletedAt: null, zohoId: null, status: { $ne: 'DRAFT' } };
+  let same = or.length ? await Client.findOne({ ...live, $or: or }).lean() : null;
   if (!same) {
     const key = normKey(z.name);
-    const unlinked = await Client.find({ deletedAt: null, zohoId: null }).select('name').lean();
-    const hit = unlinked.find((c) => normKey(c.name) === key);
+    const unlinked = await Client.find(live).select('name').lean();
+    const hit = unlinked.find((c) => c.name && normKey(c.name) === key);
     same = hit ? await Client.findById(hit._id).lean() : null;
   }
   if (same) {

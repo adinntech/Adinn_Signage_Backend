@@ -2,7 +2,7 @@ import type { Request } from 'express';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import * as s from './client.service';
-import { clientBody, clientListQuery, clientPatch, clientRegistration } from './client.validators';
+import { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration } from './client.validators';
 
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await s.listClients(clientListQuery.parse(req.query));
@@ -16,6 +16,12 @@ export const create = asyncHandler(async (req, res) =>
 /** Client Management "Add Client": company + contacts only (orders are created separately in Order Management). */
 export const register = asyncHandler(async (req, res) =>
   ok(res, (await s.registerCompany(clientRegistration.parse(req.body), actorOf(req))).toObject(), undefined, 201),
+);
+/** Add Client "Save Draft": first save creates the draft, later saves update it; "Save Client" turns it into a client. */
+export const createDraft = asyncHandler(async (req, res) => ok(res, await s.createDraft(clientDraft.parse(req.body), actorOf(req)), undefined, 201));
+export const updateDraft = asyncHandler(async (req, res) => ok(res, await s.updateDraft(objectId.parse(req.params.id), clientDraft.parse(req.body), actorOf(req))));
+export const finalizeDraft = asyncHandler(async (req, res) =>
+  ok(res, await s.finalizeDraft(objectId.parse(req.params.id), clientRegistration.parse(req.body), actorOf(req))),
 );
 export const update = asyncHandler(async (req, res) =>
   ok(res, await s.updateClient(String(req.params.id), clientPatch.parse(req.body), actorOf(req))),

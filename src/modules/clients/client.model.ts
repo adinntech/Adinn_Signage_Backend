@@ -49,8 +49,14 @@ const onboardingSchema = new Schema(
   { _id: false },
 );
 
-/** Extra details BD adds per client: a free label with its value. */
-const customFieldSchema = new Schema({ label: { type: String, required: true, trim: true }, value: { type: String, trim: true } }, { _id: false });
+/** Extra details BD adds per client: a free label with its value (the API requires the label, except on a draft). */
+const customFieldSchema = new Schema({ label: { type: String, trim: true }, value: { type: String, trim: true } }, { _id: false });
+
+/** DRAFT = an Add Client form saved part-way: no Client ID, not listed as a client or offered in pickers until saved. */
+export const CLIENT_STATUSES = ['ACTIVE', 'INACTIVE', 'DRAFT'] as const;
+function notDraft(this: { status?: string }) {
+  return this.status !== 'DRAFT';
+}
 
 /** NEW = registered through the BD "New Client" flow and not re-ordered yet; EXISTING = repeat client (clients created before the BD CRM count as EXISTING). */
 export const CLIENT_TYPES = ['NEW', 'EXISTING'] as const;
@@ -58,10 +64,12 @@ export const CLIENT_SOURCES = ['CRM', 'ZOHO'] as const;
 
 const clientSchema = new Schema(
   {
-    name: { type: String, required: true, trim: true },
+    // Required except on a draft. Typed as required: every record other code reads (non-draft) has a name.
+    name: { type: String, required: notDraft as unknown as true, trim: true },
     /** Optional client name typed by BD, shown alongside the company name. */
     clientName: { type: String, trim: true },
-    code: { type: String, required: true, unique: true, uppercase: true, trim: true }, // used in project IDs
+    // used in project IDs; a draft carries a placeholder (DRAFT-...) until it is saved as a client
+    code: { type: String, required: true, unique: true, uppercase: true, trim: true },
     /** Client ID shown in the BD CRM, e.g. CLI-0001. Assigned once, never reused. */
     clientNo: { type: String, unique: true, sparse: true },
     email: { type: String, lowercase: true, trim: true },
@@ -85,7 +93,7 @@ const clientSchema = new Schema(
     source: { type: String, enum: CLIENT_SOURCES, default: 'CRM' },
     /** Zoho customer id (Books contact_id / CRM Account id) once this client is linked to Zoho. */
     zohoId: { type: String, trim: true },
-    status: { type: String, enum: ['ACTIVE', 'INACTIVE'], default: 'ACTIVE', index: true },
+    status: { type: String, enum: CLIENT_STATUSES, default: 'ACTIVE', index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     deletedAt: Date,

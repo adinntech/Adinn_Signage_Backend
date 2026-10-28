@@ -123,6 +123,7 @@ export async function createOrderForClient(input: z.infer<typeof createOrderBody
     client = await Client.findOne({ _id: input.clientId, deletedAt: null }).lean();
     if (!client) throw AppError.notFound('Client not found');
   }
+  if (client.status === 'DRAFT') throw AppError.badRequest('This client is still a draft. Finish it in Client Management before creating an order.');
   if (client.status !== 'ACTIVE') throw AppError.badRequest('This client is inactive. Reactivate it before creating an order.');
   const flag = input.clientType ?? (input.zohoId ? 'EXISTING' : 'NEW');
   try {

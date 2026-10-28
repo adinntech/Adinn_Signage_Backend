@@ -31,6 +31,8 @@ export const contactList = contactArray.default([]);
 
 /** Company phone: mobile or landline with STD code, digits only. */
 const companyPhone = z.string().trim().regex(/^\d{10,12}$/, 'Phone number must be 10-12 digits');
+/** Add / Edit Client (BD CRM): exactly 10 digits. The original client API keeps accepting 10-12. */
+const companyPhone10 = z.string().trim().regex(/^\d{10}$/, 'Phone number must be exactly 10 digits');
 const customFieldArray = z
   .array(z.object({ label: z.string().trim().min(1, 'Enter the field label').max(60), value: z.string().trim().min(1, 'Enter the value').max(500) }))
   .max(30)
@@ -63,11 +65,36 @@ export const clientBody = z.object({
   customFields: customFieldArray.optional(),
 });
 // No defaults on a patch: a patch without contacts / status must keep the saved ones.
-export const clientPatch = clientBody.partial().omit({ code: true }).extend({ contacts: contactArray.optional(), status: z.enum(['ACTIVE', 'INACTIVE']).optional() });
+// Edit Client sends the company phone: a changed phone must be 10 digits. GSTIN stays optional on a patch (a contact
+// edit sends only contacts); the form itself requires it.
+export const clientPatch = clientBody
+  .partial()
+  .omit({ code: true })
+  .extend({ contacts: contactArray.optional(), status: z.enum(['ACTIVE', 'INACTIVE']).optional(), phone: companyPhone10.optional().or(z.literal('').transform(() => undefined)) });
 export const clientListQuery = listQuery.extend({
-  status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+  // Without a status the list leaves drafts out; DRAFT lists only the drafts.
+  status: z.enum(['ACTIVE', 'INACTIVE', 'DRAFT']).optional(),
   clientType: z.enum(CLIENT_TYPES).optional(),
   source: z.enum(CLIENT_SOURCES).optional(),
+});
+
+/**
+ * Add Client "Save Draft": whatever has been typed so far, nothing mandatory and no format checks (they run when the
+ * draft is saved as a client). Lengths are still capped.
+ */
+const draftStr = (max: number) => z.string().trim().max(max).optional().default('');
+export const clientDraft = z.object({
+  name: draftStr(120),
+  clientName: draftStr(120),
+  email: draftStr(200),
+  phone: draftStr(20),
+  gstin: draftStr(20),
+  customFields: z
+    .array(z.object({ label: draftStr(60), value: draftStr(500) }))
+    .max(30)
+    .default([])
+    // Rows left completely empty are not kept.
+    .transform((list) => list.filter((f) => f.label || f.value)),
 });
 
 /**
@@ -77,7 +104,7 @@ export const clientListQuery = listQuery.extend({
 export const clientRegistration = z.object({
   name: z.string().trim().min(2, 'Enter the company name').max(120),
   email: z.string().trim().toLowerCase().email('Enter a valid company email'),
-  phone: companyPhone,
+  phone: companyPhone10,
   customFields: customFieldArray.default([]),
   clientName: optStr(120),
   industry: optStr(120),
@@ -86,7 +113,8 @@ export const clientRegistration = z.object({
   district: optStr(80),
   state: optStr(80),
   pincode,
-  gstin: gstin.optional().or(z.literal('').transform(() => undefined)),
+  // Mandatory for a new client (Add Client / a draft saved as a client).
+  gstin: z.string({ error: 'Enter the GST number' }).trim().min(1, 'Enter the GST number').pipe(gstin),
   contacts: z
     .array(contact.extend({ phone: strictMobile }))
     .max(20)
