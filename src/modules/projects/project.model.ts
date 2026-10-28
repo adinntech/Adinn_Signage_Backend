@@ -5,7 +5,7 @@ import { Schema, model } from 'mongoose';
  * DRAFT -> ENQUIRY -> RECCE_ASSIGNED -> PLANNING -> IN_PROGRESS -> CLIENT_APPROVAL -> COMPLETED.
  */
 export const PROJECT_STATUSES = [
-  'NEW', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED',
+  'NEW', 'ACTIVE', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'LOSS',
   'DRAFT', 'ENQUIRY', 'RECCE_ASSIGNED', 'PLANNING', 'IN_PROGRESS', 'CLIENT_APPROVAL',
 ] as const;
 export const PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
@@ -50,6 +50,13 @@ const projectSchema = new Schema(
     instructions: String,
     /** Expected number of shops (null for ASO surveys where the count is unknown). */
     expectedShops: Number,
+    /** Extra shops found during the recce beyond the client's list. Total expected = expectedShops + additionalShops. */
+    additionalShops: { type: Number, default: 0, min: 0 },
+    /** Where the recce team starts from (office / hub); distances are measured from here. */
+    originName: String,
+    originLat: Number,
+    originLng: Number,
+    additionalShopsNote: String,
     contacts: [contactSchema],
     /**
      * Every file of this project, grouped by CRM section (the single place files are recorded; there is no separate

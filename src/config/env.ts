@@ -43,6 +43,15 @@ const schema = z
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
     /** Public URL of the web CRM, used for links inside notification emails. */
     WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
+    /** Map services for shop allocation. Both are open services that need no key; point them at your own server if you host one. Empty disables the lookup. */
+    ROUTING_URL: z.string().default('https://router.project-osrm.org'),
+    GEOCODER_URL: z.string().default('https://nominatim.openstreetmap.org'),
+    /** Sent with every map lookup (the open services ask for an identifying name and contact). */
+    MAPS_USER_AGENT: z.string().default('AdinnSignageRecceCRM/1.0'),
+    /** Optional. With a Google Maps Platform key (Geocoding API + Routes API enabled) addresses and routes come from Google instead of the open services. Keep it on the backend only. */
+    GOOGLE_MAPS_API_KEY: z.string().default(''),
+    /** Route type used with the Google key. TWO_WHEELER matches a recce person on a bike. */
+    GOOGLE_TRAVEL_MODE: z.enum(['TWO_WHEELER', 'DRIVE']).default('TWO_WHEELER'),
     /** Email notifications. Leave SMTP_HOST empty to keep notifications in-app only (deliveries are recorded as SKIPPED). */
     /** Browser push (Chrome/Edge/Firefox) for people who have allowed notifications. Generate with `npx web-push generate-vapid-keys`. */
     VAPID_PUBLIC_KEY: optional,
@@ -81,6 +90,13 @@ const schema = z
     ZOHO_DC: z.string().trim().default('in'),
     /** Zoho Books organisation id (Books only). */
     ZOHO_ORG_ID: optional,
+    // ---- Zoho Books (existing-client import, SUPER_ADMIN only). Leave empty to disable. Self Client at api-console.zoho.com, scope ZohoBooks.contacts.READ,ZohoBooks.customerpayments.READ ----
+    ZOHO_ORGANIZATION_ID: optional,
+    /** Quick start only: a pasted access token works for about 1 hour. For permanent use set the client id, secret and refresh token instead. */
+    ZOHO_ACCESS_TOKEN: optional,
+    /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
+    ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
+    ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -120,11 +136,17 @@ export const env = {
   isProd: parsed.data.NODE_ENV === 'production',
   /** `production` is accepted as an alias for `space`. */
   storage: parsed.data.STORAGE_TYPE === 'local' ? ('local' as const) : ('space' as const),
+  routingUrl: parsed.data.ROUTING_URL.replace(/\/+$/, ''),
+  geocoderUrl: parsed.data.GEOCODER_URL.replace(/\/+$/, ''),
   publicBaseUrl: parsed.data.PUBLIC_BASE_URL.replace(/\/+$/, ''),
   webBaseUrl: parsed.data.WEB_BASE_URL.replace(/\/+$/, ''),
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
   zohoEnabled: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
+  zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
+  zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),
+  zohoAccountsUrl: parsed.data.ZOHO_ACCOUNTS_URL.replace(/\/+$/, ''),
+  zohoApiUrl: parsed.data.ZOHO_API_URL.replace(/\/+$/, ''),
   pushEnabled: !!(parsed.data.VAPID_PUBLIC_KEY && parsed.data.VAPID_PRIVATE_KEY),
 };

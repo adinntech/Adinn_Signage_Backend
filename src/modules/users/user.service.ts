@@ -7,11 +7,16 @@ import { diff, recordAudit } from '../audit/audit.service';
 import { credentialFields } from '../auth/auth.service';
 import { RefreshToken } from '../auth/refreshToken.model';
 import { ROLES, type Role } from '../roles/roles';
+import { Vendor } from '../vendors/vendor.model';
 import { User, toPublicUser, type UserDoc } from './user.model';
 import type { changeCredentialSchema, createUserSchema, lookupQuery, resetCredentialSchema, updateUserSchema, userListQuery } from './user.validators';
 
 const ALIVE = { deletedAt: null };
-const FIELDS = ['name', 'email', 'phone', 'employeeId', 'role', 'isActive'];
+const FIELDS = ['name', 'email', 'phone', 'employeeId', 'role', 'vendorId', 'isActive'];
+
+async function assertVendorExists(id: string) {
+  if (!(await Vendor.exists({ _id: id, deletedAt: null }))) throw AppError.notFound('Vendor not found');
+}
 
 const revokeSessions = (userId: Types.ObjectId) => RefreshToken.updateMany({ user: userId, revokedAt: null }, { revokedAt: new Date() });
 
@@ -62,12 +67,14 @@ export async function getUser(id: string) {
 
 export async function createUser(input: z.infer<typeof createUserSchema>, actor: Actor) {
   await assertUnique(input);
+  if (input.role === 'VENDOR') await assertVendorExists(input.vendorId as string);
   const user = await User.create({
     name: input.name,
     email: input.email,
     phone: input.phone,
     employeeId: input.employeeId,
     role: input.role,
+    ...(input.role === 'VENDOR' ? { vendorId: input.vendorId } : {}),
     ...(await credentialFields(input)),
   });
   await recordAudit({ actor, action: 'CREATE', entity: 'User', entityId: user._id });
@@ -82,9 +89,14 @@ export async function updateUser(id: string, patch: z.infer<typeof updateUserSch
   }
   if ((patch.role !== undefined && patch.role !== user.role) || patch.isActive === false) await assertNotLastAdmin(user);
   await assertUnique(patch, id);
+  const role = patch.role ?? user.role;
+  const vendorId = patch.vendorId !== undefined ? patch.vendorId : user.vendorId ? String(user.vendorId) : null;
+  if (role === 'VENDOR' && !vendorId) throw AppError.badRequest('Choose the vendor this login belongs to');
+  if (role === 'VENDOR') await assertVendorExists(vendorId as string);
 
   const before = user.toObject();
-  user.set(patch);
+  // Only a VENDOR login carries a vendor link; any other role drops it.
+  user.set({ ...patch, vendorId: role === 'VENDOR' ? vendorId : undefined });
   // Role changes can move someone to a different app or permission set: end their sessions.
   const roleChanged = patch.role !== undefined && patch.role !== before.role;
   await user.save();
@@ -133,4 +145,10 @@ export async function lookupUsers(q: z.infer<typeof lookupQuery>) {
   if (roles.length) filter.role = { $in: roles };
   if (q.q) filter.name = new RegExp(escapeRegex(q.q), 'i');
   return User.find(filter).select('name role email phone').sort({ name: 1 }).limit(100).lean();
+}
+
+/** The logins that belong to one vendor company (shown on the vendor's page). */
+export async function listVendorLogins(vendorId: string) {
+  const users = await User.find({ role: 'VENDOR', vendorId, ...ALIVE }).sort({ name: 1 }).lean();
+  return users.map((u) => toPublicUser(u as unknown as UserDoc));
 }

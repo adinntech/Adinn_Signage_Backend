@@ -112,8 +112,8 @@ export const projectPatch = z
 
 export const statusBody = z
   .object({ status: z.enum(PROJECT_STATUSES), reason: z.string().trim().max(500).optional() })
-  .refine((v) => !['ON_HOLD', 'CANCELLED'].includes(v.status) || !!v.reason, {
-    message: 'A reason is required for ON_HOLD or CANCELLED',
+  .refine((v) => !['ON_HOLD', 'CANCELLED', 'LOSS'].includes(v.status) || !!v.reason, {
+    message: 'A reason is required for ON_HOLD, CANCELLED or LOSS',
     path: ['reason'],
   });
 
@@ -140,4 +140,9 @@ export const projectListQuery = listQuery.extend({
   /** true = past the expected end date and not yet completed or cancelled. */
   overdue: z.enum(['true']).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(25),
+});
+
+export const additionalShopsBody = z.object({
+  count: z.number().int('Enter a whole number').min(0, 'Cannot be negative').max(100000),
+  note: optStr(500),
 });

@@ -36,3 +36,13 @@ export const requirePermission =
     if (perms.every((p) => have.includes(p))) return next();
     next(AppError.forbidden());
   };
+
+/** Allows the request when the role has at least ONE of the permissions (requirePermission needs all of them). */
+export const requireAnyPermission =
+  (...perms: Permission[]) =>
+  (req: Request, _res: Response, next: NextFunction) => {
+    if (!req.auth) return next(AppError.unauthorized());
+    const have = permissionsFor(req.auth.role);
+    if (perms.some((p) => have.includes(p))) return next();
+    next(AppError.forbidden());
+  };

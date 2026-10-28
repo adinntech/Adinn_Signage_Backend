@@ -5,7 +5,7 @@ import { nextSeq } from '../../common/counter.model';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { importZohoClient, registerCompany } from '../clients/client.service';
+import { linkZohoCustomer, registerCompany } from '../clients/client.service';
 import { getZohoClient } from '../zoho/zoho.service';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
@@ -118,7 +118,7 @@ export async function createOrderForClient(input: z.infer<typeof createOrderBody
   if (input.zohoId) {
     const z = await getZohoClient(input.zohoId);
     if (!z) throw AppError.notFound('This customer is no longer in Zoho. Refresh the list and choose again.');
-    client = await importZohoClient(z, actor);
+    client = await linkZohoCustomer(z, actor);
   } else {
     client = await Client.findOne({ _id: input.clientId, deletedAt: null }).lean();
     if (!client) throw AppError.notFound('Client not found');

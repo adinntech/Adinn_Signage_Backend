@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { AppError } from '../../common/errors';
-import { nextSeq } from '../../common/counter.model';
+import { nextSeq, peekSeq } from '../../common/counter.model';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, recordAudit } from '../audit/audit.service';
 import { SalesOrder } from '../sales/sales.model';
@@ -141,68 +141,57 @@ export async function registerCompany(input: z.infer<typeof clientRegistration>,
   return c;
 }
 
-/* ---------------------------------- drafts ---------------------------------- */
+/** Client Code for a Zoho customer: its Zoho customer number when free, otherwise a code made from the name. */
+const codeForZoho = async (name: string, zohoCustomerNo?: string) => (zohoCustomerNo && !(await Client.exists({ code: zohoCustomerNo })) ? zohoCustomerNo : generateCode(name));
 
-/** Draft values as stored: blanks cleared, so a resumed form shows exactly what was typed. */
-const draftSet = (d: z.infer<typeof clientDraft>) => ({
-  name: d.name || null,
-  clientName: d.clientName || null,
-  email: d.email.toLowerCase() || null,
-  phone: d.phone || null,
-  gstin: d.gstin.toUpperCase() || null,
-  customFields: d.customFields,
-});
+/** An existing client, not yet tied to a Zoho contact, with the same name or GSTIN. */
+const findUnlinkedMatch = async (name: string, gstin?: string) => {
+  const key = normKey(name);
+  return (await Client.find({ deletedAt: null, zohoContactId: null }).select('name gstin code clientNo').lean()).find((c) => normKey(c.name) === key || (!!gstin && c.gstin === gstin));
+};
 
-/** Add Client "Save Draft" (first save): no checks, no Client ID; a placeholder code until it becomes a client. */
-export async function createDraft(d: z.infer<typeof clientDraft>, actor: Actor) {
-  // `new` + save: a draft may have no name yet (the typed create() expects one).
-  const c = new Client({
-    ...draftSet(d),
-    code: `DRAFT-${new Types.ObjectId().toHexString().slice(-12)}`,
-    status: 'DRAFT',
-    clientType: 'NEW',
-    createdBy: actor.id,
-    updatedBy: actor.id,
-  });
-  await c.save();
-  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Saved as a draft (Add Client)' });
-  return c.toObject();
+/** The Client ID and code a Zoho customer will have after import, shown before the admin clicks OK. */
+export async function previewZohoIdentity(zohoContactId: string, name: string, gstin?: string, zohoCustomerNo?: string) {
+  const synced = await Client.findOne({ zohoContactId, deletedAt: null }).select('code clientNo').lean();
+  if (synced) return { mode: 'IMPORTED' as const, clientNo: synced.clientNo, code: synced.code };
+  const match = await findUnlinkedMatch(name, gstin);
+  if (match) return { mode: 'LINK' as const, clientNo: match.clientNo, code: match.code };
+  return { mode: 'NEW' as const, clientNo: `CLI-${String(await peekSeq('clientNo')).padStart(4, '0')}`, code: await codeForZoho(name, zohoCustomerNo) };
 }
 
-/** Later "Save Draft" on the same draft (never a second record). */
-export async function updateDraft(id: string, d: z.infer<typeof clientDraft>, actor: Actor) {
-  const c = await Client.findOneAndUpdate({ _id: id, deletedAt: null, status: 'DRAFT' }, { $set: { ...draftSet(d), updatedBy: actor.id } }, { returnDocument: 'after' }).lean();
-  if (!c) throw AppError.conflict('This draft was already saved as a client or deleted. Reload the client list.');
-  return c;
-}
+type ZohoFields = Omit<z.infer<typeof clientBody>, 'code' | 'contacts'> & { contacts: z.infer<typeof clientBody>['contacts'] };
 
 /**
- * "Save Client" on a draft: the full Add Client checks, then the same record becomes an active client with its code
- * and Client ID. Conditional on DRAFT, so a double click or a second tab cannot create it twice.
+ * Zoho Books import into the client master. Matches an already-imported client by Zoho contact id, then an
+ * existing client by name or GSTIN (linked, only blank fields are filled so nothing typed by BD is overwritten);
+ * otherwise a new EXISTING client is created. Re-importing the same contact never makes a duplicate.
  */
-export async function finalizeDraft(id: string, input: z.infer<typeof clientRegistration>, actor: Actor) {
-  const draft = await Client.findOne({ _id: id, deletedAt: null }).select('status').lean();
-  if (!draft) throw AppError.notFound('Draft not found');
-  if (draft.status !== 'DRAFT') throw AppError.conflict('This draft was already saved as a client.');
-  await assertUnique(input, id);
-  const c = await Client.findOneAndUpdate(
-    { _id: id, status: 'DRAFT', deletedAt: null },
-    {
-      $set: {
-        ...input,
-        contacts: withPrimary(input.contacts),
-        code: await generateCode(input.name),
-        clientNo: await nextClientNo(),
-        clientType: 'NEW',
-        status: 'ACTIVE',
-        updatedBy: actor.id,
-      },
-    },
-    { returnDocument: 'after', runValidators: true },
-  ).lean();
-  if (!c) throw AppError.conflict('This draft was already saved as a client.');
-  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Registered as a new client from a draft (BD)' });
-  return c;
+export async function importZohoClient(zohoContactId: string, f: ZohoFields, actor: Actor, zohoCustomerNo?: string) {
+  const now = new Date();
+  const synced = await Client.findOne({ zohoContactId, deletedAt: null });
+  if (synced) {
+    const before = synced.toObject();
+    synced.set({ ...f, zohoSyncedAt: now, updatedBy: actor.id });
+    await synced.save();
+    await recordAudit({ actor, action: 'UPDATE', entity: 'Client', entityId: synced._id, changes: diff(before as never, f as never, FIELDS), reason: 'Refreshed from Zoho Books' });
+    return { client: synced.toObject(), outcome: 'UPDATED' as const };
+  }
+  const known = await findUnlinkedMatch(f.name, f.gstin);
+  if (known) {
+    const doc = await Client.findById(known._id);
+    if (doc) {
+      const blank = Object.fromEntries(Object.entries(f).filter(([k, v]) => k !== 'contacts' && k !== 'status' && v && !(doc.get(k) as unknown)));
+      if (!doc.contacts.length && f.contacts.length) blank.contacts = f.contacts;
+      doc.set({ ...blank, zohoContactId, zohoSyncedAt: now, updatedBy: actor.id });
+      await doc.save();
+      await recordAudit({ actor, action: 'UPDATE', entity: 'Client', entityId: doc._id, reason: 'Linked to Zoho Books contact' });
+      return { client: doc.toObject(), outcome: 'LINKED' as const };
+    }
+  }
+  await assertUnique({ email: f.email });
+  const c = await Client.create({ ...f, contacts: withPrimary(f.contacts), code: await codeForZoho(f.name, zohoCustomerNo), clientNo: await nextClientNo(), clientType: 'EXISTING', zohoContactId, zohoSyncedAt: now, createdBy: actor.id, updatedBy: actor.id });
+  await recordAudit({ actor, action: 'CREATE', entity: 'Client', entityId: c._id, reason: 'Imported from Zoho Books' });
+  return { client: c.toObject(), outcome: 'CREATED' as const };
 }
 
 export async function updateClient(id: string, patch: z.infer<typeof clientPatch>, actor: Actor) {
@@ -268,7 +257,7 @@ export async function clientFileUrl(id: string, fileId: string) {
  * Already linked: refreshed from Zoho. Same company already in Client Management (GSTIN, email or name): linked to
  * it. Otherwise created as an EXISTING client from Zoho.
  */
-export async function importZohoClient(z: ZohoClient, actor: Actor) {
+export async function linkZohoCustomer(z: ZohoClient, actor: Actor) {
   const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, city: z.city, state: z.state };
   const linked = await Client.findOne({ zohoId: z.zohoId, deletedAt: null });
   if (linked) {

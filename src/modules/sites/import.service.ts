@@ -1,19 +1,20 @@
 import { Types } from 'mongoose';
 import type { z } from 'zod';
+import { fileContent } from '../files/file.service';
 import { AppError } from '../../common/errors';
 import { nextSeqBlock } from '../../common/counter.model';
 import { pageMeta, type Actor } from '../../common/query';
 import { assertNotCancelled } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
 import { notifyProjectParty } from '../notifications/notification.service';
-import { Requirement } from '../projects/project.model';
+import { Project, Requirement } from '../projects/project.model';
 import { parseWorkbook } from './excel.service';
 import {
   autoMap, dealerKeyOf, dupKeyOf, normalise, sqftOf, validateMapping,
   type MapTarget, type MappableField, type RowIssue, type Scenario, type Unit,
 } from './site.fields';
 import { ImportBatch, ImportRow, Site } from './site.model';
-import { requireProject, syncSiteCount } from './site.service';
+import { requireProject, syncSiteCount, tellRecceAboutNewShops } from './site.service';
 import type { commitBody, previewBody, rowListQuery, rowPatch } from './site.validators';
 
 const CHUNK = 1000;
@@ -47,6 +48,22 @@ export async function uploadSheet(projectId: string, file: { buffer: Buffer; ori
   }
   const sample = parsed.rows.slice(0, 8);
   return { batch: batch.toObject(), suggestedMapping: mapping, sample, problems: validateMapping(mapping, scenario) };
+}
+
+/**
+ * "Extract" for a sheet the project already holds (the Excel BD attached): reads the stored file and stages it exactly like an
+ * upload, so Operations never has to download and re-upload it. Review and commit then work as for any import.
+ */
+export async function uploadFromProjectFile(projectId: string, fileId: string, actor: Actor) {
+  await requireProject(projectId);
+  const holds = await Project.exists({ _id: projectId, files: { $elemMatch: { _id: fileId, category: { $in: ['BD_CLIENT_DETAILS', 'OPS_SURVEY_PROOF'] }, deletedAt: null } } });
+  if (!holds) throw AppError.notFound('That file is not an attachment of this project');
+  const { stream, name } = await fileContent(fileId, actor);
+  if (!/\.(xlsx|csv)$/i.test(name)) throw AppError.badRequest('Only Excel (.xlsx) or CSV files can be extracted');
+  const chunks: Buffer[] = [];
+  for await (const c of stream as AsyncIterable<Buffer | string>) chunks.push(typeof c === 'string' ? Buffer.from(c) : c);
+  const buffer = Buffer.concat(chunks);
+  return uploadSheet(projectId, { buffer, originalname: name, size: buffer.length }, actor);
 }
 
 // ---- 2. apply mapping + validate ----
@@ -256,6 +273,7 @@ export async function commitImport(projectId: string, batchId: string, body: z.i
     locked.set({ status: 'COMMITTED', result, committedAt: new Date() });
     await locked.save();
     await recordAudit({ actor, action: 'IMPORT_SITES', entity: 'ImportBatch', entityId: locked._id, project: projectId, reason: `${locked.fileName}: ${created} created, ${updated} updated, ${skippedRows} skipped, ${errorRows} with errors` });
+    if (created > 0) await tellRecceAboutNewShops(projectId, created, actor);
     if (created > 0) {
       await notifyProjectParty(
         projectId,

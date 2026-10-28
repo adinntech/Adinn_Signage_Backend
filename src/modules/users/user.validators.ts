@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { checkCredential, credentialShape, emailRule, employeeIdRule, nameRule, phoneRule } from '../../common/validators/credentials';
-import { listQuery } from '../../common/query';
+import { listQuery, objectId } from '../../common/query';
 import { ROLES } from '../roles/roles';
 
 /** Admin creates an account directly (any role). */
@@ -11,9 +11,11 @@ export const createUserSchema = z
     phone: phoneRule,
     employeeId: employeeIdRule,
     role: z.enum(ROLES),
+    vendorId: objectId.optional(),
     ...credentialShape,
   })
-  .superRefine(checkCredential);
+  .superRefine(checkCredential)
+  .refine((v) => v.role !== 'VENDOR' || !!v.vendorId, { path: ['vendorId'], message: 'Choose the vendor this login belongs to' });
 
 export const updateUserSchema = z
   .object({
@@ -22,6 +24,7 @@ export const updateUserSchema = z
     phone: phoneRule,
     employeeId: employeeIdRule,
     role: z.enum(ROLES),
+    vendorId: objectId.nullable(),
     isActive: z.boolean(),
   })
   .partial()

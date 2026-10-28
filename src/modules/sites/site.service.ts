@@ -5,14 +5,17 @@ import { nextSeqBlock } from '../../common/counter.model';
 import { assertNotCancelled } from '../../common/project-access';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, recordAudit } from '../audit/audit.service';
+import { notifyNewShops } from '../allocation/allocation.notify';
 import { Project } from '../projects/project.model';
+import { User } from '../users/user.model';
+import { permissionsFor, type Role } from '../roles/roles';
 import { buildSitesFile, buildTemplate, DEFAULT_EXPORT, EXPORT_COLUMNS } from './excel.service';
 import { dupKeyOf, normalise, sqftOf, type Scenario, type SiteInput, type Unit } from './site.fields';
 import { Site } from './site.model';
 import type { bulkBody, exportQuery, siteCreate, siteFilter, siteListQuery, sitePatch } from './site.validators';
 
 export const SORTABLE = ['seq', 'siteCode', 'shopName', 'dealerName', 'district', 'location', 'sqft', 'status', 'createdAt'];
-const AUDIT_FIELDS = ['shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'pincode', 'mobile', 'gstin', 'contactPerson', 'width', 'height', 'unit', 'quantity', 'boardType', 'remarks', 'clientSiteCode', 'scenario'];
+const AUDIT_FIELDS = ['shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'address3', 'pincode', 'mobile', 'gstin', 'contactPerson', 'width', 'height', 'unit', 'quantity', 'boardType', 'remarks', 'clientSiteCode', 'scenario'];
 
 export async function requireProject(projectId: string) {
   const p = await Project.findOne({ _id: projectId, deletedAt: null }).lean();
@@ -83,16 +86,35 @@ function prepare(raw: Raw, scenario: Scenario) {
   const n = normalise(raw as never, { scenario, defaultUnit: (raw.unit as Unit | undefined) ?? 'ft' });
   const v = n.value;
   const doc = { ...v, sqft: sqftOf(v.width, v.height, v.unit ?? 'ft', v.quantity ?? 1), dupKey: dupKeyOf(v) };
-  return { ...n, doc };
+  // A sheet import only warns about a bad pincode, but a person typing one in must correct it.
+  const bad = n.warnings.filter((w) => w.code === 'BAD_PINCODE');
+  return { ...n, errors: [...n.errors, ...bad], doc };
 }
 const fail = (errors: { field: string; message: string }[]) => {
   throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', errors.map((e) => ({ path: e.field, message: e.message })));
 };
 
+/** Recce staff (sites:capture only) may add shops to an ASO project assigned to them; everyone else needs sites:write. */
+const canWrite = (role: string) => permissionsFor(role as Role).includes('sites:write');
+function assertCanCapture(actor: Actor, project: { requirementType?: string | null | undefined }) {
+  if (canWrite(actor.role)) return;
+  if (!permissionsFor(actor.role as Role).includes('sites:capture')) throw AppError.forbidden();
+  if (project.requirementType !== 'ASO') throw AppError.forbidden('Recce staff can add shops only to an ASO survey');
+}
+
+/** An ASO job sits with a recce executive; shops added by anyone else are news to them. */
+export async function tellRecceAboutNewShops(projectId: string, added: number, actor: Actor) {
+  const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('requirementType assignedTo').lean();
+  if (!p || p.requirementType !== 'ASO' || !p.assignedTo || String(p.assignedTo) === actor.id) return;
+  const holder = await User.findOne({ _id: p.assignedTo, role: 'RECCE_EXECUTIVE', isActive: true, deletedAt: null }).select('_id').lean();
+  if (holder) await notifyNewShops(projectId, { kind: 'USERS', userIds: [String(holder._id)] }, added, actor);
+}
+
 export async function createSite(projectId: string, input: z.infer<typeof siteCreate>, actor: Actor) {
   const project = await requireProject(projectId);
   await assertNotCancelled(projectId);
-  const { allowDuplicate, scenario: sc, ...raw } = input;
+  assertCanCapture(actor, project);
+  const { allowDuplicate, scenario: sc, lat, lng, ...raw } = input;
   const scenario = (sc as Scenario | undefined) ?? 'MEASUREMENT_REQUIRED';
   const n = prepare(raw, scenario);
   if (n.errors.length) fail(n.errors);
@@ -102,10 +124,12 @@ export async function createSite(projectId: string, input: z.infer<typeof siteCr
   const seq = await nextSeqBlock(`site:${projectId}`, 1);
   const site = await Site.create({
     ...n.doc, project: projectId, scenario, seq, siteCode: `${project.code}-S${String(seq).padStart(3, '0')}`,
+    ...(lat != null && lng != null ? { lat, lng, geoQuality: canWrite(actor.role) ? 'MANUAL' : 'GPS' } : {}),
     createdBy: actor.id, updatedBy: actor.id,
   });
   await syncSiteCount(projectId);
   await recordAudit({ actor, action: 'CREATE', entity: 'Site', entityId: site._id, project: projectId });
+  await tellRecceAboutNewShops(projectId, 1, actor);
   return { site: site.toObject(), warnings: n.warnings };
 }
 
@@ -113,6 +137,11 @@ export async function updateSite(id: string, patch: Raw, actor: Actor) {
   const before = await Site.findOne({ _id: id, deletedAt: null }).lean();
   if (!before) throw AppError.notFound('Site not found');
   await assertNotCancelled(before.project);
+  if (!canWrite(actor.role)) {
+    // Recce staff can correct only the shops they added themselves.
+    assertCanCapture(actor, (await requireProject(String(before.project))));
+    if (String(before.createdBy) !== actor.id) throw AppError.forbidden('You can edit only the shops you added');
+  }
   const merged = { ...before, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) } as Record<string, unknown>;
   // Cleared text fields arrive as ''. Merge, then re-validate everything with the same rules as import.
   const scenario = (patch.scenario as Scenario | undefined) ?? (before.scenario as Scenario) ?? 'MEASUREMENT_REQUIRED';

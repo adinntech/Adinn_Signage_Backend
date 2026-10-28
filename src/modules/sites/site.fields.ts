@@ -7,7 +7,7 @@ export const SCENARIOS = ['MEASUREMENT_REQUIRED', 'CLIENT_PROVIDED'] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
 export const MAPPABLE = [
-  'shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'pincode',
+  'shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'address3', 'pincode',
   'mobile', 'gstin', 'contactPerson', 'width', 'height', 'size', 'unit', 'boardType',
   'quantity', 'remarks', 'clientSiteCode',
 ] as const;
@@ -16,14 +16,14 @@ export type MapTarget = MappableField | 'extra' | 'ignore';
 
 export const FIELD_LABELS: Record<MappableField, string> = {
   shopName: 'Shop Name', dealerName: 'Dealer / Customer Name', location: 'Location / Area', district: 'District',
-  address1: 'Address Line 1', address2: 'Address Line 2', pincode: 'Pincode', mobile: 'Mobile', gstin: 'GST No',
-  contactPerson: 'Contact Person', width: 'Width', height: 'Height', size: 'Size (W × H)', unit: 'Unit',
+  address1: 'Address Line 1', address2: 'Address Line 2', address3: 'Address Line 3', pincode: 'Pincode', mobile: 'Mobile', gstin: 'GST No',
+  contactPerson: 'Contact Person', width: 'Width', height: 'Height', size: 'Size (W ï¿½ H)', unit: 'Unit',
   boardType: 'Board Type', quantity: 'Qty', remarks: 'Remarks', clientSiteCode: 'Client Site Code',
 };
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// [field, exact normalised headers, "contains" fragments] — evaluated in this order.
+// [field, exact normalised headers, "contains" fragments] ï¿½ evaluated in this order.
 const PATTERNS: [MappableField, string[], string[]][] = [
   ['size', ['size', 'sizewh', 'sizewxh', 'boardsize', 'signagesize', 'sizeinft', 'dimension', 'dimensions'], ['sizew', 'boardsize']],
   ['width', ['width', 'w', 'widthft', 'wft', 'widthin'], []],
@@ -32,6 +32,7 @@ const PATTERNS: [MappableField, string[], string[]][] = [
   ['mobile', ['mobile', 'mobileno', 'mobilenumber', 'phone', 'phoneno', 'ph', 'phonenumber', 'contactno', 'contactnumber', 'mobilenumberph'], ['mobile', 'phone']],
   ['district', ['district', 'dist'], ['district']],
   ['pincode', ['pincode', 'pin', 'zip', 'zipcode', 'postalcode'], ['pincode']],
+  ['address3', ['addressline3', 'address3', 'addr3'], ['line3', 'address3']],
   ['address2', ['addressline2', 'address2', 'addr2'], ['line2', 'address2']],
   ['address1', ['addressline1', 'address1', 'address', 'addr', 'fulladdress', 'completeaddress'], ['address']],
   ['shopName', ['shopname', 'shop', 'storename', 'store', 'outletname', 'outlet', 'firmname', 'firm', 'businessname', 'dealershopname'], ['shopname', 'storename', 'outletname']],
@@ -74,20 +75,20 @@ export function validateMapping(mapping: Record<string, MapTarget>, scenario: Sc
   }
   if (!seen.has('shopName') && !seen.has('dealerName')) problems.push('Map at least Shop Name or Dealer Name');
   const hasSize = seen.has('size') || (seen.has('width') && seen.has('height'));
-  if (scenario === 'CLIENT_PROVIDED' && !hasSize) problems.push('Scenario 2 needs Size (W × H) or both Width and Height mapped');
+  if (scenario === 'CLIENT_PROVIDED' && !hasSize) problems.push('Scenario 2 needs Size (W ï¿½ H) or both Width and Height mapped');
   return problems;
 }
 
 // ---------- normalisation ----------
 export interface SiteInput {
-  shopName?: string; dealerName?: string; location?: string; district?: string; address1?: string; address2?: string;
+  shopName?: string; dealerName?: string; location?: string; district?: string; address1?: string; address2?: string; address3?: string;
   pincode?: string; mobile?: string; mobileAlt?: string; gstin?: string; contactPerson?: string;
   width?: number; height?: number; unit?: Unit; boardType?: string; quantity?: number; remarks?: string; clientSiteCode?: string;
 }
 export interface RowIssue { field: string; code: string; message: string }
 export interface Normalised { value: SiteInput; errors: RowIssue[]; warnings: RowIssue[] }
 
-const GST_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/;
+export const GST_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/;
 const UNIT_ALIASES: Record<string, Unit> = {
   ft: 'ft', feet: 'ft', foot: 'ft', "'": 'ft', in: 'in', inch: 'in', inches: 'in', '"': 'in', m: 'm', mtr: 'm', meter: 'm', metre: 'm', cm: 'cm', mm: 'mm',
 };
@@ -115,7 +116,7 @@ export function parseDimension(raw: string): { n?: number; unit?: Unit; invalid:
   return { n, ...(unit ? { unit } : {}), invalid: !(n > 0 && n <= 100000) };
 }
 
-const SIZE_RE = /^\s*(\d+(?:\.\d+)?)\s*(ft|feet|in|inch|inches|mtr|m|cm|mm|'|")?\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(ft|feet|in|inch|inches|mtr|m|cm|mm|'|")?\s*$/i;
+const SIZE_RE = /^\s*(\d+(?:\.\d+)?)\s*(ft|feet|in|inch|inches|mtr|m|cm|mm|'|")?\s*[xï¿½*]\s*(\d+(?:\.\d+)?)\s*(ft|feet|in|inch|inches|mtr|m|cm|mm|'|")?\s*$/i;
 export function parseSize(raw: string): { w?: number; h?: number; unit?: Unit; invalid: boolean } {
   const m = SIZE_RE.exec(raw.replace(/,/g, ''));
   if (!m) return { invalid: raw.trim() !== '' };
@@ -147,7 +148,7 @@ export function normalise(raw: Raw, opts: { scenario: Scenario; defaultUnit?: Un
   const err = (field: string, code: string, message: string) => errors.push({ field, code, message });
   const warn = (field: string, code: string, message: string) => warnings.push({ field, code, message });
 
-  for (const f of ['shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'contactPerson', 'boardType', 'remarks', 'clientSiteCode'] as const) {
+  for (const f of ['shopName', 'dealerName', 'location', 'district', 'address1', 'address2', 'address3', 'contactPerson', 'boardType', 'remarks', 'clientSiteCode'] as const) {
     const t = s(raw[f]);
     if (t) v[f] = t.slice(0, f === 'remarks' ? 1000 : 250);
   }
@@ -158,7 +159,13 @@ export function normalise(raw: Raw, opts: { scenario: Scenario; defaultUnit?: Un
   }
 
   if (!v.shopName && !v.dealerName) err('shopName', 'NAME_REQUIRED', 'Shop name or dealer name is required');
-  if (!v.address1 && !v.address2) warn('address1', 'MISSING_ADDRESS', 'Address is missing');
+  // Many client sheets put the town in brackets after the name, e.g. "FAYAZ HARDWARE (COLACHAL)"; use it (or address line 3) as the area.
+  if (!v.location) {
+    const m = /\(([^()]{2,40})\)\s*$/.exec(v.shopName ?? v.dealerName ?? '');
+    const area = m?.[1]?.trim() ?? v.address3;
+    if (area) v.location = area.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+  }
+  if (!v.address1 && !v.address2 && !v.address3) warn('address1', 'MISSING_ADDRESS', 'Address is missing');
   if (!v.district) warn('district', 'MISSING_DISTRICT', 'District is missing');
 
   const phoneRaw = s(raw.mobile).replace(/\.0+$/, '');
@@ -196,7 +203,7 @@ export function normalise(raw: Raw, opts: { scenario: Scenario; defaultUnit?: Un
     else if (h.invalid || !h.n) err('height', 'BAD_HEIGHT', `Invalid height "${hRaw}"`);
     else { v.height = h.n; unit = unit ?? h.unit; }
   } else if (opts.scenario === 'CLIENT_PROVIDED') {
-    err('size', 'MISSING_SIZE', 'Size (W × H) is required when the client provides measurements');
+    err('size', 'MISSING_SIZE', 'Size (W ï¿½ H) is required when the client provides measurements');
   }
   if (v.width && v.height) v.unit = unit ?? opts.defaultUnit ?? 'ft';
   const sq = sqftOf(v.width, v.height, v.unit ?? 'ft');

@@ -10,6 +10,12 @@ export const NOTIFICATION_KINDS = [
   'PROJECT_CANCELLED',
   /** BD handed a sales order to a Client Servicing person (links to the order, not a project). */
   'ORDER_ASSIGNED',
+  /** A cost plan needs special approval, was decided, or an expense claim was submitted. */
+  'COST_APPROVAL',
+  /** The client rejected the cost, so the project moved to LOSS. */
+  'PROJECT_LOSS',
+  /** More shops were added to a job the recce person or vendor already has. */
+  'SHOPS_ADDED',
   /** Any other create / edit / delete on a project, sent to the people working on it. */
   'ACTIVITY',
   /** The same, for Super Admin: everything everyone does, in the app only. */

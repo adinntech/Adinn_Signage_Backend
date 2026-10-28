@@ -1,15 +1,19 @@
+import { Types } from 'mongoose';
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
 import { assertNotCancelled } from '../../common/project-access';
 import { recordAudit } from '../audit/audit.service';
+import { Site } from '../sites/site.model';
 import { Project } from './project.model';
 import { SurveyArea } from './surveyArea.model';
 
 export const surveyAreaBody = z.object({
   area: z.string().trim().min(2, 'Enter the area or sales office name').max(120),
   notes: z.string().trim().max(1000).optional().or(z.literal('').transform(() => undefined)),
-  shopsFound: z.number().int('Shops found must be a whole number').min(0).max(100000),
+  address: z.string().trim().max(300).optional().or(z.literal('').transform(() => undefined)),
+  approxShops: z.number().int('Approximate shops must be a whole number').min(0).max(100000).optional(),
+  shopsFound: z.number().int('Shops found must be a whole number').min(0).max(100000).default(0),
 });
 
 
@@ -24,7 +28,14 @@ async function requireAso(projectId: string) {
 export const listAreas = async (projectId: string) => {
   const p = await Project.exists({ _id: projectId, deletedAt: null });
   if (!p) throw AppError.notFound('Project not found');
-  return SurveyArea.find({ project: projectId }).sort({ createdAt: -1 }).lean();
+  const [areas, perLocation] = await Promise.all([
+    SurveyArea.find({ project: projectId }).sort({ createdAt: -1 }).lean(),
+    // Shops entered through the shop sheet are linked to an area by their "Location / Area" value.
+    Site.aggregate([{ $match: { project: new Types.ObjectId(projectId), deletedAt: null } }, { $group: { _id: '$location', n: { $sum: 1 } } }]),
+  ]);
+  const entered = new Map<string, number>();
+  for (const l of perLocation) entered.set(key(l._id ?? ''), (entered.get(key(l._id ?? '')) ?? 0) + l.n);
+  return areas.map((a) => ({ ...a, shopsEntered: entered.get(a.areaKey) ?? 0 }));
 };
 
 export async function createArea(projectId: string, body: z.infer<typeof surveyAreaBody>, actor: Actor) {

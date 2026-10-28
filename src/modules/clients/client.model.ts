@@ -88,6 +88,9 @@ const clientSchema = new Schema(
     customFields: { type: [customFieldSchema], default: [] },
     notes: String,
     onboarding: { type: onboardingSchema, default: null },
+    /** Zoho Books contact this client was imported from; one Zoho contact maps to one client. */
+    zohoContactId: { type: String, unique: true, sparse: true },
+    zohoSyncedAt: Date,
     clientType: { type: String, enum: CLIENT_TYPES },
     /** CRM = registered in Client Management; ZOHO = brought in from the Zoho customer list (existing clients). */
     source: { type: String, enum: CLIENT_SOURCES, default: 'CRM' },

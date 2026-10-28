@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { authenticate, requirePermission } from '../../common/auth.middleware';
+import { authenticate, requireAnyPermission, requirePermission } from '../../common/auth.middleware';
 import { scopeProject } from '../../common/project-access';
 import * as c from './project.controller';
 
@@ -8,12 +8,12 @@ const scoped = scopeProject('id');
 
 export const projectRouter = Router();
 projectRouter.use(authenticate);
-projectRouter.get('/', requirePermission('projects:read'), c.list);
-projectRouter.get('/summary', requirePermission('projects:read'), c.summary);
+projectRouter.get('/', requireAnyPermission('projects:read', 'jobs:read'), c.list);
+projectRouter.get('/summary', requireAnyPermission('projects:read', 'jobs:read'), c.summary);
 projectRouter.get('/activity', requirePermission('projects:read'), c.activity);
 projectRouter.get('/assignees', requirePermission('projects:write'), c.assignees);
 projectRouter.post('/', requirePermission('projects:write'), c.create);
-projectRouter.get('/:id', requirePermission('projects:read'), scoped, c.get);
+projectRouter.get('/:id', requireAnyPermission('projects:read', 'jobs:read'), scoped, c.get);
 projectRouter.patch('/:id', requirePermission('projects:write'), scoped, c.update);
 projectRouter.delete('/:id', requirePermission('projects:write'), scoped, c.remove);
 projectRouter.patch('/:id/status', requirePermission('projects:write'), scoped, c.status);
@@ -25,8 +25,9 @@ projectRouter.get('/:id/bd-handover', requirePermission('projects:read'), scoped
 projectRouter.get('/:id/bd-handover/shops', requirePermission('projects:read'), scoped, c.bdHandoverShops);
 projectRouter.get('/:id/bd-handover/files/:fileId/url', requirePermission('projects:read'), scoped, c.bdHandoverFileUrl);
 projectRouter.put('/:id/requirement', requirePermission('projects:write'), scoped, c.putRequirement);
+projectRouter.put('/:id/additional-shops', requirePermission('sites:write'), scoped, c.additionalShops);
 projectRouter.get('/:id/history', requirePermission('projects:read'), scoped, c.history);
-projectRouter.get('/:id/survey-areas', requirePermission('projects:read'), scoped, c.areas);
+projectRouter.get('/:id/survey-areas', requireAnyPermission('projects:read', 'jobs:read'), scoped, c.areas);
 projectRouter.post('/:id/survey-areas', requirePermission('sites:write'), scoped, c.areaCreate);
 projectRouter.patch('/:id/survey-areas/:areaId', requirePermission('sites:write'), scoped, c.areaUpdate);
 projectRouter.delete('/:id/survey-areas/:areaId', requirePermission('sites:write'), scoped, c.areaDelete);

@@ -78,6 +78,7 @@ export const EXPORT_COLUMNS: Record<string, { header: string; get: (s: Record<st
   district: { header: 'District', get: (s) => s.district, width: 16 },
   address1: { header: 'Address Line 1', get: (s) => s.address1, width: 30 },
   address2: { header: 'Address Line 2', get: (s) => s.address2, width: 24 },
+  address3: { header: 'Address Line 3', get: (s) => s.address3, width: 24 },
   pincode: { header: 'Pincode', get: (s) => s.pincode, width: 10 },
   mobile: { header: 'Mobile', get: (s) => s.mobile, width: 14 },
   gstin: { header: 'GST No', get: (s) => s.gstin, width: 18 },
@@ -118,9 +119,15 @@ export async function buildTemplate(scenario: Scenario, omit: MappableField[] = 
     : (['shopName', 'dealerName', 'location', 'district', 'address1', 'mobile', 'contactPerson'] as MappableField[])
   ).filter((f) => !omit.includes(f));
   ws.columns = base.map((f) => ({ header: f === 'size' ? 'Size (W x H)' : FIELD_LABELS[f], key: f, width: 24 }));
+  // Scenario 2 follows the usual client sheet: customer, district, size, address lines, pin, phone, GST.
+  const cols: [string, MappableField, number][] = scenario === 'CLIENT_PROVIDED'
+    ? [['Customer Name', 'dealerName', 34], ['District', 'district', 16], ['Size (W x H)', 'size', 12], ['Remarks', 'remarks', 16], ['Address 1', 'address1', 30], ['Address 2', 'address2', 26], ['Address 3', 'address3', 18], ['Pin', 'pincode', 10], ['PH', 'mobile', 18], ['GST', 'gstin', 20]]
+    : [['Shop Name', 'shopName', 26], ['Dealer Name', 'dealerName', 22], ['Location / Area', 'location', 18], ['District', 'district', 16], ['Address 1', 'address1', 30], ['Address 2', 'address2', 24], ['Address 3', 'address3', 18], ['Pin', 'pincode', 10], ['Mobile', 'mobile', 16], ['GST No', 'gstin', 20], ['Contact Person', 'contactPerson', 18], ['Remarks', 'remarks', 20]];
+  ws.columns = cols.map(([header, key, width]) => ({ header, key, width }));
   ws.getRow(1).font = { bold: true };
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
   ws.addRow(scenario === 'CLIENT_PROVIDED'
-    ? { dealerName: 'ABC Traders', shopName: 'ABC Traders', district: 'Vellore', size: '10 x 4', address1: '12 Main Road', address2: 'Katpadi', mobile: '9876543210', gstin: '33AAACA2094M1ZK' }
-    : { shopName: 'ABC Traders', dealerName: 'Rajkumar', location: 'Katpadi', district: 'Vellore', address1: '12 Main Road', mobile: '9876543210', contactPerson: 'Raj' });
+    ? { dealerName: 'FAYAZ HARDWARE (COLACHAL)', district: 'KANYAKUMARI', size: '10*4', remarks: 'Signage Board', address1: '30-1-D, MAIN ROAD', address2: '', address3: '', pincode: '629251', mobile: '+91 94436 07543', gstin: '33AAACA2094M1ZK' }
+    : { shopName: 'ABC Traders', dealerName: 'Rajkumar', location: 'Katpadi', district: 'Vellore', address1: '12 Main Road', address2: 'Near Bus Stand', address3: '', pincode: '632007', mobile: '9876543210', gstin: '33AAACA2094M1ZK', contactPerson: 'Raj', remarks: 'Sells FMCG' });
   return Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer);
 }
