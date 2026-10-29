@@ -26,7 +26,7 @@ export const messagePayload = z.object({
   body: z.string().max(4000).default(''),
   parent: objectId.optional(),
   mentions: ids.default([]),
-  voice: z.object({ durationSec: z.number().min(0).max(600) }).optional(),
+  voice: z.object({ durationSec: z.number().min(0).max(600), peaks: z.array(z.number().min(0).max(100)).max(64).default([]) }).optional(),
 });
 export const editBody = z.object({ body: z.string().trim().min(1, 'Message cannot be empty').max(4000) });
 export const reactBody = z.object({ emoji });

@@ -283,7 +283,7 @@ type MsgDoc = {
   body?: string | null;
   parent?: unknown;
   mentions?: unknown[];
-  attachments?: (StoredFile & { voice?: boolean | null; durationSec?: number | null })[];
+  attachments?: (StoredFile & { voice?: boolean | null; durationSec?: number | null; peaks?: number[] | null })[];
   reactions?: { emoji?: string | null; users?: unknown[] }[];
   replyCount?: number | null;
   lastReplyAt?: Date | null;
@@ -302,7 +302,7 @@ function present(m: MsgDoc, authors: Map<string, { name?: string; role?: string 
     body: gone ? '' : (m.body ?? ''),
     parent: m.parent ? String(m.parent) : null,
     mentions: gone ? [] : (m.mentions ?? []).map(String),
-    attachments: gone ? [] : (m.attachments ?? []).map((f) => ({ fileId: String(f.fileId), name: f.name ?? 'file', size: f.size ?? 0, mimeType: f.mimeType ?? '', kind: f.kind ?? 'document', voice: !!f.voice, durationSec: f.durationSec ?? null })),
+    attachments: gone ? [] : (m.attachments ?? []).map((f) => ({ fileId: String(f.fileId), name: f.name ?? 'file', size: f.size ?? 0, mimeType: f.mimeType ?? '', kind: f.kind ?? 'document', voice: !!f.voice, durationSec: f.durationSec ?? null, peaks: f.voice ? (f.peaks ?? []) : [] })),
     reactions: gone ? [] : (m.reactions ?? []).filter((r) => (r.users?.length ?? 0) > 0).map((r) => ({ emoji: r.emoji ?? '', count: r.users!.length, mine: r.users!.some((u) => String(u) === me) })),
     replyCount: m.replyCount ?? 0,
     lastReplyAt: m.lastReplyAt ?? null,
@@ -371,12 +371,12 @@ export async function postMessage(id: string, input: z.infer<typeof messagePaylo
   const mentions = readers.filter((u) => ch.members.some((m) => String(m.user) === String(u._id)) || (ch.kind === 'TEAM' && roleAllowed(ch, u.role))).map((u) => u._id);
 
   const where = await folderOf(ch);
-  const stored: (StoredFile & { voice?: boolean; durationSec?: number })[] = [];
+  const stored: (StoredFile & { voice?: boolean; durationSec?: number; peaks?: number[] })[] = [];
   try {
     for (const file of uploads) {
       const s = await storeEmbeddedFile({ category: 'CONNECT_ATTACHMENT', ...where, file, actor: a, owner: { entity: 'ConnectChannel', id: ch._id } });
       const voice = !!input.voice && s.kind === 'audio';
-      stored.push({ ...s, ...(voice ? { voice: true, durationSec: Math.round(input.voice!.durationSec) } : {}) });
+      stored.push({ ...s, ...(voice ? { voice: true, durationSec: Math.round(input.voice!.durationSec), peaks: input.voice!.peaks.map((n) => Math.round(n)) } : {}) });
     }
   } catch (e) {
     await discardStoredFiles(stored);

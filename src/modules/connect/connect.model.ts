@@ -46,7 +46,7 @@ export const ConnectChannel = model('ConnectChannel', channelSchema);
 export type ChannelDoc = HydratedDocument<InferSchemaType<typeof channelSchema>>;
 
 /** A stored file plus what a chat needs to show it: voice notes carry their length. */
-const attachmentSchema = storedFileSchema.clone().add({ voice: Boolean, durationSec: Number });
+const attachmentSchema = storedFileSchema.clone().add({ voice: Boolean, durationSec: Number, peaks: [Number] });
 
 const messageSchema = new Schema(
   {

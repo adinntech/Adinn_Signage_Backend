@@ -17,7 +17,7 @@ import { SalesOrder } from '../sales/sales.model';
 import { deliver, listEmails, type Kind } from '../sales/salesMail.service';
 import { User } from '../users/user.model';
 import { CodeRequest, type CodeKind, type CodeStatus } from './codeRequest.model';
-import { CODE_RULES, type alreadySentBody, type codeListQuery, type confirmBody, type draftBody, type mailBody, type rejectBody, type sendBody } from './codeRequest.validators';
+import { CODE_RULES, type alreadySentBody, type codeListQuery, type orderStatesQuery, type confirmBody, type draftBody, type mailBody, type rejectBody, type sendBody } from './codeRequest.validators';
 
 /** Client Servicing works the requests of the orders handed to them (scoped upstream); Super Admin may work any. */
 const ACTOR_ROLES = ['CLIENT_SERVICING', 'SUPER_ADMIN'];
@@ -430,6 +430,54 @@ export async function listRequests(q: z.infer<typeof codeListQuery>, actor: Acto
     client: clients.find((c) => String(c._id) === String(rows[i]!.client)) ?? null,
   }));
   return { items, meta: { ...pageMeta(q.page, q.limit, total), counts: Object.fromEntries(counts.map((c) => [c._id, c.n])) } };
+}
+
+type KindStateName = 'NOT_REQUESTED' | 'PENDING' | 'BD_SENT' | 'CONFIRMED' | 'FAILED';
+
+/**
+ * Every order this person works, each with where its client code and project code stand, so the Code Requests page
+ * shows what still needs doing instead of repeating the order list.
+ */
+export async function orderStates(q: z.infer<typeof orderStatesQuery>, actor: Actor) {
+  assertCodeActor(actor);
+  const filter: Record<string, unknown> = { deletedAt: null };
+  if (actor.role === 'CLIENT_SERVICING') filter.csAssignee = new Types.ObjectId(actor.id);
+  if (q.q) {
+    const re = new RegExp(escapeRegex(q.q), 'i');
+    const clients = await Client.find({ $or: [{ name: re }, { clientNo: re }] }).select('_id').limit(300).lean();
+    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+  }
+  const orders = await SalesOrder.find(filter)
+    .select('orderNo client handover.assignedAt createdAt recce.projectCode salesprofile.kind salesprofile.status')
+    .sort({ 'handover.assignedAt': -1, createdAt: -1 })
+    .limit(500)
+    .lean();
+  const [clients, rows] = await Promise.all([
+    Client.find({ _id: { $in: orders.map((o) => o.client) } }).select('name clientNo approvedCode').lean(),
+    CodeRequest.find({ order: { $in: orders.map((o) => o._id) }, status: { $ne: 'DRAFT' } }).select('order kind status active confirmedCode createdAt').sort({ createdAt: -1 }).lean(),
+  ]);
+  const items = orders.map((o) => {
+    const c = clients.find((x) => String(x._id) === String(o.client));
+    const mine = rows.filter((r) => String(r.order) === String(o._id));
+    const stateOf = (kind: CodeKind): { state: KindStateName; code: string | null } => {
+      const ofKind = mine.filter((r) => r.kind === kind);
+      const code = kind === 'CLIENT_CODE' ? (c?.approvedCode ?? null) : (ofKind.find((r) => r.status === 'CONFIRMED')?.confirmedCode ?? o.recce?.projectCode ?? null);
+      if (code) return { state: 'CONFIRMED', code };
+      if (ofKind.some((r) => r.active)) return { state: 'PENDING', code: null };
+      // The BD team's own project code request email (no request of ours yet).
+      if (kind === 'PROJECT_CODE' && ofKind.length === 0 && (o.salesprofile ?? []).some((e) => e.kind === 'PROJECT_CODE_REQUEST' && e.status !== 'FAILED')) return { state: 'BD_SENT', code: null };
+      if (ofKind[0]?.status === 'FAILED') return { state: 'FAILED', code: null };
+      return { state: 'NOT_REQUESTED', code: null };
+    };
+    const codes = { CLIENT_CODE: stateOf('CLIENT_CODE'), PROJECT_CODE: stateOf('PROJECT_CODE') };
+    const all = [codes.CLIENT_CODE.state, codes.PROJECT_CODE.state];
+    const bucket = all.every((x) => x === 'CONFIRMED') ? 'DONE' : all.some((x) => x === 'NOT_REQUESTED' || x === 'FAILED') ? 'TODO' : 'WAITING';
+    return { orderId: String(o._id), orderNo: o.orderNo, client: { id: String(o.client), name: c?.name ?? '-', clientNo: c?.clientNo ?? null }, assignedAt: o.handover?.assignedAt ?? o.createdAt ?? null, codes, bucket };
+  });
+  const counts = { ALL: items.length, TODO: items.filter((i) => i.bucket === 'TODO').length, WAITING: items.filter((i) => i.bucket === 'WAITING').length, DONE: items.filter((i) => i.bucket === 'DONE').length };
+  const shown = q.bucket ? items.filter((i) => i.bucket === q.bucket) : items;
+  const page = shown.slice((q.page - 1) * q.limit, q.page * q.limit);
+  return { items: page, meta: { ...pageMeta(q.page, q.limit, shown.length), counts } };
 }
 
 export async function history(orderId: string, actor: Actor) {

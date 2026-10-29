@@ -168,8 +168,9 @@ describe('messages', () => {
   });
 
   it('shares voice notes and files, previews them privately, and lists them under Files', async () => {
-    const v = (await post(projectChannel, 'OPS', { body: '', voice: { durationSec: 12.4 } }, [[AUDIO, 'note.webm']])).body.data;
-    expect(v.attachments[0]).toMatchObject({ voice: true, durationSec: 12, kind: 'audio' });
+    const v = (await post(projectChannel, 'OPS', { body: '', voice: { durationSec: 12.4, peaks: [5, 60, 100, 30] } }, [[AUDIO, 'note.webm']])).body.data;
+    expect(v.attachments[0]).toMatchObject({ voice: true, durationSec: 12, kind: 'audio', peaks: [5, 60, 100, 30] });
+    expect((await post(projectChannel, 'OPS', { body: '', voice: { durationSec: 3, peaks: Array(65).fill(1) } }, [[AUDIO, 'many.webm']])).status).toBe(422);
     const url = await api().get(`${B}/channels/${projectChannel}/files/${v.attachments[0].fileId}/url`).set(as('BD'));
     expect(url.status).toBe(200);
     expect(url.body.data.url).toBeTruthy();

@@ -259,3 +259,30 @@ describe('already sent', () => {
     expect((await confirm(order, 'PROJECT_CODE', '55667788')).status).toBe(200);
   });
 });
+
+describe('order states (Code Requests page)', () => {
+  it('shows where each order stands, filters by what is left to do, and stays inside the own orders of the person', async () => {
+    const todo = await makeOrder();
+    const waiting = await makeOrder();
+    await send(waiting, [mail(['CLIENT_CODE', 'PROJECT_CODE'])], 'states-key-0001');
+    const done = await makeOrder();
+    await send(done, [mail(['CLIENT_CODE', 'PROJECT_CODE'])], 'states-key-0002');
+    await confirm(done, 'CLIENT_CODE', 'CLI-ST01');
+    await confirm(done, 'PROJECT_CODE', '31313131');
+    const list = async (qs: string, role = 'CS') => (await api().get('/api/v1/sales/codes/orders' + qs).set(as(role))).body;
+    const all = await list('?limit=50');
+    const by = (id: string) => all.data.find((i: { orderId: string }) => i.orderId === id);
+    expect(by(todo)).toMatchObject({ bucket: 'TODO', codes: { CLIENT_CODE: { state: 'NOT_REQUESTED' }, PROJECT_CODE: { state: 'NOT_REQUESTED' } } });
+    expect(by(waiting)).toMatchObject({ bucket: 'WAITING', codes: { CLIENT_CODE: { state: 'PENDING' }, PROJECT_CODE: { state: 'PENDING' } } });
+    expect(by(done)).toMatchObject({ bucket: 'DONE', codes: { CLIENT_CODE: { state: 'CONFIRMED', code: 'CLI-ST01' }, PROJECT_CODE: { state: 'CONFIRMED', code: '31313131' } } });
+    expect(all.meta.counts.ALL).toBe(all.data.length);
+    const onlyTodo = await list('?bucket=TODO&limit=50');
+    expect(onlyTodo.data.every((i: { bucket: string }) => i.bucket === 'TODO')).toBe(true);
+    expect(onlyTodo.data.map((i: { orderId: string }) => i.orderId)).toContain(todo);
+    expect((await list('?q=' + by(done).orderNo)).data.map((i: { orderId: string }) => i.orderId)).toContain(done);
+    expect((await list('?q=zzzz-nothing')).data).toEqual([]);
+    expect((await list('?limit=50', 'CS2')).data).toEqual([]);
+    expect((await api().get('/api/v1/sales/codes/orders').set(as('BD'))).status).toBe(403);
+    expect((await api().get('/api/v1/sales/codes/orders?bucket=NOPE').set(as('CS'))).status).toBe(422);
+  });
+});

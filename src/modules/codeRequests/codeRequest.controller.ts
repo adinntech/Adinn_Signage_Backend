@@ -3,7 +3,7 @@ import { AppError } from '../../common/errors';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import * as svc from './codeRequest.service';
-import { alreadySentBody, codeListQuery, confirmBody, draftBody, rejectBody, retryBody, sendBody } from './codeRequest.validators';
+import { alreadySentBody, codeListQuery, orderStatesQuery, confirmBody, draftBody, rejectBody, retryBody, sendBody } from './codeRequest.validators';
 
 const id = (req: Request) => objectId.parse(req.params.id);
 const uploaded = (req: Request) =>
@@ -29,5 +29,9 @@ export const confirm = asyncHandler(async (req, res) => ok(res, await svc.confir
 export const reject = asyncHandler(async (req, res) => ok(res, await svc.rejectRequest(id(req), rejectBody.parse(req.body), actorOf(req))));
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await svc.listRequests(codeListQuery.parse(req.query), actorOf(req));
+  ok(res, items, meta);
+});
+export const orderStates = asyncHandler(async (req, res) => {
+  const { items, meta } = await svc.orderStates(orderStatesQuery.parse(req.query), actorOf(req));
   ok(res, items, meta);
 });

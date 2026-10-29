@@ -26,6 +26,7 @@ salesRouter.post('/orders', write, c.createOrder);
 salesRouter.get('/orders/board', read, c.board);
 salesRouter.get('/cs/summary', read, c.csSummary);
 salesRouter.get('/codes', read, codes.list);
+salesRouter.get('/codes/orders', read, codes.orderStates);
 salesRouter.get('/orders/:id/codes', read, codes.overview);
 salesRouter.get('/orders/:id/codes/history', read, codes.history);
 salesRouter.put('/orders/:id/codes/draft', read, codes.saveDraft);
