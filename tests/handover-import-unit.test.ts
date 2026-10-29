@@ -38,42 +38,62 @@ describe('shop list import: reading the workbook', () => {
   });
 });
 
-describe('shop list import: sheet, header row and mapping', () => {
-  it('maps other header names in any order, finds a header below a title row and keeps extra columns', async () => {
-    const g = await readGrids(await book([{ name: 'S', rows: [['Dealer list Q3'], ['Outlet Code', 'PIN', 'Phone No', 'Retailer', 'Beat'], ['007', '600001', '9876543210', 'Kumar Stores', 'North']] }]), 'x.xlsx');
+describe('shop list import: the sheet as it is', () => {
+  it('keeps the exact headers (blank and repeated too), column order, blank cells and displayed values', async () => {
+    const g = await readGrids(
+      await book([
+        {
+          name: 'S',
+          rows: [
+            ['Customer Name', 'District', 'Remarks', 'contact person number', 'Address 2', 'Address 3', 'Pin', 'PH', 'GST', 'reference NO', 'reference image', '', 'PH'],
+            ['FAYAZ HARDWARE', 'KANYAKUMARI', '', '+91 94436 07543', '', 'COLACHAL', 629251, '+91 94436 07543', '33AAACA2094M1ZK', 7, 'img-1.jpg', 'x', '0422 2345678'],
+          ],
+          fmt: { J2: '0000' },
+        },
+      ]),
+      'x.xlsx',
+    );
     const r = resolveImport(g, {}, 'SHOP_DETAILS');
-    expect(r.mapping).toMatchObject({ Retailer: 'shopName', 'Phone No': 'mobile', PIN: 'pincode', 'Outlet Code': 'clientSiteCode', Beat: 'extra' });
+    expect(r.headers).toEqual(['Customer Name', 'District', 'Remarks', 'contact person number', 'Address 2', 'Address 3', 'Pin', 'PH', 'GST', 'reference NO', 'reference image', '', 'PH']);
+    expect(r.rows[0]!.cells).toEqual(['FAYAZ HARDWARE', 'KANYAKUMARI', '', '+91 94436 07543', '', 'COLACHAL', '629251', '+91 94436 07543', '33AAACA2094M1ZK', '0007', 'img-1.jpg', 'x', '0422 2345678']);
+    // Internally the recognisable columns feed shop fields; the table keeps every column regardless.
+    expect(r.mapping['Customer Name']).toBe('dealerName');
+    expect(r.mapping.Pin).toBe('pincode');
+  });
+
+  it('shows dates and numbers as Excel formats them', async () => {
+    const g = await readGrids(
+      await book([{ name: 'S', rows: [['Name', 'Date', 'Amount', 'Pct', 'Price'], ['A', new Date(Date.UTC(2026, 9, 5)), 1234567.5, 0.125, 99]], fmt: { B2: 'dd-mm-yyyy', C2: '#,##0.00', D2: '0.0%', E2: '"Rs."0' } }]),
+      'x.xlsx',
+    );
+    expect(g[0]!.rows[1]!.cells).toEqual(['A', '05-10-2026', '1,234,567.50', '12.5%', 'Rs.99']);
+  });
+
+  it('imports a sheet with no template columns at all (nothing rejected)', async () => {
+    const g = await readGrids(await book([{ name: 'S', rows: [['Party', 'Beat'], ['Sri Balaji', 'North']] }]), 'x.xlsx');
+    const r = resolveImport(g, {}, 'SHOP_DETAILS');
+    expect(r.headers).toEqual(['Party', 'Beat']);
     expect(r.rows).toHaveLength(1);
-    expect(r.rows[0]!.raw.Beat).toBe('North');
   });
 
-  it('Shop Details Only keeps a size column as an extra column (no measurements needed)', async () => {
-    const g = await readGrids(await book([{ name: 'S', rows: [['Shop Name', 'Size'], ['A', '10x4']] }]), 'x.xlsx');
-    expect(resolveImport(g, {}, 'SHOP_DETAILS').mapping.Size).toBe('extra');
-    expect(resolveImport(g, {}, 'SHOP_MEASUREMENT').mapping.Size).toBe('size');
+  it('finds the header below a title row', async () => {
+    const g = await readGrids(await book([{ name: 'S', rows: [['Dealer list Q3'], ['Shop Name', 'Mobile'], ['A', '9876543210']] }]), 'x.xlsx');
+    const r = resolveImport(g, {}, 'SHOP_DETAILS');
+    expect(r.headers).toEqual(['Shop Name', 'Mobile']);
+    expect(r.rows.map((x) => x.cells[0])).toEqual(['A']);
   });
 
-  it('asks for a mapping when no shop / dealer column is recognised, and accepts the chosen one', async () => {
-    const g = await readGrids(await book([{ name: 'S', rows: [['Name of party', 'Town'], ['Sri Balaji', 'Salem']] }]), 'x.xlsx');
-    const e = fail(() => resolveImport(g, {}, 'SHOP_DETAILS'));
-    expect(e.statusCode).toBe(422);
-    expect(e.code).toBe('SHOP_MAPPING_REQUIRED');
-    expect(e.details?.preview).toMatchObject({ sheet: 'S', headers: ['Name of party', 'Town'] });
-    const r = resolveImport(g, { headerRow: 1, mapping: { 'Name of party': 'shopName', Town: 'district' } }, 'SHOP_DETAILS');
-    expect(r.rows[0]!.raw['Name of party']).toBe('Sri Balaji');
-  });
-
-  it('asks which sheet when several have a shop list, picks the only one that has', async () => {
+  it('lets the BD pick the sheet when several have lists, and uses the only list otherwise', async () => {
     const two = await readGrids(await book([{ name: 'A', rows: [['Shop Name'], ['x']] }, { name: 'B', rows: [['Shop Name'], ['y']] }]), 'x.xlsx');
     const e = fail(() => resolveImport(two, {}, 'SHOP_DETAILS'));
     expect(e.code).toBe('SHOP_MAPPING_REQUIRED');
     expect((e.details?.preview?.sheets as { name: string }[]).map((s) => s.name)).toEqual(['A', 'B']);
-    expect(resolveImport(two, { sheet: 'B' }, 'SHOP_DETAILS').rows[0]!.raw['Shop Name']).toBe('y');
+    expect(resolveImport(two, { sheet: 'B' }, 'SHOP_DETAILS').rows[0]!.cells).toEqual(['y']);
     const withNotes = await readGrids(await book([{ name: 'Notes', rows: [['Fill the list on the next sheet']] }, { name: 'List', rows: [['Shop Name'], ['z']] }]), 'x.xlsx');
     expect(resolveImport(withNotes, {}, 'SHOP_DETAILS').sheet).toBe('List');
   });
 
-  it('rejects an empty workbook and a header with no rows clearly', async () => {
+  it('rejects only an empty workbook or a header with no rows', async () => {
     expect(fail(() => resolveImport([{ name: 'S', rows: [] }], {}, 'SHOP_DETAILS')).statusCode).toBe(400);
     const g = await readGrids(await book([{ name: 'S', rows: [['Shop Name', 'Mobile']] }]), 'x.xlsx');
     expect(fail(() => resolveImport(g, {}, 'SHOP_DETAILS')).statusCode).toBe(422);

@@ -43,7 +43,8 @@ const upload = (id: string, buf: Buffer, name = 'shops.xlsx', fields: Record<str
   for (const [k, v] of Object.entries(fields)) req.field(k, v);
   return req.attach('files', buf, name);
 };
-const rows = async (id: string) => (await api().get(`/api/v1/sales/orders/${id}/handover/shops?page=1&limit=100`).set(as())).body.data;
+const list = async (id: string) => (await api().get(`/api/v1/sales/orders/${id}/handover/shops?page=1&limit=100`).set(as())).body as { data: Record<string, any>[]; meta: { columns: { id: string; header: string }[] | null } };
+const history = async (id: string) => (await api().get(`/api/v1/sales/orders/${id}/handover/shop-history`).set(as())).body.data as Record<string, any>[];
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
@@ -63,55 +64,44 @@ beforeAll(async () => {
   token = (await api().post('/api/v1/auth/login').send({ email: 'bd@t.com', password: 'Passw0rd!x' })).body.data.accessToken;
 });
 afterAll(async () => {
-  await disconnectDb();
-  await mongod.stop();
-  fs.rmSync(root, { recursive: true, force: true });
+  await disconnectDb?.();
+  await mongod?.stop();
+  if (root) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe('handover shop Excel upload', () => {
-  it('imports the first file into an empty table (both shop types)', async () => {
+  it('imports the first file into an empty table and again after Clear All (both shop types)', async () => {
     for (const type of ['SHOP_DETAILS', 'SHOP_MEASUREMENT'] as const) {
       const id = await newOrder(type);
       const r = await upload(id, await xlsx([['Shop Name', 'District', 'Mobile', 'Size (W x H)'], ['ABC Traders', 'Vellore', '9876543210', '10x4']]));
       expect(r.status, JSON.stringify(r.body)).toBe(201);
-      const list = await rows(id);
-      expect(list).toHaveLength(1);
-      if (type === 'SHOP_DETAILS') expect(list[0].width ?? null).toBeNull();
-      else expect(list[0]).toMatchObject({ width: 10, height: 4 });
+      const { data } = await list(id);
+      expect(data).toHaveLength(1);
+      if (type === 'SHOP_DETAILS') expect(data[0]!.width ?? null).toBeNull();
+      else expect(data[0]).toMatchObject({ width: 10, height: 4 });
+      expect((await api().delete(`/api/v1/sales/orders/${id}/handover/shops`).set(as())).status).toBe(200);
+      expect((await upload(id, await xlsx([['Shop Name'], ['Two']]))).status).toBe(201);
     }
   });
 
-  it('imports again after the table was cleared', async () => {
+  it('keeps the sheet columns as uploaded, with cell edits, added rows and history after a reload', async () => {
     const id = await newOrder('SHOP_DETAILS');
-    expect((await upload(id, await xlsx([['Shop Name'], ['One']]))).status).toBe(201);
-    expect((await api().delete(`/api/v1/sales/orders/${id}/handover/shops`).set(as())).status).toBe(200);
-    const r = await upload(id, await xlsx([['Shop Name'], ['Two']]));
+    const r = await upload(id, await xlsx([['Outlet Code', 'PIN', 'Phone No', 'Retailer', 'Beat', ''], ['007', '600001', '+91 98765 43210', 'Kumar Stores', 'North', 'x']]));
     expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const { data, meta } = await list(id);
+    const columns = meta.columns!;
+    expect(columns.map((c) => c.header)).toEqual(['Outlet Code', 'PIN', 'Phone No', 'Retailer', 'Beat', '']);
+    const row = data[0]!;
+    expect(columns.map((c) => row.cells[c.id] ?? '')).toEqual(['007', '600001', '+91 98765 43210', 'Kumar Stores', 'North', 'x']);
+    const beat = columns.find((c) => c.header === 'Beat')!.id;
+    expect((await api().put(`/api/v1/sales/orders/${id}/handover/shop-rows/${row.rowId}`).set(as()).send({ cells: { ...row.cells, [beat]: 'South' } })).status).toBe(200);
+    expect((await api().post(`/api/v1/sales/orders/${id}/handover/shop-rows`).set(as()).send({ cells: { [beat]: 'East' } })).status).toBe(201);
+    expect((await list(id)).data.map((x) => x.cells[beat])).toEqual(['South', 'East']);
+    const edit = (await history(id)).find((l) => l.action === 'EDIT')!;
+    expect(edit.cells).toEqual([{ column: 'Beat', before: 'North', after: 'South' }]);
   });
 
-  it('maps other header names and column orders, keeps extra columns and leading zeros', async () => {
-    const id = await newOrder('SHOP_DETAILS');
-    const r = await upload(id, await xlsx([['Outlet Code', 'PIN', 'Phone No', 'Retailer', 'Beat'], ['007', '600001', '09876543210', 'Kumar Stores', 'North']]));
-    expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const [row] = await rows(id);
-    expect(row.shopName ?? row.dealerName).toBe('Kumar Stores');
-    expect(row.pincode).toBe('600001');
-    expect(row.extra).toMatchObject({ Beat: 'North' });
-  });
-
-  it('asks for a mapping when no shop or dealer column is recognised, then imports with it', async () => {
-    const id = await newOrder('SHOP_DETAILS');
-    const buf = await xlsx([['Name of party', 'Town'], ['Sri Balaji', 'Salem']]);
-    const r = await upload(id, buf);
-    expect(r.status).toBe(422);
-    expect(r.body.error.code).toBe('SHOP_MAPPING_REQUIRED');
-    expect(r.body.error.details.preview.headers).toEqual(['Name of party', 'Town']);
-    const ok = await upload(id, buf, 'shops.xlsx', { mapping: JSON.stringify({ 'Name of party': 'shopName', Town: 'district' }) });
-    expect(ok.status, JSON.stringify(ok.body)).toBe(201);
-    expect((await rows(id))[0]).toMatchObject({ shopName: 'Sri Balaji', district: 'Salem' });
-  });
-
-  it('asks which sheet to use when several have data', async () => {
+  it('asks which sheet when several have a list', async () => {
     const id = await newOrder('SHOP_DETAILS');
     const buf = await xlsx([['Shop Name'], ['A']], [{ name: 'Second', rows: [['Shop Name'], ['B']] }]);
     const r = await upload(id, buf);
@@ -119,10 +109,11 @@ describe('handover shop Excel upload', () => {
     expect(r.body.error.details.preview.sheets.map((s: { name: string }) => s.name)).toEqual(['Shops', 'Second']);
     const ok = await upload(id, buf, 'shops.xlsx', { sheet: 'Second' });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
-    expect((await rows(id))[0].shopName).toBe('B');
+    const { data, meta } = await list(id);
+    expect(data[0]!.cells[meta.columns![0]!.id]).toBe('B');
   });
 
-  it('rejects malformed and unsupported files with a clear 400', async () => {
+  it('rejects malformed files with a clear 400', async () => {
     const id = await newOrder('SHOP_DETAILS');
     const bad = await upload(id, Buffer.from('not a workbook'), 'shops.xlsx');
     expect(bad.status).toBe(400);
@@ -132,14 +123,16 @@ describe('handover shop Excel upload', () => {
   it('records history for imports and row edits / deletes', async () => {
     const id = await newOrder('SHOP_MEASUREMENT');
     await upload(id, await xlsx([['Shop Name', 'Mobile'], ['Hist Shop', '9876543210']]));
-    const [row] = await rows(id);
-    expect((await api().put(`/api/v1/sales/orders/${id}/handover/shop-rows/${row.rowId}`).set(as()).send({ shopName: 'Hist Shop 2', mobile: '9876543210' })).status).toBe(200);
+    const { data, meta } = await list(id);
+    const row = data[0]!;
+    const name = meta.columns![0]!.id;
+    expect((await api().put(`/api/v1/sales/orders/${id}/handover/shop-rows/${row.rowId}`).set(as()).send({ cells: { ...row.cells, [name]: 'Hist Shop 2' }, width: '8', height: '3' })).status).toBe(200);
     expect((await api().delete(`/api/v1/sales/orders/${id}/handover/shop-rows/${row.rowId}`).set(as())).status).toBe(200);
-    const h = (await api().get(`/api/v1/sales/orders/${id}/handover/shop-history`).set(as())).body.data;
-    expect(h.map((l: { action: string }) => l.action)).toEqual(expect.arrayContaining(['IMPORT', 'ADD', 'EDIT', 'DELETE']));
-    const edit = h.find((l: { action: string }) => l.action === 'EDIT');
-    expect(edit.before.shopName).toBe('Hist Shop');
-    expect(edit.after.shopName).toBe('Hist Shop 2');
-    expect(h.find((l: { action: string }) => l.action === 'DELETE').before.shopName).toBe('Hist Shop 2');
+    const h = await history(id);
+    expect(h.map((l) => l.action)).toEqual(expect.arrayContaining(['IMPORT', 'ADD', 'EDIT', 'DELETE']));
+    const edit = h.find((l) => l.action === 'EDIT')!;
+    expect(edit.cells).toEqual([{ column: 'Shop Name', before: 'Hist Shop', after: 'Hist Shop 2' }]);
+    expect(edit.after).toMatchObject({ width: 8, height: 3 });
+    expect(h.find((l) => l.action === 'DELETE')!.cells[0]).toMatchObject({ column: 'Shop Name', before: 'Hist Shop 2' });
   });
 });

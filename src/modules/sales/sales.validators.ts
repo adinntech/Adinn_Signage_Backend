@@ -98,6 +98,8 @@ export const shopRowBody = z.object({
   clientSiteCode: cell(250),
   /** Columns of the uploaded Excel that are not shop fields (header -> value); omitted = keep the row's current ones. */
   extra: z.record(z.string().trim().min(1).max(120), z.string().trim().max(500)).optional(),
+  /** Imported-columns tables: column id -> cell text, kept as typed (omitted = keep the row's cells). */
+  cells: z.record(z.string().regex(/^c\d{1,4}$/, 'Invalid column'), z.string().max(2000)).optional(),
 });
 /**
  * Shop list upload options (multipart text fields), sent from the mapping step when the file was ambiguous: the sheet,

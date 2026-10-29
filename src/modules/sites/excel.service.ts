@@ -74,11 +74,97 @@ export interface SheetGrid {
   rows: { rowNumber: number; cells: string[] }[];
 }
 
-/** Number cells formatted as fixed digits ("000000") keep their leading zeros, as Excel shows them. */
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const two = (n: number) => String(n).padStart(2, '0');
+
+/** A date cell as its number format shows it (d, dd, ddd, m, mm, mmm, mmmm, yy, yyyy, h, hh, mm, ss, AM/PM). */
+function formatDate(d: Date, fmt: string): string {
+  const f = fmt.split(';')[0]!.replace(/\[[^\]]*\]/g, '').replace(/\\(.)/g, '$1').replace(/"([^"]*)"/g, '$1');
+  if (!/[dy]/i.test(f) && !/h/i.test(f)) return d.toISOString().slice(0, 10);
+  const ampm = /AM\/PM|A\/P/i.test(f);
+  const tokens = f.match(/yyyy|yy|mmmm|mmm|mm|m|dddd|ddd|dd|d|hh|h|ss|s|AM\/PM|A\/P|./gi) ?? [];
+  let out = '';
+  tokens.forEach((t, i) => {
+    const lower = t.toLowerCase();
+    // "m" / "mm" right after hours or before seconds is minutes, otherwise the month.
+    const minute = (lower === 'm' || lower === 'mm') && (/^h/i.test(tokens.slice(0, i).reverse().find((x) => /[a-z]/i.test(x)) ?? '') || /^s/i.test(tokens.slice(i + 1).find((x) => /[a-z]/i.test(x)) ?? ''));
+    const h = d.getUTCHours();
+    if (lower === 'yyyy') out += d.getUTCFullYear();
+    else if (lower === 'yy') out += two(d.getUTCFullYear() % 100);
+    else if (lower === 'mmmm') out += MONTHS[d.getUTCMonth()];
+    else if (lower === 'mmm') out += MONTHS[d.getUTCMonth()]!.slice(0, 3);
+    else if (minute) out += lower === 'mm' ? two(d.getUTCMinutes()) : d.getUTCMinutes();
+    else if (lower === 'mm') out += two(d.getUTCMonth() + 1);
+    else if (lower === 'm') out += d.getUTCMonth() + 1;
+    else if (lower === 'dddd') out += DAYS[d.getUTCDay()];
+    else if (lower === 'ddd') out += DAYS[d.getUTCDay()]!.slice(0, 3);
+    else if (lower === 'dd') out += two(d.getUTCDate());
+    else if (lower === 'd') out += d.getUTCDate();
+    else if (lower === 'hh' || lower === 'h') {
+      const v = ampm ? h % 12 || 12 : h;
+      out += lower === 'hh' ? two(v) : v;
+    } else if (lower === 'ss') out += two(d.getUTCSeconds());
+    else if (lower === 's') out += d.getUTCSeconds();
+    else if (lower === 'am/pm') out += h < 12 ? 'AM' : 'PM';
+    else if (lower === 'a/p') out += h < 12 ? 'A' : 'P';
+    else out += t;
+  });
+  return out;
+}
+
+/** A number cell as its format shows it: fixed digits ("000000"), decimals, thousands separators, %, quoted text. */
+function formatNumber(v: number, fmt: string): string {
+  const plain = () => String(Number(v.toPrecision(15)));
+  const section = fmt.split(';')[0]!.replace(/\[[^\]]*\]/g, '');
+  if (!section || /^general$/i.test(section) || section === '@' || /[?/E]/.test(section)) return plain();
+  // Split the format into literal text before / after and the digit placeholders (# 0 , . %).
+  let pre = '';
+  let post = '';
+  let pattern = '';
+  for (let k = 0; k < section.length; k++) {
+    const c = section[k]!;
+    let text = '';
+    if (c === '"') {
+      const end = section.indexOf('"', k + 1);
+      text = section.slice(k + 1, end < 0 ? undefined : end);
+      k = end < 0 ? section.length : end;
+    } else if (c === '\\') text = section[++k] ?? '';
+    else if (c === '_' || c === '*') k++;
+    else if ('#0,.%'.includes(c)) {
+      pattern += c;
+      continue;
+    } else text = c;
+    if (pattern) post += text;
+    else pre += text;
+  }
+  if (!/[#0]/.test(pattern)) return plain();
+  const pct = pattern.includes('%');
+  const [int = '', dec = ''] = pattern.replace(/%/g, '').split('.');
+  const n = pct ? v * 100 : v;
+  const keep = (dec.match(/0/g) ?? []).length;
+  let [i = '', f = ''] = Math.abs(n).toFixed(dec.length).split('.');
+  while (f.length > keep && f.endsWith('0')) f = f.slice(0, -1);
+  i = i.padStart((int.match(/0/g) ?? []).length, '0');
+  if (int.includes(',')) i = i.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${n < 0 ? '-' : ''}${pre}${i}${f ? `.${f}` : ''}${pct ? '%' : ''}${post}`;
+}
+
+/**
+ * A cell as Excel displays it: number / date formats applied (leading zeros, decimals, dates), text kept as typed
+ * (phone prefixes, GST, codes), formulas as their result.
+ */
 function cellString(cell: ExcelJS.Cell): string {
   const fmt = typeof cell.numFmt === 'string' ? cell.numFmt : '';
-  if (typeof cell.value === 'number' && /^0+$/.test(fmt) && Number.isInteger(cell.value)) return String(cell.value).padStart(fmt.length, '0');
-  return cellText(cell.value);
+  let v = cell.value as unknown;
+  if (v && typeof v === 'object' && !(v instanceof Date) && 'result' in (v as object)) v = (v as { result: unknown }).result;
+  try {
+    if (typeof v === 'number' && Number.isFinite(v)) return formatNumber(v, fmt);
+    if (v instanceof Date) return fmt ? formatDate(v, fmt) : v.toISOString().slice(0, 10);
+  } catch {
+    /* unusual format: plain value below */
+  }
+  return cellText(v as ExcelJS.CellValue);
 }
 
 /**

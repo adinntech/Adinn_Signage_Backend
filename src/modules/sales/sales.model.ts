@@ -162,6 +162,8 @@ const shopLogSchema = new Schema({
   action: { type: String, enum: SHOP_LOG_ACTIONS, required: true },
   before: { type: Schema.Types.Mixed, default: undefined },
   after: { type: Schema.Types.Mixed, default: undefined },
+  /** Imported-column tables: the cells that changed, by column header (before / after; one side for add / delete). */
+  cells: { type: [new Schema({ column: String, before: String, after: String }, { _id: false })], default: undefined },
   note: String,
   by: { type: Schema.Types.ObjectId, ref: 'User' },
   role: String,
@@ -204,8 +206,10 @@ const handoverShopSchema = new Schema(
     quantity: Number,
     remarks: String,
     clientSiteCode: String,
-    /** Columns that did not match a known field, kept as-is. */
+    /** Columns that did not match a known field, kept as-is (tables from before imported columns). */
     extra: { type: Schema.Types.Mixed, default: undefined },
+    /** The row as imported / edited: column id (order.shopColumns) -> cell text exactly as shown in Excel. */
+    cells: { type: Schema.Types.Mixed, default: undefined },
     state: { type: String, enum: ['VALID', 'WARNING', 'ERROR'] },
     issues: [String],
     /** Shop + Measurement: up to 10 images of this shop (where the board goes, measurements). */
@@ -386,6 +390,11 @@ const orderSchema = new Schema(
     salespipelineLogs: { type: [pipelineLogSchema], default: [] },
     handoverDocumentsArray: { type: [handoverDocSchema], default: [] },
     handoverShopsArray: { type: [handoverShopSchema], default: [] },
+    /**
+     * Columns of the shop table as uploaded: stable id, the original header text (blank / repeated allowed) in sheet
+     * order, and the shop field it feeds internally (null = kept as a column only). Unset for tables from before.
+     */
+    shopColumns: { type: [new Schema({ id: String, header: String, field: { type: String, default: null } }, { _id: false })], default: undefined },
     handoverVoiceNotesArray: { type: [voiceNoteSchema], default: [] },
     handoverMessagesArray: { type: [handoverMessageSchema], default: [] },
     handoverShopLogs: { type: [shopLogSchema], default: [] },

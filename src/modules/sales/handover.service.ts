@@ -62,7 +62,7 @@ export function handoverGaps(o: GapInput): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
@@ -89,6 +89,8 @@ export async function getHandover(id: string) {
     /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
     soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
     updatedAt: o.handoverUpdatedAt ?? null,
+    /** Imported columns of the shop table (null for tables from before them). */
+    columns: columnsOf(o),
     missing: o.csAssignee ? [] : handoverGaps(o),
   };
 }
@@ -223,13 +225,15 @@ const assertShopType = (o: { handoverType?: string | null }) => {
  * Raw text values -> the row's fields, state and issues, with the project site import rules. Size is optional for
  * both shop types; Shop Details Only keeps no size at all.
  */
-function cleanRow(values: ShopRowInput, type: string | null | undefined) {
+function cleanRow(values: ShopRowInput, type: string | null | undefined, opts: { nameOptional?: boolean } = {}) {
   const n = normalise(values, { scenario: 'MEASUREMENT_REQUIRED', defaultUnit: 'ft' });
   const sized = type === 'SHOP_MEASUREMENT';
   const value: Record<string, unknown> = { ...n.value };
   if (!sized) for (const f of ['width', 'height', 'unit']) delete value[f];
-  const errors = n.errors.filter((e) => sized || !SIZE_FIELDS.includes(e.field));
-  const warnings = n.warnings.filter((e) => sized || !SIZE_FIELDS.includes(e.field));
+  // Imported sheets without a shop / dealer name column: the row is kept and only flagged.
+  const soft = (e: { code: string }) => !!opts.nameOptional && e.code === 'NAME_REQUIRED';
+  const errors = n.errors.filter((e) => (sized || !SIZE_FIELDS.includes(e.field)) && !soft(e));
+  const warnings = [...n.warnings, ...n.errors.filter(soft)].filter((e) => sized || !SIZE_FIELDS.includes(e.field));
   return {
     fields: Object.fromEntries(SHOP_FIELDS.map((f) => [f, value[f] ?? null])) as Record<ShopField, unknown>,
     state: (errors.length ? 'ERROR' : warnings.length ? 'WARNING' : 'VALID') as 'ERROR' | 'WARNING' | 'VALID',
@@ -264,7 +268,7 @@ const snapshot = (r: Record<string, unknown>) => {
 /** How a row is named in the history, so it stays recognisable after it is deleted. */
 const rowLabel = (r: Record<string, unknown>) => [`Row ${r.rowNumber ?? '?'}`, r.shopName || r.dealerName].filter(Boolean).join(' · ');
 const newRowId = () => new Types.ObjectId().toHexString();
-const shopLog = (actor: Actor, action: string, rowId: string | null, extra: { before?: unknown; after?: unknown; note?: string; label?: string } = {}) => ({
+const shopLog = (actor: Actor, action: string, rowId: string | null, extra: { before?: unknown; after?: unknown; note?: string; label?: string; cells?: { column: string; before?: string; after?: string }[] } = {}) => ({
   _id: new Types.ObjectId(),
   rowId,
   action,
@@ -304,21 +308,84 @@ async function findRow(orderId: Types.ObjectId, rowId: string) {
   return row as typeof row & Record<string, unknown>;
 }
 
-type ShopRowBody = ShopRowInput & { extra?: Extra | undefined };
+type ShopRowBody = ShopRowInput & { extra?: Extra | undefined; cells?: Record<string, string> | undefined };
 
-/** Add one shop row by hand. */
+/* ------------------------- imported columns (the sheet as uploaded) ------------------------- */
+
+/** One column of the uploaded Excel: stable id, original header text (may be blank or repeated), and the shop field it feeds internally. */
+export type ShopColumn = { id: string; header: string; field: string | null };
+type Cells = Record<string, string>;
+const MAX_CELL = 2000;
+const MAX_COLUMNS = 150;
+const MEASURE_FIELDS = ['width', 'height', 'unit'] as const;
+
+const columnsOf = (o: { shopColumns?: unknown } | null | undefined): ShopColumn[] | null => {
+  const list = (o?.shopColumns ?? null) as { id: string; header?: string | null; field?: string | null }[] | null;
+  return list?.length ? list.map((c) => ({ id: c.id, header: c.header ?? '', field: c.field ?? null })) : null;
+};
+const hasSizeColumn = (columns: ShopColumn[]) => columns.some((c) => !!c.field && SIZED_TARGETS.includes(c.field));
+/** How a column is named in the history: its header, or its position when the header is blank or repeated. */
+function columnName(columns: ShopColumn[], c: ShopColumn) {
+  const i = columns.indexOf(c);
+  const key = c.header.trim().toLowerCase();
+  if (!key) return `Column ${i + 1}`;
+  return columns.filter((x) => x.header.trim().toLowerCase() === key).length > 1 ? `${c.header} (column ${i + 1})` : c.header;
+}
+/** Cells of the known columns as text, exactly as given (blank cells are not stored; they show empty). */
+function cleanCells(cells: Record<string, unknown> | null | undefined, columns: ShopColumn[]): Cells {
+  const out: Cells = {};
+  for (const c of columns) {
+    const v = cells?.[c.id];
+    const t = v == null ? '' : String(v).slice(0, MAX_CELL);
+    if (t.trim() !== '') out[c.id] = t;
+  }
+  return out;
+}
+/** Cells whose text changed, for the history (one side only for an added / deleted row). */
+function cellChanges(columns: ShopColumn[], a: Cells | null, b: Cells | null) {
+  return columns
+    .filter((c) => (a?.[c.id] ?? '') !== (b?.[c.id] ?? ''))
+    .map((c) => ({ column: columnName(columns, c), ...(a ? { before: a[c.id] ?? '' } : {}), ...(b ? { after: b[c.id] ?? '' } : {}) }));
+}
+/**
+ * Shop fields of an imported-columns row, for the checks and everything downstream (project sites, request email,
+ * duplicates). The cells are never changed by it. Shop + Measurement without a size column keeps its measurement as
+ * app fields (`measure`). A sheet without a shop / dealer name column is not an error (the row is flagged only).
+ */
+function deriveRow(cells: Cells, columns: ShopColumn[], type: string | null | undefined, measure?: Partial<Record<(typeof MEASURE_FIELDS)[number], unknown>>) {
+  const values: ShopRowInput = {};
+  for (const c of columns) if (c.field && cells[c.id] && !(c.field in values)) values[c.field as keyof ShopRowInput] = cells[c.id];
+  if (type === 'SHOP_MEASUREMENT' && !hasSizeColumn(columns)) for (const f of MEASURE_FIELDS) if (measure?.[f] != null && measure[f] !== '') values[f] = String(measure[f]);
+  return cleanRow(values, type, { nameOptional: !columns.some((c) => !!c.field && NAME_FIELDS.includes(c.field)) });
+}
+/** The app measurement of a row (Shop + Measurement without a size column), for the history. */
+const measureOf = (r: Record<string, unknown>) => Object.fromEntries(MEASURE_FIELDS.filter((f) => r[f] != null && r[f] !== '').map((f) => [f, r[f]]));
+/** Row identity for the history: the shop / dealer name, else its first filled cell. */
+const labelOf = (row: Record<string, unknown>, columns: ShopColumn[] | null) => {
+  if (row.shopName || row.dealerName || !columns) return rowLabel(row);
+  const first = columns.map((c) => (row.cells as Cells | undefined)?.[c.id]).find((v) => v && v.trim());
+  return [`Row ${row.rowNumber ?? '?'}`, first?.slice(0, 60)].filter(Boolean).join(' · ');
+};
+
+/** Add one shop row by hand (with the imported columns when the table has them). */
 export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   assertShopType(o);
+  const columns = columnsOf(o);
+  const cells = columns ? cleanCells(values.cells, columns) : undefined;
+  if (columns && !Object.keys(cells!).length && !MEASURE_FIELDS.some((f) => values[f])) throw new AppError(422, 'VALIDATION_ERROR', 'Fill at least one cell', [{ path: 'cells', message: 'Fill at least one cell' }]);
   await handoverRoute(o);
   await ensureRowIds(o._id);
-  const c = cleanRow(values, o.handoverType);
+  const c = columns ? deriveRow(cells!, columns, o.handoverType, values) : cleanRow(values, o.handoverType);
   const last = await SalesOrder.findById(o._id).select('handoverShopsArray.rowNumber').lean();
   const rowNumber = Math.max(0, ...(last?.handoverShopsArray ?? []).map((r) => r.rowNumber ?? 0)) + 1;
-  const row = { rowNumber, ...c.fields, extra: cleanExtra(values.extra), state: c.state, issues: c.issues, rowId: newRowId(), updatedAt: new Date(), updatedBy: new Types.ObjectId(actor.id) };
+  const row = { rowNumber, ...c.fields, ...(columns ? { cells } : { extra: cleanExtra(values.extra) }), state: c.state, issues: c.issues, rowId: newRowId(), updatedAt: new Date(), updatedBy: new Types.ObjectId(actor.id) };
+  const log = columns
+    ? shopLog(actor, 'ADD', row.rowId, { after: measureOf(row), cells: cellChanges(columns, null, cells!), label: labelOf(row, columns) })
+    : shopLog(actor, 'ADD', row.rowId, { after: snapshot(row), label: rowLabel(row) });
   const r = await SalesOrder.updateOne(stillOpen(o), {
-    $push: { handoverShopsArray: row, handoverShopLogs: shopLog(actor, 'ADD', row.rowId, { after: snapshot(row), label: rowLabel(row) }) },
+    $push: { handoverShopsArray: row, handoverShopLogs: log },
     $set: { updatedBy: actor.id },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
@@ -326,34 +393,48 @@ export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) 
   return row;
 }
 
-/** Edit a shop row: the changed fields are logged with their old and new values. */
+/** Edit a shop row: the changed cells / fields are logged with their old and new values. */
 export async function updateShopRow(id: string, rowId: string, values: ShopRowBody, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   assertShopType(o);
-  await handoverRoute(o);
   const before = await findRow(o._id, rowId);
-  const c = cleanRow(values, o.handoverType);
-  const changed = SHOP_FIELDS.filter((f) => String(before[f] ?? '') !== String(c.fields[f] ?? ''));
-  const oldExtra = cleanExtra(before.extra as Extra | undefined);
-  const newExtra = values.extra === undefined ? oldExtra : cleanExtra(values.extra);
-  const extraChange = extraDiff(oldExtra, newExtra);
-  if (!changed.length && !extraChange) return before;
-  const set: Record<string, unknown> = { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.extra': newExtra ?? null, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id };
+  const columns = columnsOf(o);
+  let c: ReturnType<typeof cleanRow>;
+  let set: Record<string, unknown>;
+  let log: ReturnType<typeof shopLog>;
+  if (columns) {
+    const oldCells = cleanCells(before.cells as Cells | undefined, columns);
+    const newCells = values.cells === undefined ? oldCells : cleanCells(values.cells, columns);
+    const measure = Object.fromEntries(MEASURE_FIELDS.map((f) => [f, values[f] !== undefined ? values[f] : before[f]]));
+    c = deriveRow(newCells, columns, o.handoverType, measure);
+    const cellsChanged = cellChanges(columns, oldCells, newCells);
+    const appChanged = hasSizeColumn(columns) ? [] : MEASURE_FIELDS.filter((f) => String(before[f] ?? '') !== String(c.fields[f] ?? ''));
+    if (!cellsChanged.length && !appChanged.length) return before;
+    set = { 'handoverShopsArray.$.cells': newCells };
+    log = shopLog(actor, 'EDIT', rowId, {
+      cells: cellsChanged,
+      ...(appChanged.length ? { before: Object.fromEntries(appChanged.map((f) => [f, before[f] ?? null])), after: Object.fromEntries(appChanged.map((f) => [f, c.fields[f]])) } : {}),
+      label: labelOf({ ...before, ...c.fields, cells: newCells }, columns),
+    });
+  } else {
+    c = cleanRow(values, o.handoverType);
+    const changed = SHOP_FIELDS.filter((f) => String(before[f] ?? '') !== String(c.fields[f] ?? ''));
+    const oldExtra = cleanExtra(before.extra as Extra | undefined);
+    const newExtra = values.extra === undefined ? oldExtra : cleanExtra(values.extra);
+    const extraChange = extraDiff(oldExtra, newExtra);
+    if (!changed.length && !extraChange) return before;
+    set = { 'handoverShopsArray.$.extra': newExtra ?? null };
+    log = shopLog(actor, 'EDIT', rowId, {
+      before: { ...Object.fromEntries(changed.map((f) => [f, before[f] ?? null])), ...(extraChange ? { extra: extraChange.before } : {}) },
+      after: { ...Object.fromEntries(changed.map((f) => [f, c.fields[f]])), ...(extraChange ? { extra: extraChange.after } : {}) },
+      label: rowLabel({ ...before, ...c.fields }),
+    });
+  }
+  await handoverRoute(o);
+  Object.assign(set, { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id });
   for (const f of SHOP_FIELDS) set[`handoverShopsArray.$.${f}`] = c.fields[f];
-  const r = await SalesOrder.updateOne(
-    { ...stillOpen(o), 'handoverShopsArray.rowId': rowId },
-    {
-      $set: set,
-      $push: {
-        handoverShopLogs: shopLog(actor, 'EDIT', rowId, {
-          before: { ...Object.fromEntries(changed.map((f) => [f, before[f] ?? null])), ...(extraChange ? { extra: extraChange.before } : {}) },
-          after: { ...Object.fromEntries(changed.map((f) => [f, c.fields[f]])), ...(extraChange ? { extra: extraChange.after } : {}) },
-          label: rowLabel({ ...before, ...c.fields }),
-        }),
-      },
-    },
-  );
+  const r = await SalesOrder.updateOne({ ...stillOpen(o), 'handoverShopsArray.rowId': rowId }, { $set: set, $push: { handoverShopLogs: log } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   await syncShopSummary(o._id);
   return findRow(o._id, rowId);
@@ -365,9 +446,13 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   assertNotHandedOver(o);
   await handoverRoute(o);
   const before = await findRow(o._id, rowId);
+  const columns = columnsOf(o);
+  const log = columns
+    ? shopLog(actor, 'DELETE', rowId, { before: measureOf(before), cells: cellChanges(columns, cleanCells(before.cells as Cells | undefined, columns), null), label: labelOf(before, columns) })
+    : shopLog(actor, 'DELETE', rowId, { before: snapshot(before), label: rowLabel(before) });
   const r = await SalesOrder.updateOne(stillOpen(o), {
     $pull: { handoverShopsArray: { rowId } },
-    $push: { handoverShopLogs: shopLog(actor, 'DELETE', rowId, { before: snapshot(before), label: rowLabel(before) }) },
+    $push: { handoverShopLogs: log },
     $set: { updatedBy: actor.id },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
@@ -445,14 +530,15 @@ export async function removeShopFile(id: string, rowId: string, fileId: string, 
 /** Shop rows, filtered by state and paged (the list can be thousands of rows), with who changed each row last. */
 export async function listShops(id: string, q: { page: number; limit: number; state?: 'VALID' | 'WARNING' | 'ERROR' | undefined }) {
   await ensureRowIds(id);
-  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverShopsArray').lean();
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverShopsArray shopColumns').lean();
   if (!o) throw AppError.notFound('Order not found');
   const rows = (o.handoverShopsArray ?? []).filter((r) => !q.state || r.state === q.state);
   const page = rows.slice((q.page - 1) * q.limit, q.page * q.limit);
   const ids = [...new Set(page.map((r) => r.updatedBy && String(r.updatedBy)).filter(Boolean))] as string[];
   const names = new Map((await User.find({ _id: { $in: ids } }).select('name').lean()).map((u) => [String(u._id), u.name]));
   const items = page.map((r) => ({ ...r, updatedByName: r.updatedBy ? (names.get(String(r.updatedBy)) ?? null) : null }));
-  return { items, meta: { page: q.page, limit: q.limit, total: rows.length, totalPages: Math.max(1, Math.ceil(rows.length / q.limit)) } };
+  // columns: the imported columns in sheet order (null for tables from before them).
+  return { items, meta: { page: q.page, limit: q.limit, total: rows.length, totalPages: Math.max(1, Math.ceil(rows.length / q.limit)), columns: columnsOf(o) } };
 }
 
 /**
@@ -470,8 +556,10 @@ async function storeHandoverFile(o: { _id: Types.ObjectId; orderNo: string; clie
 const NAME_FIELDS: readonly string[] = ['shopName', 'dealerName'];
 const HEADER_SCAN = 15;
 const SIZED_TARGETS: readonly string[] = ['width', 'height', 'size', 'unit'];
+/** Columns the app adds to Download Excel (ignored when that file is uploaded again, unless the sheet has them). */
+const EXPORT_APP = ['size (w x h)', 'unit'];
 
-/** Header cells made non-blank and unique ("Column 3", "Mobile (2)"), and safe as stored keys. */
+/** Header cells made non-blank and unique ("Column 3", "Mobile (2)"): internal keys for the field mapping only. */
 function headerNames(cells: string[], width: number) {
   const seen = new Map<string, number>();
   return Array.from({ length: width }, (_, i) => {
@@ -495,15 +583,17 @@ function detectHeader(g: SheetGrid): { index: number; score: number } | null {
 type UploadOptions = { sheet?: string | undefined; headerRow?: number | undefined; mapping?: Record<string, string> | undefined; preview?: boolean | undefined };
 
 /**
- * Works out which sheet, header row and column mapping to import. When the workbook is ambiguous (several sheets with
- * data, no recognisable header, no shop / dealer name column) nothing is guessed: a 422 SHOP_MAPPING_REQUIRED carries
- * a compact preview so the BD picks the sheet / header row and maps the columns, then uploads again with them.
+ * The table to import, as the sheet has it: the sheet, its header row (original header texts, blank and repeated ones
+ * included, in sheet order), and the data rows with every cell as displayed (fully blank rows are skipped). `keys` /
+ * `mapping` only say which column feeds which shop field internally; they never rename, merge or drop a column.
+ * Several sheets with data and no single list among them: 422 SHOP_MAPPING_REQUIRED with a preview so the BD picks the
+ * sheet (and, if needed, the header row).
  */
 export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: string | null | undefined) {
   const filled = grids.filter((g) => g.rows.length);
   if (!filled.length) throw AppError.badRequest('The file is empty: no sheet has any rows.');
   const fields = MAPPABLE.filter((f) => type === 'SHOP_MEASUREMENT' || !SIZED_TARGETS.includes(f));
-  const ask = (sheet: SheetGrid, headerIndex: number, message: string, headers: string[], mapping: Record<string, MapTarget>, problems: string[] = []): never => {
+  const ask = (sheet: SheetGrid, headerIndex: number, message: string, headers: string[], mapping: Record<string, MapTarget>): never => {
     throw new AppError(422, 'SHOP_MAPPING_REQUIRED', message, {
       preview: {
         sheets: filled.map((g) => ({ name: g.name, rows: g.rows.length })),
@@ -512,7 +602,7 @@ export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: str
         rows: sheet.rows.slice(0, 8).map((r) => ({ rowNumber: r.rowNumber, cells: r.cells.slice(0, 40) })),
         headers,
         mapping,
-        problems,
+        problems: [],
         fields,
       },
     });
@@ -524,8 +614,9 @@ export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: str
     if (!sheet) throw new AppError(422, 'VALIDATION_ERROR', `Sheet "${opts.sheet}" was not found or is empty`, [{ path: 'sheet', message: 'Choose another sheet' }]);
   } else if (filled.length === 1) sheet = filled[0];
   else {
-    const named = filled.filter((g) => detectHeader(g));
-    if (named.length === 1) sheet = named[0];
+    // A notes / instructions sheet has no rows below a header: the one sheet that has them is the list.
+    const lists = filled.filter((g) => g.rows.length > 1);
+    if (lists.length === 1) sheet = lists[0];
   }
   if (!sheet) {
     const first = filled[0]!;
@@ -533,41 +624,61 @@ export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: str
     return ask(first, 0, 'This workbook has several sheets with data. Choose the sheet with the shop list.', h, autoMap(h));
   }
 
-  let headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? -1);
-  if (opts.headerRow && headerIndex < 0) throw new AppError(422, 'VALIDATION_ERROR', `Row ${opts.headerRow} is blank or outside the sheet`, [{ path: 'headerRow', message: 'Choose another header row' }]);
-  const guessed = headerIndex < 0;
-  if (guessed) headerIndex = 0;
+  const headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? 0);
+  if (headerIndex < 0) throw new AppError(422, 'VALIDATION_ERROR', `Row ${opts.headerRow} is blank or outside the sheet`, [{ path: 'headerRow', message: 'Choose another header row' }]);
   const dataRows = sheet.rows.slice(headerIndex + 1);
-  const width = Math.max(sheet.rows[headerIndex]!.cells.length, ...dataRows.slice(0, 2000).map((r) => r.cells.length));
-  const headers = headerNames(sheet.rows[headerIndex]!.cells, width);
+  const headerCells = sheet.rows[headerIndex]!.cells;
+  const width = Math.min(MAX_COLUMNS, Math.max(headerCells.length, ...dataRows.map((r) => r.cells.length)));
+  const headers = Array.from({ length: width }, (_, i) => headerCells[i] ?? '');
+  const keys = headerNames(headerCells, width);
 
   let mapping: Record<string, MapTarget>;
   if (opts.mapping) {
-    const allowed = new Set<string>([...fields, 'extra', 'ignore']);
-    mapping = Object.fromEntries(headers.map((h) => [h, (allowed.has(opts.mapping![h] ?? '') ? opts.mapping![h] : 'extra') as MapTarget]));
+    const allowed = new Set<string>(fields);
+    const used = new Set<string>();
+    mapping = Object.fromEntries(
+      keys.map((k) => {
+        const t = opts.mapping![k] ?? '';
+        const ok = allowed.has(t) && !used.has(t);
+        if (ok) used.add(t);
+        return [k, (ok ? t : 'extra') as MapTarget];
+      }),
+    );
   } else {
-    mapping = autoMap(headers);
-    for (const h of headers) {
-      if (EXPORT_ONLY.includes(h.toLowerCase())) mapping[h] = 'ignore';
-      // Shop Details Only has no size: a size column stays on the row as an extra column instead.
-      else if (mapping[h] !== 'extra' && !fields.includes(mapping[h] as MappableField)) mapping[h] = 'extra';
-    }
+    mapping = autoMap(keys);
+    // Shop Details Only has no size: such a column is kept as a plain column.
+    for (const k of keys) if (mapping[k] !== 'extra' && !fields.includes(mapping[k] as MappableField)) mapping[k] = 'extra';
   }
-  const problems = validateMapping(mapping, 'MEASUREMENT_REQUIRED');
-  // The mapping step re-reads another sheet / header row without importing anything.
-  if (opts.preview) return ask(sheet, headerIndex, 'Check the sheet, header row and columns, then import.', headers, mapping, problems);
-  if (guessed && !opts.mapping) return ask(sheet, headerIndex, 'No shop or dealer name column was recognised. Choose the header row and match the columns.', headers, mapping, problems);
-  if (problems.length) return ask(sheet, headerIndex, `${problems.join('. ')}.`, headers, mapping, problems);
-  if (!dataRows.length) throw new AppError(422, 'VALIDATION_ERROR', 'The sheet has a header row but no shop rows below it', [{ path: 'file', message: 'No data rows' }]);
+  if (opts.preview) return ask(sheet, headerIndex, 'Check the sheet and header row, then import.', keys, mapping);
+  if (!dataRows.length) throw new AppError(422, 'VALIDATION_ERROR', 'The sheet has a header row but no rows below it', [{ path: 'file', message: 'No data rows' }]);
   if (dataRows.length > MAX_ROWS) throw AppError.badRequest(`Too many rows (limit ${MAX_ROWS}). Split the file and upload it in parts.`);
-  return { sheet: sheet.name, headers, mapping, rows: dataRows.map((r) => ({ rowNumber: r.rowNumber, raw: Object.fromEntries(headers.map((h, i) => [h, r.cells[i] ?? ''])) as Record<string, string> })) };
+  return {
+    sheet: sheet.name,
+    headers,
+    keys,
+    mapping,
+    rows: dataRows.map((r) => ({ rowNumber: r.rowNumber, cells: Array.from({ length: width }, (_, i) => r.cells[i] ?? '') })),
+  };
+}
+
+/** A row from before imported columns, as cells of the new columns (from its fields and extra columns). */
+function legacyCells(r: Record<string, unknown>, columns: ShopColumn[]): Cells {
+  const extra = (r.extra ?? {}) as Record<string, string>;
+  const cells: Cells = {};
+  for (const c of columns) {
+    let v: unknown = c.field === 'size' ? (r.width && r.height ? `${r.width}x${r.height}` : null) : c.field ? r[c.field] : null;
+    if (v == null || v === '') v = extra[c.header.trim()];
+    if (v != null && v !== '') cells[c.id] = String(v);
+  }
+  return cells;
 }
 
 /**
- * Shop list Excel (.xlsx / .xls) or CSV, read with the project site import rules (header auto-mapping, phone / GST /
- * size checks). Any column order and header names work; unrecognised columns are kept on the row as extra columns.
- * Rows are ADDED to the table; a row carrying a "Row ID" of the downloaded Excel updates that row instead (its images
- * stay with it). Rows with problems are kept and flagged, never dropped. Every change is logged.
+ * Shop list Excel (.xlsx / .xls) or CSV, imported as the sheet is: its columns (original headers, order, blank and
+ * repeated headers) become the table's columns, and every cell is kept as Excel displays it. Recognisable columns also
+ * feed the shop fields used for the checks and downstream; nothing is renamed, merged or hidden, and a missing
+ * template column never rejects the file. Rows are ADDED (columns matched by header, new ones appended); a row with a
+ * "Row ID" of the downloaded Excel updates that row instead (its images stay). Every change is logged.
  */
 export async function uploadShopList(id: string, file: UploadedFile | undefined, actor: Actor, opts: UploadOptions = {}) {
   if (!file) throw new AppError(422, 'VALIDATION_ERROR', 'Choose the shop list file', [{ path: 'file', message: 'Choose the shop list file' }]);
@@ -578,10 +689,38 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   await ensureRowIds(o._id);
 
   const parsed = resolveImport(await readGrids(file.buffer, file.originalname), opts, o.handoverType);
-  const mapping = parsed.mapping;
-  const rowIdHeader = parsed.headers.find((h) => h.toLowerCase() === 'row id');
+  const doc = await SalesOrder.findById(o._id).select('handoverShopsArray shopColumns').lean();
+  const existing = columnsOf(doc);
+  const columns: ShopColumn[] = existing ? [...existing] : [];
+  let nextCol = Math.max(0, ...columns.map((c) => Number(c.id.slice(1)) || 0));
+  const usedFields = new Set(columns.map((c) => c.field).filter(Boolean));
+  const norm = (h: string) => h.trim().toLowerCase();
+  // Download Excel carries "Row ID" and app columns (status, images...): those are not sheet columns.
+  const fromExport = parsed.headers.some((h) => norm(h) === 'row id');
+  let rowIdIdx = -1;
+  const seenHeader = new Map<string, number>();
+  const colOfIdx = parsed.headers.map((h, i) => {
+    const key = norm(h);
+    if (fromExport && key === 'row id' && rowIdIdx < 0) {
+      rowIdIdx = i;
+      return null;
+    }
+    const n = seenHeader.get(key) ?? 0;
+    seenHeader.set(key, n + 1);
+    const match = columns.filter((c) => norm(c.header) === key)[n];
+    if (match) return match.id;
+    if (fromExport && (EXPORT_ONLY.includes(key) || EXPORT_APP.includes(key))) return null;
+    if (columns.length >= MAX_COLUMNS) throw AppError.badRequest(`The shop table can have up to ${MAX_COLUMNS} columns.`);
+    const target = parsed.mapping[parsed.keys[i]!];
+    const field = target && target !== 'extra' && target !== 'ignore' && !usedFields.has(target) ? target : null;
+    if (field) usedFields.add(field);
+    const col: ShopColumn = { id: `c${++nextCol}`, header: h, field };
+    columns.push(col);
+    return col.id;
+  });
 
-  const current = (await SalesOrder.findById(o._id).select('handoverShopsArray').lean())?.handoverShopsArray ?? [];
+  // Rows from before imported columns get cells for the new columns, so the table stays one table.
+  const current = (doc?.handoverShopsArray ?? []).map((r) => (existing || (r as { cells?: unknown }).cells ? r : { ...r, cells: legacyCells(r as unknown as Record<string, unknown>, columns) }));
   const byId = new Map(current.map((r) => [r.rowId!, r as typeof r & Record<string, unknown>]));
   const seen = new Map<string, string>();
   for (const r of current) {
@@ -597,34 +736,33 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const flagged: { line: number; row: number; state: string; issues: string[] }[] = [];
   const source = `${file.originalname} (${parsed.sheet})`;
   for (const row of parsed.rows) {
-    const values: Record<string, string> = {};
-    const extraRaw: Record<string, string> = {};
-    for (const [header, target] of Object.entries(mapping) as [string, MapTarget][]) {
-      const v = row.raw[header] ?? '';
-      if (!v || target === 'ignore') continue;
-      if (target === 'extra') extraRaw[header] = v;
-      else values[target as MappableField] = v;
-    }
-    const extra = cleanExtra(extraRaw);
-    const c = cleanRow(values, o.handoverType);
-    const rid = rowIdHeader ? (row.raw[rowIdHeader] ?? '').trim() : '';
-    const existing = rid ? byId.get(rid) : undefined;
-    if (existing) {
-      const changed = SHOP_FIELDS.filter((f) => String(existing[f] ?? '') !== String(c.fields[f] ?? ''));
-      const xd = extraDiff(cleanExtra(existing.extra as Extra | undefined), extra);
-      if (!changed.length && !xd) continue;
-      updates.set(rid, { ...c.fields, extra: extra ?? null, state: c.state, issues: c.issues, updatedAt: now, updatedBy: new Types.ObjectId(actor.id) });
-      logs.push(
-        shopLog(actor, 'EDIT', rid, {
-          before: { ...Object.fromEntries(changed.map((f) => [f, existing[f] ?? null])), ...(xd ? { extra: xd.before } : {}) },
-          after: { ...Object.fromEntries(changed.map((f) => [f, c.fields[f]])), ...(xd ? { extra: xd.after } : {}) },
-          note: `From ${source}`,
-          label: rowLabel({ ...existing, ...c.fields }),
-        }),
-      );
-      if (c.state !== 'VALID') flagged.push({ line: row.rowNumber, row: existing.rowNumber ?? 0, state: c.state, issues: c.issues });
+    const fileCells: Cells = {};
+    const inFile = new Set<string>();
+    row.cells.forEach((v, i) => {
+      const cid = colOfIdx[i];
+      if (!cid) return;
+      inFile.add(cid);
+      if (v.trim() !== '') fileCells[cid] = v.slice(0, MAX_CELL);
+    });
+    const rid = rowIdIdx >= 0 ? (row.cells[rowIdIdx] ?? '').trim() : '';
+    const prev = rid ? byId.get(rid) : undefined;
+    if (prev) {
+      const oldCells = cleanCells(prev.cells as Cells | undefined, columns);
+      const newCells = { ...oldCells };
+      for (const cid of inFile) {
+        if (fileCells[cid] !== undefined) newCells[cid] = fileCells[cid];
+        else delete newCells[cid];
+      }
+      const changes = cellChanges(columns, oldCells, newCells);
+      if (!changes.length) continue;
+      const c = deriveRow(newCells, columns, o.handoverType, prev);
+      updates.set(rid, { ...c.fields, cells: newCells, state: c.state, issues: c.issues, updatedAt: now, updatedBy: new Types.ObjectId(actor.id) });
+      logs.push(shopLog(actor, 'EDIT', rid, { cells: changes, note: `From ${source}`, label: labelOf({ ...prev, ...c.fields, cells: newCells }, columns) }));
+      if (c.state !== 'VALID') flagged.push({ line: row.rowNumber, row: prev.rowNumber ?? 0, state: c.state, issues: c.issues });
       continue;
     }
+    if (!Object.keys(fileCells).length) continue;
+    const c = deriveRow(fileCells, columns, o.handoverType);
     const key = dupKeyOf(c.fields as never);
     const issues = [...c.issues];
     let state = c.state;
@@ -634,12 +772,12 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     }
     const rowNumber = ++next;
     if (key) seen.set(key, `row ${rowNumber}`);
-    const fresh = { rowNumber, ...c.fields, extra, state, issues, rowId: newRowId(), updatedAt: now, updatedBy: new Types.ObjectId(actor.id) };
+    const fresh = { rowNumber, ...c.fields, cells: fileCells, state, issues, rowId: newRowId(), updatedAt: now, updatedBy: new Types.ObjectId(actor.id) };
     added.push(fresh);
-    logs.push(shopLog(actor, 'ADD', fresh.rowId, { after: snapshot(fresh), note: `From ${source}`, label: rowLabel(fresh) }));
+    logs.push(shopLog(actor, 'ADD', fresh.rowId, { cells: cellChanges(columns, null, fileCells), note: `From ${source}`, label: labelOf(fresh, columns) }));
     if (state !== 'VALID') flagged.push({ line: row.rowNumber, row: rowNumber, state, issues });
   }
-  if (!added.length && !updates.size) throw AppError.badRequest('Nothing to add: the file has no new or changed shop rows.');
+  if (!added.length && !updates.size) throw AppError.badRequest('Nothing to add: the file has no new or changed rows.');
 
   const merged = [...current.map((r) => (updates.has(r.rowId!) ? { ...r, ...updates.get(r.rowId!) } : r)), ...added];
   const stored = await storeHandoverFile(o, file, actor);
@@ -653,7 +791,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const r = await SalesOrder.updateOne(
     { ...stillOpen(o), handoverShopsArray: { $size: current.length } },
     {
-      $set: { handoverShopsArray: merged, shopList, declaredShopTotal: merged.length, handoverUpdatedAt: now, updatedBy: actor.id },
+      $set: { handoverShopsArray: merged, shopColumns: columns, shopList, declaredShopTotal: merged.length, handoverUpdatedAt: now, updatedBy: actor.id },
       $push: {
         handoverShopLogs: { $each: history },
         handoverDocumentsArray: { kind: 'SHOP_LIST', file: stored, uploadedBy: actor.id, role: actor.role, createdAt: now },
@@ -674,7 +812,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
       added: added.length,
       updated: updates.size,
       sheet: parsed.sheet,
-      extraColumns: parsed.headers.filter((h) => mapping[h] === 'extra'),
+      columns: columns.length,
       flaggedCount: flagged.length,
       flagged: flagged.slice(0, 100),
     },
@@ -690,7 +828,7 @@ export async function removeShopList(id: string, actor: Actor) {
   const count = doc?.handoverShopsArray?.length ?? 0;
   const oldRowFiles = await rowFiles(o._id);
   const r = await SalesOrder.updateOne(stillOpen(o), {
-    $set: { handoverShopsArray: [], shopList: null, declaredShopTotal: null, updatedBy: actor.id },
+    $set: { handoverShopsArray: [], shopColumns: null, shopList: null, declaredShopTotal: null, updatedBy: actor.id },
     $push: { handoverShopLogs: shopLog(actor, 'CLEAR', null, { note: `${count} row${count === 1 ? '' : 's'} cleared` }) },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
@@ -708,9 +846,11 @@ const istStamp = (d?: Date | null) => (d ? new Intl.DateTimeFormat('en-IN', { da
  */
 export async function exportShops(id: string) {
   await ensureRowIds(id);
-  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo handoverType handoverShopsArray').lean();
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo handoverType handoverShopsArray shopColumns').lean();
   if (!o) throw AppError.notFound('Order not found');
   const sized = o.handoverType === 'SHOP_MEASUREMENT';
+  const columns = columnsOf(o);
+  if (columns) return exportColumns(o, columns, sized);
   const cols: [string, (r: Record<string, any>) => unknown, number][] = [
     ['Row ID', (r) => r.rowId, 26],
     ['Shop Name', (r) => r.shopName, 26],
@@ -745,6 +885,29 @@ export async function exportShops(id: string) {
   ws.views = [{ state: 'frozen', ySplit: 1 }];
   for (const r of o.handoverShopsArray ?? []) ws.addRow(cols.map(([, get]) => cellSafe(get(r as Record<string, any>) ?? '')));
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
+}
+
+/** Imported-columns table as Excel: Row ID, the sheet's own columns as uploaded (text, so zeros stay), then the app columns. */
+async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[] | null }, columns: ShopColumn[], sized: boolean) {
+  const appSize = sized && !hasSizeColumn(columns);
+  const app: [string, (r: Record<string, any>) => unknown][] = [
+    ...(appSize ? ([['Size (W x H)', (r) => (r.width && r.height ? `${r.width}x${r.height}` : '')], ['Unit', (r) => r.unit]] as [string, (r: Record<string, any>) => unknown][]) : []),
+    ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0]] as [string, (r: Record<string, any>) => unknown][]) : []),
+    ['Status', (r) => r.state],
+    ['Issues', (r) => (r.issues ?? []).join('; ')],
+    ['Modified At', (r) => istStamp(r.updatedAt)],
+  ];
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Shops');
+  const headers = ['Row ID', ...columns.map((c) => c.header), ...app.map(([h]) => h)];
+  ws.columns = headers.map((header, i) => ({ header, width: i === 0 ? 26 : Math.min(40, Math.max(12, header.length + 4)) }));
+  ws.getRow(1).font = { bold: true };
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  for (const r of (o.handoverShopsArray ?? []) as Record<string, any>[]) {
+    const cells = (r.cells ?? {}) as Record<string, string>;
+    ws.addRow([r.rowId, ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? ''))]);
+  }
+  return { name: `${o.orderNo.replace(/[^w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
 /* --------------------------- communication (chat) --------------------------- */
