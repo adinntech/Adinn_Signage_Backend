@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import { Types } from 'mongoose';
 import { AppError } from '../../common/errors';
@@ -36,6 +37,7 @@ export const csUsers = () => User.find({ role: 'CLIENT_SERVICING', isActive: tru
 
 export const HANDOVER_TYPE_LABELS: Record<HandoverType, string> = { ASO: 'ASO', SHOP_DETAILS: 'Shop Details Only', SHOP_MEASUREMENT: 'Shop + Measurement' };
 const shopTypes: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
+const isShopType = (t: string | null | undefined) => !!t && shopTypes.includes(t);
 
 type GapInput = {
   handoverFull?: boolean | null;
@@ -52,7 +54,8 @@ const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== fals
 export function handoverGaps(o: GapInput): string[] {
   if (!isFull(o)) return [];
   if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
-  if (o.handoverType === 'ASO') return o.shopList?.total ? ['Clear the shop list: an ASO handover goes without one'] : [];
+  // ASO goes without a shop list (rows of the shop types stay in their own datasets and are not handed over).
+  if (o.handoverType === 'ASO') return [];
   if (!o.shopList?.total) return ['Add the shop list: upload the Excel or add the shops'];
   const bad = o.shopList.error ?? 0;
   if (bad) return [`${bad} shop row${bad === 1 ? ' has' : 's have'} errors: edit or delete ${bad === 1 ? 'it' : 'them'}`];
@@ -68,7 +71,9 @@ export async function getHandover(id: string) {
     .populate('handoverMessagesArray.by', 'name role')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
-  const shops = o.handoverShopsArray ?? [];
+  // Only the selected type's dataset is shown and handed over (ASO: none; leftovers from older orders stay stored).
+  const shop = isShopType(o.handoverType);
+  const shops = shop ? (o.handoverShopsArray ?? []) : [];
   return {
     orderId: String(o._id),
     orderNo: o.orderNo,
@@ -78,19 +83,19 @@ export async function getHandover(id: string) {
     full: isFull(o),
     type: (o.handoverType ?? null) as HandoverType | null,
     /** Row counts of the shop table (total = Total Shops) and the last uploaded Excel. */
-    shopList: o.shopList ?? null,
-    declaredShopTotal: o.declaredShopTotal ?? null,
+    shopList: shop ? (o.shopList ?? null) : null,
+    declaredShopTotal: shop ? (o.declaredShopTotal ?? null) : null,
     shopsWithFiles: shops.filter((x) => x.attachments?.length).length,
     shopFiles: shops.reduce((n, x) => n + (x.attachments?.length ?? 0), 0),
     /** Uploaded shop list files (Excel / CSV), newest first. */
-    documents: [...(o.handoverDocumentsArray ?? [])].filter((d) => d.kind === 'SHOP_LIST').sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)),
+    documents: [...(o.handoverDocumentsArray ?? [])].filter((d) => shop && d.kind === 'SHOP_LIST' && !d.shopType).sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)),
     /** Communication & attachments, oldest first (chat order). */
     messages: o.handoverMessagesArray ?? [],
     /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
     soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
     updatedAt: o.handoverUpdatedAt ?? null,
     /** Imported columns of the shop table (null for tables from before them). */
-    columns: columnsOf(o),
+    columns: shop ? columnsOf(o) : null,
     missing: o.csAssignee ? [] : handoverGaps(o),
   };
 }
@@ -169,13 +174,56 @@ export async function setHandoverType(id: string, type: HandoverType, actor: Act
   assertNotHandedOver(o);
   await handoverRoute(o);
   if (o.handoverType === type) return getHandover(id);
-  // Shop rows stay when switching between the shop types (sizes / images only show for Shop + Measurement); ASO asks to clear them.
-  const r = await SalesOrder.updateOne(stillOpen(o), {
-    $set: { handoverType: type, updatedBy: actor.id },
+  const swap = await swapShopSet(o._id, o.handoverType ?? null, type);
+  const r = await SalesOrder.updateOne(swap.where, {
+    $set: { ...swap.set, handoverType: type, updatedBy: actor.id },
     $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Handover type set to ${HANDOVER_TYPE_LABELS[type]}`, { step: 'handover-type', oldValue: o.handoverType ?? null, newValue: type }) },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   return getHandover(id);
+}
+
+type ShopSet = { rows?: unknown[]; columns?: unknown; list?: unknown; declared?: number | null };
+
+/**
+ * Each handover type keeps its own shop dataset (rows, columns, counts, uploaded files, history). The selected type's
+ * dataset lives in handoverShopsArray / shopColumns / shopList; switching the type stores it in shopSets under the old
+ * type and brings back the new type's (empty the first time). History entries and shop list files are tagged with the
+ * type they leave with (untagged = the selected type). Nothing is deleted.
+ */
+async function swapShopSet(orderId: Types.ObjectId, from: string | null, to: string) {
+  const doc = await SalesOrder.findById(orderId).select('handoverShopsArray shopColumns shopList declaredShopTotal shopSets handoverShopLogs handoverDocumentsArray').lean();
+  const rows = doc?.handoverShopsArray ?? [];
+  const logs = doc?.handoverShopLogs ?? [];
+  const docs = doc?.handoverDocumentsArray ?? [];
+  const sets = { ...((doc?.shopSets ?? {}) as Record<string, ShopSet>) };
+  // Conditional on the same state, so a row or log written meanwhile is not lost.
+  const where: Record<string, unknown> = { _id: orderId, csAssignee: null, 'recce.assignee': null, handoverType: from, handoverShopsArray: { $size: rows.length }, handoverShopLogs: { $size: logs.length } };
+  // Older orders: rows left from before (no type yet, or kept when ASO was chosen) go to the first shop type chosen
+  // that has no dataset of its own, as before.
+  if (!isShopType(from) && rows.length && isShopType(to) && !sets[to]) return { where, set: {} };
+  const key = from ?? 'NONE';
+  if (rows.length || doc?.shopList || logs.some((l) => !l.type)) sets[key] = { rows, columns: doc?.shopColumns ?? null, list: doc?.shopList ?? null, declared: doc?.declaredShopTotal ?? null };
+  const next = isShopType(to) ? sets[to] : undefined;
+  if (next) delete sets[to];
+  // Untagged entries leave with the old type; the new type's own entries become untagged again.
+  const retag = <T>(x: T, f: 'type' | 'shopType'): T => {
+    const own = (x as Record<string, unknown>)[f] ?? null;
+    if (!own) return { ...x, [f]: key };
+    return own === to && isShopType(to) ? { ...x, [f]: null } : x;
+  };
+  return {
+    where,
+    set: {
+      handoverShopsArray: next?.rows ?? [],
+      shopColumns: next?.columns ?? null,
+      shopList: next?.list ?? null,
+      declaredShopTotal: next?.declared ?? null,
+      shopSets: sets,
+      handoverShopLogs: logs.map((l) => retag(l, 'type')),
+      handoverDocumentsArray: docs.map((d) => (d.kind === 'SHOP_LIST' ? retag(d, 'shopType') : d)),
+    },
+  };
 }
 
 type SoContact = { name: string; phone: string; email?: string | undefined; isPrimary: boolean };
@@ -466,7 +514,7 @@ export async function shopHistory(id: string, rowId?: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverShopLogs').populate('handoverShopLogs.by', 'name role').lean();
   if (!o) throw AppError.notFound('Order not found');
   return (o.handoverShopLogs ?? [])
-    .filter((l) => !rowId || l.rowId === rowId)
+    .filter((l) => !l.type && (!rowId || l.rowId === rowId))
     .sort((a, b) => (b.at?.getTime() ?? 0) - (a.at?.getTime() ?? 0))
     .slice(0, 300);
 }
@@ -530,8 +578,9 @@ export async function removeShopFile(id: string, rowId: string, fileId: string, 
 /** Shop rows, filtered by state and paged (the list can be thousands of rows), with who changed each row last. */
 export async function listShops(id: string, q: { page: number; limit: number; state?: 'VALID' | 'WARNING' | 'ERROR' | undefined }) {
   await ensureRowIds(id);
-  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverShopsArray shopColumns').lean();
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverType handoverShopsArray shopColumns').lean();
   if (!o) throw AppError.notFound('Order not found');
+  if (!isShopType(o.handoverType)) return { items: [], meta: { page: q.page, limit: q.limit, total: 0, totalPages: 1, columns: null } };
   const rows = (o.handoverShopsArray ?? []).filter((r) => !q.state || r.state === q.state);
   const page = rows.slice((q.page - 1) * q.limit, q.page * q.limit);
   const ids = [...new Set(page.map((r) => r.updatedBy && String(r.updatedBy)).filter(Boolean))] as string[];
@@ -689,7 +738,10 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   await ensureRowIds(o._id);
 
   const parsed = resolveImport(await readGrids(file.buffer, file.originalname), opts, o.handoverType);
-  const doc = await SalesOrder.findById(o._id).select('handoverShopsArray shopColumns').lean();
+  const doc = await SalesOrder.findById(o._id).select('handoverShopsArray shopColumns shopList.fileHash').lean();
+  // The same file again (e.g. a retry after a slow response) would add every row twice.
+  const fileHash = createHash('sha256').update(file.buffer).digest('hex');
+  if (doc?.shopList?.fileHash === fileHash) throw new AppError(409, 'SHOP_LIST_ALREADY_IMPORTED', 'This file is already imported: its rows are in the table. Edit the rows there, or upload a changed file.');
   const existing = columnsOf(doc);
   const columns: ShopColumn[] = existing ? [...existing] : [];
   let nextCol = Math.max(0, ...columns.map((c) => Number(c.id.slice(1)) || 0));
@@ -787,7 +839,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const count = (st: string) => merged.filter((r) => r.state === st).length;
   // The summary is written whole: a dotted "shopList.x" path cannot be set while shopList is null (a new or cleared
   // table), which made MongoDB reject the first upload of every order.
-  const shopList = { fileId: stored.fileId, fileName: file.originalname.slice(0, 200), uploadedBy: new Types.ObjectId(actor.id), uploadedAt: now, total: merged.length, valid: count('VALID'), warning: count('WARNING'), error: count('ERROR'), duplicates: 0 };
+  const shopList = { fileId: stored.fileId, fileName: file.originalname.slice(0, 200), uploadedBy: new Types.ObjectId(actor.id), uploadedAt: now, fileHash, total: merged.length, valid: count('VALID'), warning: count('WARNING'), error: count('ERROR'), duplicates: 0 };
   const r = await SalesOrder.updateOne(
     { ...stillOpen(o), handoverShopsArray: { $size: current.length } },
     {
@@ -848,6 +900,7 @@ export async function exportShops(id: string) {
   await ensureRowIds(id);
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo handoverType handoverShopsArray shopColumns').lean();
   if (!o) throw AppError.notFound('Order not found');
+  if (!isShopType(o.handoverType)) throw AppError.conflict('This handover has no shop list (ASO).');
   const sized = o.handoverType === 'SHOP_MEASUREMENT';
   const columns = columnsOf(o);
   if (columns) return exportColumns(o, columns, sized);
@@ -1036,7 +1089,8 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
   const typeLabel = full ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'Client details only';
   const note = `Handed over to ${cs.name} (Client Servicing) · ${typeLabel}`;
   const now = new Date();
-  const snapshot = await clientSnapshot(o);
+  // Toggle off: client details and contact persons only (no SO contacts).
+  const snapshot = await clientSnapshot({ client: o.client, clientType: o.clientType, handoverType: full ? o.handoverType : null, soContacts: o.soContacts });
   // Assigning is the Project Assign step: the lead is completed in the same write.
   const lead = o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN';
   // Conditional on the checked state: a list replaced, a type or the toggle changed meanwhile is not handed over unverified.
@@ -1074,7 +1128,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
     recipients: [cs._id],
     kind: 'ORDER_ASSIGNED',
     title: 'New order assigned to you',
-    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}, ${typeLabel}${full && o.shopList ? `, ${o.shopList.total} shops` : ''}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
+    body: `${bd?.name ?? 'BD'} assigned order ${o.orderNo} (${client?.name ?? 'client'}, ${typeLabel}${full && isShopType(o.handoverType) && o.shopList ? `, ${o.shopList.total} shops` : ''}) to you on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })}.`,
     order: { _id: o._id, orderNo: o.orderNo, clientName: client?.name },
     actorId: actor.id,
     dedupe: (rid) => `order-assigned:${o._id}:${rid}`,

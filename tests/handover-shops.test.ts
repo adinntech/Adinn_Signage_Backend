@@ -135,4 +135,40 @@ describe('handover shop Excel upload', () => {
     expect(edit.after).toMatchObject({ width: 8, height: 3 });
     expect(h.find((l) => l.action === 'DELETE')!.cells[0]).toMatchObject({ column: 'Shop Name', before: 'Hist Shop 2' });
   });
+  it('keeps a separate shop list per handover type, across switches, ASO and reloads', async () => {
+    const id = await newOrder('SHOP_DETAILS');
+    const sw = async (type: string) => (await api().patch(`/api/v1/sales/orders/${id}/handover/type`).set(as()).send({ type })).body.data;
+    expect((await upload(id, await xlsx([['Shop Name'], ['Details Shop']]))).status).toBe(201);
+    // First visit of the other type: empty, no clearing needed.
+    expect((await sw('SHOP_MEASUREMENT')).shopList).toBeNull();
+    expect((await list(id)).data).toHaveLength(0);
+    expect(await history(id)).toHaveLength(0);
+    expect((await upload(id, await xlsx([['Shop Name', 'Size'], ['M1', '10x4'], ['M2', '8x3']]))).status).toBe(201);
+    // ASO: no shop data shown or required, nothing cleared.
+    const aso = await sw('ASO');
+    expect(aso).toMatchObject({ shopList: null, columns: null, documents: [], missing: [] });
+    expect((await list(id)).data).toHaveLength(0);
+    // Back to each type: its own rows, columns, files and history.
+    const details = await sw('SHOP_DETAILS');
+    expect(details.shopList.total).toBe(1);
+    expect(details.documents).toHaveLength(1);
+    const d = await list(id);
+    expect(d.meta.columns!.map((c) => c.header)).toEqual(['Shop Name']);
+    expect(JSON.stringify(await history(id))).not.toContain('M1');
+    const m = await sw('SHOP_MEASUREMENT');
+    expect(m.shopList.total).toBe(2);
+    const ml = await list(id);
+    expect(ml.data.map((r) => r.cells[ml.meta.columns![0]!.id])).toEqual(['M1', 'M2']);
+    expect(JSON.stringify(await history(id))).not.toContain('Details Shop');
+  });
+
+  it('refuses the same file twice instead of adding its rows again', async () => {
+    const id = await newOrder('SHOP_DETAILS');
+    const buf = await xlsx([['Shop Name'], ['Once']]);
+    expect((await upload(id, buf)).status).toBe(201);
+    const again = await upload(id, buf);
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('SHOP_LIST_ALREADY_IMPORTED');
+    expect((await list(id)).data).toHaveLength(1);
+  });
 });

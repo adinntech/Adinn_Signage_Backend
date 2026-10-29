@@ -127,6 +127,8 @@ const requirementNoteSchema = new Schema({
 const handoverDocSchema = new Schema({
   kind: { type: String, enum: HANDOVER_DOC_KINDS, required: true },
   file: { type: fileRef, required: true },
+  /** Shop list files: the handover type whose dataset they belong to, set when the type is switched away (unset = the current type). */
+  shopType: String,
   /** Added after the order was handed over (shown as "added later" to Client Servicing). */
   afterHandover: { type: Boolean, default: false },
   uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -157,6 +159,8 @@ const handoverMessageSchema = new Schema({
 export const SHOP_LOG_ACTIONS = ['ADD', 'EDIT', 'DELETE', 'IMPORT', 'CLEAR', 'IMAGE_ADD', 'IMAGE_REMOVE'] as const;
 const shopLogSchema = new Schema({
   rowId: String,
+  /** Handover type of the dataset the entry belongs to, set when the type is switched away (unset = the current type). */
+  type: String,
   /** Row identity as the BD sees it ("Row 12 · ABC Traders"), kept so deleted rows stay recognisable. */
   label: String,
   action: { type: String, enum: SHOP_LOG_ACTIONS, required: true },
@@ -345,6 +349,8 @@ const orderSchema = new Schema(
           error: Number,
           /** Rows that repeat an earlier row of the same file. */
           duplicates: Number,
+          /** SHA-256 of the last uploaded file (the same file again is refused, so a retry does not add its rows twice). */
+          fileHash: String,
           uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           uploadedAt: Date,
         },
@@ -398,6 +404,11 @@ const orderSchema = new Schema(
     handoverVoiceNotesArray: { type: [voiceNoteSchema], default: [] },
     handoverMessagesArray: { type: [handoverMessageSchema], default: [] },
     handoverShopLogs: { type: [shopLogSchema], default: [] },
+    /**
+     * Shop datasets of the handover types not selected now, by type: `{ rows, columns, list, declared }`. The selected
+     * type's dataset is always in handoverShopsArray / shopColumns / shopList; switching the type swaps them.
+     */
+    shopSets: { type: Schema.Types.Mixed, default: undefined },
     leadLogsArray: { type: [leadLogSchema], default: [] },
     requirementNotesArray: { type: [requirementNoteSchema], default: [] },
 
@@ -421,4 +432,4 @@ orderSchema.index({ 'salesprofile.attachments.fileId': 1 });
 export const SalesOrder = model('SalesOrder', orderSchema);
 
 /** Projection that leaves out the activity arrays (Kanban, overview, checks). */
-export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -handoverVoiceNotesArray -leadLogsArray -requirementNotesArray';
+export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -handoverVoiceNotesArray -leadLogsArray -requirementNotesArray -handoverShopLogs -shopSets';
