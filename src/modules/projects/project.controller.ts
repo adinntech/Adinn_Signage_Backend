@@ -15,6 +15,13 @@ export const bdHandoverShops = asyncHandler(async (req, res) => {
   const { items, meta } = await bd.projectHandoverShops(id(req), shopRowsQuery.parse(req.query));
   ok(res, items, meta);
 });
+export const bdHandoverShopsExport = asyncHandler(async (req, res) => {
+  const f = await bd.projectHandoverShopsExport(id(req));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(f.buffer);
+});
 export const bdHandoverFileUrl = asyncHandler(async (req, res) => ok(res, await bd.projectHandoverFileUrl(id(req), objectId.parse(req.params.fileId))));
 
 export const list = asyncHandler(async (req, res) => {

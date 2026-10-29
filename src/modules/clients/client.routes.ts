@@ -7,6 +7,7 @@ export const clientRouter = Router();
 clientRouter.use(authenticate);
 clientRouter.get('/', requirePermission('clients:read'), c.list);
 clientRouter.get('/summary', requirePermission('clients:read'), c.summary);
+clientRouter.get('/gstin-check', requirePermission('clients:read'), c.gstinCheck);
 clientRouter.get('/:id',requirePermission('clients:read'), c.get);
 clientRouter.post('/', requirePermission('clients:write'), c.create);
 clientRouter.post('/company', requirePermission('clients:write'), c.register);

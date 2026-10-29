@@ -71,6 +71,8 @@ export const clientPatch = clientBody
   .partial()
   .omit({ code: true })
   .extend({ contacts: contactArray.optional(), status: z.enum(['ACTIVE', 'INACTIVE']).optional(), phone: companyPhone10.optional().or(z.literal('').transform(() => undefined)) });
+/** Live GSTIN duplicate check on the Add / Edit Client form. `exceptId`: the client being edited. */
+export const gstinCheckQuery = z.object({ gstin, exceptId: z.string().regex(/^[a-f\d]{24}$/i).optional() });
 export const clientListQuery = listQuery.extend({
   // Without a status the list leaves drafts out; DRAFT lists only the drafts.
   status: z.enum(['ACTIVE', 'INACTIVE', 'DRAFT']).optional(),
@@ -98,12 +100,12 @@ export const clientDraft = z.object({
 });
 
 /**
- * BD "New Client" registration: company name, email and phone are mandatory. Contact persons are optional here
+ * BD "New Client" registration: company name and phone are mandatory (email and GSTIN are optional). Contact persons are optional here
  * (they are added later, e.g. at handover); a contact that is sent must have a mobile number.
  */
 export const clientRegistration = z.object({
   name: z.string().trim().min(2, 'Enter the company name').max(120),
-  email: z.string().trim().toLowerCase().email('Enter a valid company email'),
+  email: optionalEmail,
   phone: companyPhone10,
   customFields: customFieldArray.default([]),
   clientName: optStr(120),
@@ -113,8 +115,8 @@ export const clientRegistration = z.object({
   district: optStr(80),
   state: optStr(80),
   pincode,
-  // Mandatory for a new client (Add Client / a draft saved as a client).
-  gstin: z.string({ error: 'Enter the GST number' }).trim().min(1, 'Enter the GST number').pipe(gstin),
+  // Optional; when given it must be a valid GSTIN that no other client or Zoho customer has.
+  gstin: gstin.optional().or(z.literal('').transform(() => undefined)),
   contacts: z
     .array(contact.extend({ phone: strictMobile }))
     .max(20)

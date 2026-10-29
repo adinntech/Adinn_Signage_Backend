@@ -1,9 +1,12 @@
 import { AppError } from '../../common/errors';
 import { env } from '../../config/env';
+import { zohoGet as booksGet } from './zoho.client';
+import { customerNoOf, toClientFields, type ZohoContact } from './zoho.mapper';
 
 /**
  * Existing clients come from Zoho (Books contacts or CRM Accounts, set by ZOHO_PRODUCT). Until the OAuth keys are in
  * the environment a fixed sample list is served, so Order Management and Lead Management work the same either way.
+ * Books goes through the same client and field mapping as Admin > Zoho Import (zoho.client / zoho.mapper).
  *
  * NOTE: the live field mapping below follows Zoho's documented APIs and must be checked against the real account the
  * first time the keys are added (custom fields such as GST in CRM differ per account).
@@ -19,11 +22,20 @@ export interface ZohoClient {
   gstin?: string | undefined;
   city?: string | undefined;
   state?: string | undefined;
+  /** Zoho's own customer number (the Client ID in Zoho), e.g. 30196. */
+  zohoCustomerNo?: string | undefined;
+  address?: string | undefined;
+  pincode?: string | undefined;
+  industry?: string | undefined;
+  /** Contact persons; only filled when one customer is read (search rows do not carry them). */
+  contacts?: { name: string; designation?: string | undefined; phone?: string | undefined; email?: string | undefined; isPrimary: boolean }[] | undefined;
 }
 
-export const zohoMode = (): 'live' | 'sample' => (env.zohoCustomersLive ? 'live' : 'sample');
+/** Books uses the Admin > Zoho Import settings (ZOHO_ORGANIZATION_ID ...); CRM its own OAuth keys. */
+const live = () => (env.ZOHO_PRODUCT === 'books' ? env.zohoEnabled : env.zohoCustomersLive);
+export const zohoMode = (): 'live' | 'sample' => (live() ? 'live' : 'sample');
 
-const SAMPLE: ZohoClient[] = [
+const SAMPLE: ZohoClient[] = ([
   { zohoId: 'sample-1001', name: 'Aditya Birla Fashion and Retail Ltd', clientName: 'Suresh Kumar', email: 'accounts@abfrl.example.com', phone: '02266917000', gstin: '27AAACP7247N1ZS', city: 'Mumbai', state: 'Maharashtra' },
   { zohoId: 'sample-1002', name: 'Asian Paints Limited', clientName: 'Meena Iyer', email: 'marketing@asianpaints.example.com', phone: '02262181000', gstin: '27AAACA3622K1ZN', city: 'Mumbai', state: 'Maharashtra' },
   { zohoId: 'sample-1003', name: 'Britannia Industries Limited', clientName: 'Rahul Nair', email: 'trade@britannia.example.com', phone: '08039400080', gstin: '29AAACB2066P1ZK', city: 'Bengaluru', state: 'Karnataka' },
@@ -36,7 +48,11 @@ const SAMPLE: ZohoClient[] = [
   { zohoId: 'sample-1010', name: 'TVS Motor Company Limited', clientName: 'Arun Prasad', email: 'dealer.branding@tvs.example.com', phone: '04428332115', gstin: '33AAACT2307Q1ZW', city: 'Chennai', state: 'Tamil Nadu' },
   { zohoId: 'sample-1011', name: 'UltraTech Cement Limited', clientName: 'Rasic Ahamed', email: 'rasic@ultratech.example.com', phone: '02266917800', gstin: '27AAACL6442L1ZB', city: 'Mumbai', state: 'Maharashtra' },
   { zohoId: 'sample-1012', name: 'V-Guard Industries Limited', clientName: 'Joseph Mathew', email: 'brand@vguard.example.com', phone: '04844335000', gstin: '32AABCV1281A1ZL', city: 'Kochi', state: 'Kerala' },
-];
+] as ZohoClient[]).map((c, i) => ({
+  ...c,
+  zohoCustomerNo: String(30101 + i),
+  contacts: [{ name: c.clientName!, designation: 'Marketing Manager', email: c.email, phone: `98400${String(10001 + i)}`, isPrimary: true }],
+}));
 
 const GSTIN = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/;
 const clean = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
@@ -82,19 +98,23 @@ async function zohoGet<T>(path: string, params: Record<string, string>): Promise
 
 /* --------------------------------- mapping --------------------------------- */
 
-type BooksContact = { contact_id: string; contact_name?: string; company_name?: string; email?: string; phone?: string; mobile?: string; gst_no?: string; billing_address?: { city?: string; state?: string } };
-const fromBooks = (c: BooksContact): ZohoClient => {
-  const company = clean(c.company_name) ?? clean(c.contact_name) ?? 'Unnamed customer';
-  const person = clean(c.contact_name);
+/** Books contact -> ZohoClient, with the Admin import's mapping (customer number stripped from the name, contacts cleaned). */
+const fromBooks = (c: ZohoContact): ZohoClient => {
+  const f = toClientFields(c);
   return {
     zohoId: String(c.contact_id),
-    name: company,
-    clientName: person && person !== company ? person : undefined,
-    email: clean(c.email)?.toLowerCase(),
+    name: f.name,
+    clientName: f.contacts.find((k) => k.isPrimary)?.name,
+    email: f.email,
     phone: digits(c.phone) ?? digits(c.mobile),
-    gstin: cleanGstin(c.gst_no),
-    city: clean(c.billing_address?.city),
-    state: clean(c.billing_address?.state),
+    gstin: f.gstin,
+    city: f.city,
+    state: f.state,
+    zohoCustomerNo: customerNoOf(c.contact_name),
+    address: f.address,
+    pincode: f.pincode,
+    industry: f.industry,
+    contacts: c.contact_persons ? f.contacts : undefined,
   };
 };
 
@@ -114,21 +134,22 @@ const fromCrm = (a: CrmAccount): ZohoClient => ({
 /** Up to 25 Zoho customers matching `q` (company or contact name), A-Z. */
 export async function searchZohoClients(q: string): Promise<ZohoClient[]> {
   const term = q.trim();
-  if (!env.zohoCustomersLive) {
+  if (!live()) {
     const t = term.toLowerCase();
-    return SAMPLE.filter((c) => !t || c.name.toLowerCase().includes(t) || c.clientName?.toLowerCase().includes(t) || c.gstin?.toLowerCase().includes(t)).slice(0, 25);
+    return SAMPLE.filter((c) => !t || [c.name, c.clientName, c.gstin, c.zohoCustomerNo].some((v) => v?.toLowerCase().includes(t)))
+      .slice(0, 25)
+      .map(({ contacts: _, ...row }) => row);
   }
   if (env.ZOHO_PRODUCT === 'books') {
-    if (!env.ZOHO_ORG_ID) throw new AppError(502, 'ZOHO_ERROR', 'ZOHO_ORG_ID is not set for Zoho Books.');
-    const r = await zohoGet<{ contacts?: BooksContact[] }>('/books/v3/contacts', {
-      organization_id: env.ZOHO_ORG_ID,
+    // search_text matches the contact name, which starts with the customer number ("30196 - AGNI STEELS").
+    const r = await booksGet<{ contacts?: ZohoContact[] }>('/contacts', {
       contact_type: 'customer',
       filter_by: 'Status.Active',
       sort_column: 'contact_name',
-      per_page: '25',
-      ...(term ? { search_text: term } : {}),
+      per_page: 25,
+      search_text: term || undefined,
     });
-    return (r?.contacts ?? []).map(fromBooks);
+    return (r.contacts ?? []).map(fromBooks);
   }
   // CRM search needs at least two characters; without a term the first page of Accounts is listed.
   const r =
@@ -138,13 +159,29 @@ export async function searchZohoClients(q: string): Promise<ZohoClient[]> {
   return (r?.data ?? []).map(fromCrm);
 }
 
+/**
+ * The Zoho customer with this GSTIN. `checked: false` when Zoho could not be asked: callers must never read that as
+ * "no match" being confirmed, nor as a match. Books' search_text covers the GST number (checked against the live
+ * account), so a Books miss is a real "not in Zoho"; CRM's word search is not known to, so a CRM miss stays unconfirmed.
+ */
+export async function findZohoByGstin(gstin: string): Promise<{ checked: boolean; match: ZohoClient | null }> {
+  try {
+    const match = (await searchZohoClients(gstin)).find((c) => c.gstin === gstin) ?? null;
+    return { checked: !!match || !live() || env.ZOHO_PRODUCT === 'books', match };
+  } catch {
+    return { checked: false, match: null };
+  }
+}
+
 /** One Zoho customer by id (null when Zoho no longer has it). */
 export async function getZohoClient(zohoId: string): Promise<ZohoClient | null> {
-  if (!env.zohoCustomersLive) return SAMPLE.find((c) => c.zohoId === zohoId) ?? null;
+  if (!live()) return SAMPLE.find((c) => c.zohoId === zohoId) ?? null;
   if (env.ZOHO_PRODUCT === 'books') {
-    if (!env.ZOHO_ORG_ID) throw new AppError(502, 'ZOHO_ERROR', 'ZOHO_ORG_ID is not set for Zoho Books.');
-    const r = await zohoGet<{ contact?: BooksContact }>(`/books/v3/contacts/${encodeURIComponent(zohoId)}`, { organization_id: env.ZOHO_ORG_ID });
-    return r?.contact ? fromBooks(r.contact) : null;
+    const r = await booksGet<{ contact?: ZohoContact }>(`/contacts/${encodeURIComponent(zohoId)}`).catch((e: AppError) => {
+      if (e.statusCode === 404) return { contact: undefined };
+      throw e;
+    });
+    return r.contact ? fromBooks(r.contact) : null;
   }
   const r = await zohoGet<{ data?: CrmAccount[] }>(`/crm/v2/Accounts/${encodeURIComponent(zohoId)}`, {});
   return r?.data?.[0] ? fromCrm(r.data[0]) : null;

@@ -18,14 +18,15 @@ import {
   assignCsBody,
   boardQuery,
   closeLeadBody,
+  leadClientBody,
   commentBody,
   createOrderBody,
   emailListQuery,
-  handoverNotesBody,
+  handoverMessageBody,
   handoverScopeBody,
   handoverTypeBody,
-  shopTotalBody,
-  voiceNoteBody,
+  rowIdParam,
+  shopRowBody,
   leadCandidatesQuery,
   leadListQuery,
   leadMoveBody,
@@ -42,8 +43,11 @@ import {
   recceAssignBody,
   recceCodesBody,
 } from './sales.validators';
+import { Client } from '../clients/client.model';
 import { linkedZohoClients } from '../clients/client.service';
-import { searchZohoClients, zohoMode } from '../zoho/zoho.customers';
+import { getZohoClient, searchZohoClients, zohoMode } from '../zoho/zoho.customers';
+
+const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/;
 
 const id = (req: Request) => objectId.parse(req.params.id);
 const uploaded = (req: Request) =>
@@ -61,8 +65,23 @@ export const createOrder = asyncHandler(async (req, res) => {
 export const zohoClients = asyncHandler(async (req, res) => {
   const { q } = zohoClientQuery.parse(req.query);
   const items = await searchZohoClients(q);
+  // Zoho's search does not cover GSTIN: a GSTIN already known on a linked local client finds its Zoho customer.
+  const gst = q.toUpperCase();
+  if (GSTIN_RE.test(gst) && !items.some((z) => z.gstin === gst)) {
+    const local = await Client.findOne({ deletedAt: null, gstin: gst, zohoId: { $ne: null } }).select('zohoId').lean();
+    const z = local?.zohoId ? await getZohoClient(local.zohoId) : null;
+    if (z) items.unshift({ ...z, contacts: undefined });
+  }
   const linked = await linkedZohoClients(items.map((z) => z.zohoId));
   ok(res, items.map((z) => ({ ...z, clientId: linked.get(z.zohoId)?.clientId ?? null, clientNo: linked.get(z.zohoId)?.clientNo ?? null })), { mode: zohoMode() });
+});
+/** One Zoho customer with its contact persons (read-only preview in the Existing Client picker). */
+export const zohoClient = asyncHandler(async (req, res) => {
+  const zohoId = z.string().trim().min(1).max(40).regex(/^[\w-]+$/).parse(req.params.zohoId);
+  const c = await getZohoClient(zohoId);
+  if (!c) throw AppError.notFound('This customer is no longer in Zoho.');
+  const linked = (await linkedZohoClients([c.zohoId])).get(c.zohoId);
+  ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null }, { mode: zohoMode() });
 });
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
@@ -100,20 +119,27 @@ export const shops = asyncHandler(async (req, res) => {
 });
 export const uploadShops = asyncHandler(async (req, res) => ok(res, await handover.uploadShopList(id(req), uploaded(req)[0], actorOf(req)), undefined, 201));
 export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
-export const addDocuments = asyncHandler(async (req, res) => ok(res, await handover.addDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
-export const removeDocument = asyncHandler(async (req, res) => ok(res, await handover.removeDocument(id(req), objectId.parse(req.params.docId), actorOf(req))));
+export const exportShops = asyncHandler(async (req, res) => {
+  const f = await handover.exportShops(id(req));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(f.buffer);
+});
+const rowId = (req: Request) => rowIdParam.parse(req.params.rowId);
+export const addShopRow = asyncHandler(async (req, res) => ok(res, await handover.addShopRow(id(req), shopRowBody.parse(req.body), actorOf(req)), undefined, 201));
+export const updateShopRow = asyncHandler(async (req, res) => ok(res, await handover.updateShopRow(id(req), rowId(req), shopRowBody.parse(req.body), actorOf(req))));
+export const deleteShopRow = asyncHandler(async (req, res) => ok(res, await handover.deleteShopRow(id(req), rowId(req), actorOf(req))));
+export const shopHistory = asyncHandler(async (req, res) => {
+  const r = typeof req.query.rowId === 'string' && req.query.rowId ? rowIdParam.parse(req.query.rowId) : undefined;
+  ok(res, await handover.shopHistory(id(req), r));
+});
+export const addMessage = asyncHandler(async (req, res) => ok(res, await handover.addMessage(id(req), handoverMessageBody.parse(req.body ?? {}), uploaded(req), actorOf(req)), undefined, 201));
+export const removeMessage = asyncHandler(async (req, res) => ok(res, await handover.removeMessage(id(req), objectId.parse(req.params.messageId), actorOf(req))));
 export const handoverScope = asyncHandler(async (req, res) => ok(res, await handover.setHandoverScope(id(req), handoverScopeBody.parse(req.body).full, actorOf(req))));
-export const handoverNotes = asyncHandler(async (req, res) => ok(res, await handover.setHandoverNotes(id(req), handoverNotesBody.parse(req.body).notes, actorOf(req))));
-export const addVoiceNote = asyncHandler(async (req, res) =>
-  ok(res, await handover.addVoiceNote(id(req), uploaded(req)[0], voiceNoteBody.parse(req.body ?? {}).durationSec, actorOf(req)), undefined, 201),
-);
-export const removeVoiceNote = asyncHandler(async (req, res) => ok(res, await handover.removeVoiceNote(id(req), objectId.parse(req.params.noteId), actorOf(req))));
 export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
-export const shopTotal = asyncHandler(async (req, res) => ok(res, await handover.setShopTotal(id(req), shopTotalBody.parse(req.body).total, actorOf(req))));
-export const verifyShops = asyncHandler(async (req, res) => ok(res, await handover.verifyShops(id(req), actorOf(req))));
-const rowNo = (req: Request) => z.coerce.number().int().min(1).parse(req.params.row);
-export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowNo(req), uploaded(req), actorOf(req)), undefined, 201));
-export const removeShopFile = asyncHandler(async (req, res) => ok(res, await handover.removeShopFile(id(req), rowNo(req), objectId.parse(req.params.fileId), actorOf(req))));
+export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowId(req), uploaded(req), actorOf(req)), undefined, 201));
+export const removeShopFile = asyncHandler(async (req, res) => ok(res, await handover.removeShopFile(id(req), rowId(req), objectId.parse(req.params.fileId), actorOf(req))));
 export const assignCs =asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));
 export const move = asyncHandler(async (req, res) => ok(res, await orders.moveStage(id(req), moveBody.parse(req.body).stage, actorOf(req))));
 export const reassign = asyncHandler(async (req, res) => ok(res, await orders.reassignOwner(id(req), ownerBody.parse(req.body).ownerId, actorOf(req))));
@@ -185,6 +211,7 @@ export const previousLeadStage = asyncHandler(async (req, res) => {
 });
 export const closeLead = asyncHandler(async (req, res) => ok(res, await leads.closeLead(id(req), closeLeadBody.parse(req.body).reason, bd(req))));
 export const reopenLead = asyncHandler(async (req, res) => ok(res, await leads.reopenLead(id(req), bd(req))));
+export const changeLeadClient = asyncHandler(async (req, res) => ok(res, await leads.changeLeadClient(id(req), leadClientBody.parse(req.body), bd(req))));
 export const requirementNotes = asyncHandler(async (req, res) => {
   bd(req);
   ok(res, await leads.listRequirementNotes(id(req)));

@@ -9,11 +9,11 @@ import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFi
 import type { StoredFile } from '../files/storedFile.schema';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import { approvalGaps } from './approval.service';
-import { handoverGaps, routeOf } from './handover.service';
-import { getOrder } from './order.service';
+import { handoverGaps, releaseHandoverRoutes, routeOf } from './handover.service';
+import { getOrder, resolveOrderClient } from './order.service';
 import { phpMailAvailable } from './phpMail';
 import { LEAD_FLOW, LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
-import type { leadListQuery } from './sales.validators';
+import type { leadClientBody, leadListQuery } from './sales.validators';
 
 export const LEAD_STAGE_LABELS: Record<LeadStage, string> = {
   NEW_LEAD: 'New Lead',
@@ -49,7 +49,14 @@ const moveLegacyLeads = () =>
     throw e;
   }));
 
-const leadLog = (actor: Actor, action: string, fromStage: string | null, toStage: string | null, note?: string) => ({
+const leadLog = (
+  actor: Actor,
+  action: string,
+  fromStage: string | null,
+  toStage: string | null,
+  note?: string,
+  change: { step?: string; oldValue?: unknown; newValue?: unknown } = {},
+) => ({
   _id: new Types.ObjectId(),
   action,
   fromStage,
@@ -58,6 +65,7 @@ const leadLog = (actor: Actor, action: string, fromStage: string | null, toStage
   role: actor.role,
   at: new Date(),
   note,
+  ...change,
 });
 
 const invalid = (path: string, message: string) => new AppError(422, 'VALIDATION_ERROR', message, [{ path, message }]);
@@ -131,6 +139,7 @@ export async function leadCandidates(q: { q?: string | undefined }) {
 /** Lead list: newest movement first, filterable by stage, status and client flag. */
 export async function listLeads(q: z.infer<typeof leadListQuery>) {
   await moveLegacyLeads();
+  await releaseHandoverRoutes();
   const filter: Record<string, unknown> = { deletedAt: null, lead: { $ne: null } };
   if (q.stage) filter['lead.stage'] = q.stage;
   if (q.status === 'CLOSED') filter['lead.status'] = 'CLOSED';
@@ -167,6 +176,7 @@ export async function listLeads(q: z.infer<typeof leadListQuery>) {
 /** KPI cards: open leads per stage, completed (won) and closed leads, and orders still waiting to become a lead. */
 export async function leadSummary() {
   await moveLegacyLeads();
+  await releaseHandoverRoutes();
   const [byStage, closed, completed, waiting] = await Promise.all([
     SalesOrder.aggregate<{ _id: LeadStage; n: number }>([
       { $match: { deletedAt: null, lead: { $ne: null }, 'lead.status': { $nin: ['CLOSED', 'COMPLETED'] } } },
@@ -183,6 +193,7 @@ export async function leadSummary() {
 /** One lead for the mind map: the order, every stage with its status and dates, the handover branch and the history. */
 export async function getLead(id: string) {
   await moveLegacyLeads();
+  await releaseHandoverRoutes();
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
     .select(
       'lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase approvalDocumentsArray.supersededAt salesprofile.kind salesprofile.status salesprofile.sentAt',
@@ -227,6 +238,7 @@ export async function getLead(id: string) {
   const csGaps = order.csAssignee ? [] : handoverGaps(order, contacts.length);
   const recceGaps = order.recce?.assignee ? [] : handoverGaps({ ...order, handoverFull: true }, contacts.length);
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
+  const route = await routeOf({ _id: o._id, assignRoute: order.assignRoute, csAssignee: order.csAssignee, recce: order.recce });
   const shops = order.shopList ? { total: order.shopList.total ?? 0, valid: order.shopList.valid ?? 0, declared: order.declaredShopTotal ?? null, verified: !!order.shopsVerifiedAt } : null;
   return {
     order,
@@ -244,11 +256,15 @@ export async function getLead(id: string) {
     lastStage: !won && current === flow.length - 1,
     nextAvailable: !!flow[current + 1] && AVAILABLE.includes(flow[current + 1]!),
     /** Project Assign route taken by the first save: HANDOVER (Client Servicing) or RECCE; null while neither is started. */
-    route: await routeOf({ _id: o._id, assignRoute: order.assignRoute, csAssignee: order.csAssignee, recce: order.recce }),
+    route,
+    /** Create Project > Change Client: allowed until a Project Assign route is taken (then downstream work uses the client). */
+    clientChange: clientChangeGate(lead, route),
     handover: {
       unlocked: handoverUnlocked(lead),
       assignee: order.csAssignee ?? null,
       assignedAt: order.handover?.assignedAt ?? null,
+      /** Last save of any handover detail. */
+      updatedAt: (order as { handoverUpdatedAt?: Date | null }).handoverUpdatedAt ?? null,
       type: order.handoverType ?? null,
       /** Assign to Client Servicing toggle: full handover (true) or client details and contacts only (false). */
       full: order.handoverFull !== false,
@@ -264,6 +280,8 @@ export async function getLead(id: string) {
       assignedAt: order.recce?.assignedAt ?? null,
       projectCode: order.recce?.projectCode ?? null,
       estimationCode: order.recce?.estimationCode ?? null,
+      codesSavedAt: order.recce?.codesSavedAt ?? null,
+      clientId: order.recce?.clientId ?? null,
       emails: {
         count: requests.length,
         lastSentAt: requests[0]?.sentAt ?? null,
@@ -282,7 +300,19 @@ export async function getLead(id: string) {
       negotiationRounds: revisions.filter((r) => r.phase === 'NEGOTIATION').length,
       approvalDocuments: (o.approvalDocumentsArray ?? []).filter((d) => !d.supersededAt).length,
     },
-    history: logs.slice(0, 100).map((l) => ({ id: String(l._id), action: l.action, fromStage: l.fromStage ?? null, toStage: l.toStage ?? null, note: l.note ?? null, by: byName(l.by), role: l.role ?? '', at: l.at })),
+    history: logs.slice(0, 100).map((l) => ({
+      id: String(l._id),
+      action: l.action,
+      fromStage: l.fromStage ?? null,
+      toStage: l.toStage ?? null,
+      note: l.note ?? null,
+      step: l.step ?? null,
+      oldValue: l.oldValue ?? null,
+      newValue: l.newValue ?? null,
+      by: byName(l.by),
+      role: l.role ?? '',
+      at: l.at,
+    })),
   };
 }
 
@@ -380,6 +410,57 @@ export async function closeLead(id: string, reason: string, actor: Actor) {
     },
   );
   if (r.modifiedCount) await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'lead.status', oldValue: 'OPEN', newValue: 'CLOSED' }], reason });
+  return getLead(id);
+}
+
+const ROUTE_NAMES: Record<string, string> = { HANDOVER: 'Client Servicing', RECCE: 'Recce team' };
+
+function clientChangeGate(lead: { status?: string | null }, route: string | null) {
+  if ((lead.status ?? 'OPEN') !== 'OPEN') return { allowed: false, reason: lead.status === 'CLOSED' ? 'Reopen the lead to change its client.' : 'The lead is completed.' };
+  if (route) return { allowed: false, reason: `The ${ROUTE_NAMES[route] ?? route} route has started, so the client can no longer be changed.` };
+  return { allowed: true, reason: null };
+}
+
+/**
+ * Create Project > Change Client: points the lead (its order) at another client, New or Existing. Only while no
+ * Project Assign route is taken; the same order is kept (no duplicate order or lead) and the switch is logged with the
+ * previous and new client, so the earlier selection stays in the history.
+ */
+export async function changeLeadClient(id: string, input: z.infer<typeof leadClientBody>, actor: Actor) {
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo client clientType lead assignRoute csAssignee recce').lean();
+  if (!o) throw AppError.notFound('Order not found');
+  if (!o.lead) throw AppError.notFound('This order is not a lead yet');
+  const route = await routeOf({ _id: o._id, assignRoute: o.assignRoute, csAssignee: o.csAssignee, recce: o.recce });
+  const gate = clientChangeGate(o.lead, route);
+  if (!gate.allowed) throw AppError.conflict(gate.reason!);
+  const { client, flag } = await resolveOrderClient(input, actor);
+  if (String(client._id) === String(o.client) && flag === o.clientType) throw AppError.badRequest('This client is already selected.');
+  const before = await Client.findById(o.client).select('name clientNo').lean();
+  const side = (c: { _id: unknown; name?: string | null; clientNo?: string | null } | null, type: string) => ({ clientType: type, clientId: c ? String(c._id) : null, name: c?.name ?? null, clientNo: c?.clientNo ?? null });
+  const oldValue = side(before ? { ...before, _id: o.client } : null, o.clientType);
+  const newValue = side(client, flag);
+  // Conditional on the same client and no route taken, so a save on another tab meanwhile wins.
+  const r = await SalesOrder.updateOne(
+    { _id: o._id, client: o.client, clientType: o.clientType, assignRoute: null, csAssignee: null, 'lead.status': 'OPEN' },
+    {
+      $set: { client: client._id, clientType: flag, updatedBy: actor.id },
+      $push: {
+        leadLogsArray: leadLog(actor, 'CLIENT_CHANGE', o.lead.stage, o.lead.stage, `Client changed: ${oldValue.name ?? '-'} (${o.clientType === 'NEW' ? 'New' : 'Existing'}) → ${newValue.name} (${flag === 'NEW' ? 'New' : 'Existing'})`, { step: 'client', oldValue, newValue }),
+      },
+    },
+  );
+  if (!r.matchedCount) throw AppError.conflict('This lead changed meanwhile (a route was started or the client was changed). Reload the page.');
+  await recordAudit({
+    actor,
+    action: 'UPDATE',
+    entity: 'SalesOrder',
+    entityId: o._id,
+    changes: [
+      { field: 'client', oldValue: oldValue.clientId, newValue: newValue.clientId },
+      { field: 'clientType', oldValue: o.clientType, newValue: flag },
+    ],
+    reason: `${o.orderNo}: lead client changed`,
+  });
   return getLead(id);
 }
 

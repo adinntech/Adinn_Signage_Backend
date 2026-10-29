@@ -96,6 +96,8 @@ const clientSchema = new Schema(
     source: { type: String, enum: CLIENT_SOURCES, default: 'CRM' },
     /** Zoho customer id (Books contact_id / CRM Account id) once this client is linked to Zoho. */
     zohoId: { type: String, trim: true },
+    /** Client ID in Zoho (the customer number, e.g. 30196): from Zoho for Existing clients, typed at Project Code for New ones. */
+    zohoCustomerNo: { type: String, trim: true },
     status: { type: String, enum: CLIENT_STATUSES, default: 'ACTIVE', index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },

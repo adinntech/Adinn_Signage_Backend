@@ -14,7 +14,8 @@ import { Project, Requirement } from '../projects/project.model';
 import { assignProject, createProject } from '../projects/project.service';
 import { projectCreate } from '../projects/project.validators';
 import { User } from '../users/user.model';
-import { claimRoute, clientSnapshot, HANDOVER_TYPE_LABELS, handoverGaps, routeOf } from './handover.service';
+import { getZohoClient } from '../zoho/zoho.customers';
+import { claimRoute, clientSnapshot, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, routeOf } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -44,27 +45,60 @@ const invalid = (path: string, message: string) => new AppError(422, 'VALIDATION
 const EMAIL_DONE = ['SENT', 'SKIPPED'];
 const emailDone = (orderId: Types.ObjectId) => SalesOrder.exists({ _id: orderId, salesprofile: { $elemMatch: { kind: 'PROJECT_CODE_REQUEST', status: { $in: EMAIL_DONE } } } });
 
+/**
+ * Client ID in Zoho for this client: saved on the client, else (Existing / Zoho clients) read from Zoho once and kept.
+ * Null when it is not known (New clients until it is typed at Project Code; Zoho unreachable).
+ */
+async function zohoClientIdOf(c: { _id: unknown; zohoCustomerNo?: string | null; zohoId?: string | null; source?: string | null; code?: string | null } | null) {
+  if (!c) return null;
+  if (c.zohoCustomerNo) return c.zohoCustomerNo;
+  if (!c.zohoId) return null;
+  const z = await getZohoClient(c.zohoId).catch(() => null);
+  const no = z?.zohoCustomerNo ?? (c.source === 'ZOHO' && c.code && /^\d{2,8}$/.test(c.code) ? c.code : null);
+  if (no) await Client.updateOne({ _id: c._id, $or: [{ zohoCustomerNo: null }, { zohoCustomerNo: '' }] } as Record<string, unknown>, { $set: { zohoCustomerNo: no } });
+  return no;
+}
+
+/** Documents shared in the handover's Communication (not voice notes): they go with the project code request email. */
+const chatDocuments = (o: { handoverMessagesArray?: { attachments?: unknown[] }[] | null }) => (o.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[]);
+const shopTypesList: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType shopList declaredShopTotal shopsVerifiedAt salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
     .populate('recce.project', 'code status')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
-  const client = await Client.findById(o.client).select('name clientNo contacts').lean();
+  const client = await Client.findById(o.client).select('name clientNo email phone gstin contacts zohoCustomerNo zohoId source code').lean();
   const r = o.recce ?? null;
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
-  const codes = r?.projectCode ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null } : null;
+  const codes = r?.projectCode
+    ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', clientId: r.clientId ?? null, savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null }
+    : null;
+  const existing = o.clientType === 'EXISTING';
+  const zohoNo = existing ? await zohoClientIdOf(client) : (client?.zohoCustomerNo ?? null);
   const contacts = client?.contacts ?? [];
   // The Recce team always gets the full handover (there is no "client details only" option here).
   const handoverMissing = handoverGaps({ ...o, handoverFull: true }, contacts.length);
-  const missing = r?.assignee ? [] : [...(codes ? [] : ['Enter the project code and estimation code']), ...handoverMissing];
+  const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
+  // Steps in order: handover details, the request email, the codes (+ Client ID for a New client), then the assignment.
+  const missing = r?.assignee
+    ? []
+    : [
+        ...handoverMissing,
+        ...(sentOk ? [] : ['Send the project code request email']),
+        ...(codes ? [] : ['Enter the project code and estimation code']),
+        ...(codes && !existing && !codes.clientId ? ['Enter the Client ID created in Zoho'] : []),
+      ];
+  const shopRows = o.handoverType && shopTypesList.includes(o.handoverType) ? (o.shopList?.total ?? 0) : 0;
+  const docs = chatDocuments(o);
   const bd = await User.findById(actor.id).select('name').lean();
   const typeLabel = o.handoverType ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'To be confirmed';
-  const shops = o.handoverType && o.handoverType !== 'ASO' && o.shopList ? `${o.shopList.total} shops` : o.handoverType === 'ASO' ? 'ASO (shop details to be collected)' : 'To be confirmed';
+  const shops = shopRows ? `${shopRows} shops` : o.handoverType === 'ASO' ? 'ASO (shop details to be collected)' : 'To be confirmed';
   // Plain lines (no table): the composer's rich-text editor keeps paragraphs, line breaks and bold only.
   const row = (k: string, v: string) => `${k}: <strong>${escapeHtml(v)}</strong>`;
   return {
@@ -73,8 +107,18 @@ export async function getRecce(id: string, actor: Actor) {
     unlocked: o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN' && !o.csAssignee,
     codes,
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
-    /** Step 1 done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
-    emailDone: requests.some((e) => EMAIL_DONE.includes(e.status)),
+    /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
+    emailDone: sentOk,
+    /** Handover Type & Details (step 1) complete: unlocks the request email. */
+    handoverReady: handoverMissing.length === 0,
+    clientType: o.clientType,
+    /** Client ID in Zoho: Existing clients have it from Zoho (read-only); New clients type it at Project Code. */
+    zohoClientId: { value: codes?.clientId ?? zohoNo, fromZoho: existing },
+    /** Sent automatically with every request email (besides the client details and contacts in the message). */
+    autoAttachments: {
+      shopExcel: shopRows ? { rows: shopRows, sized: o.handoverType === 'SHOP_MEASUREMENT' } : null,
+      documents: docs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType })),
+    },
     /** Project Assign route: HANDOVER (Client Servicing), RECCE, or null until the first save. */
     route: await routeOf({ _id: o._id, assignRoute: o.assignRoute, csAssignee: o.csAssignee, recce: o.recce }),
     /** Contacts that can go on the operations project (name, mobile and email all present). */
@@ -91,8 +135,26 @@ export async function getRecce(id: string, actor: Actor) {
       cc: [] as string[],
       subject: `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
       body:
-        `<p>Dear Team,</p><p>Please create a project code for the order below.</p>` +
-        `<p>${[row('Client', client?.name ?? '-'), row('Client ID', client?.clientNo ?? '-'), row('Order No', o.orderNo), row('Client Flag', o.clientType === 'NEW' ? 'New Client' : 'Existing Client'), row('Handover Type', typeLabel), row('Shops', shops)].join('<br>')}</p>` +
+        `<p>Dear Team,</p><p>Please create the project code and estimation code for the order below${existing ? '' : ', and the Client ID in Zoho for this new client'}.</p>` +
+        `<p><strong>Client details</strong><br>${[
+          row('Client', client?.name ?? '-'),
+          row(existing ? 'Zoho Client ID' : 'CRM Client ID', (existing ? zohoNo : client?.clientNo) ?? '-'),
+          row('Client Flag', existing ? 'Existing Client' : 'New Client'),
+          row('Email', client?.email ?? '-'),
+          row('Phone', client?.phone ?? '-'),
+          row('GST Number', client?.gstin ?? '-'),
+          row('Order No', o.orderNo),
+          row('Handover Type', typeLabel),
+          row('Shops', shops),
+        ].join('<br>')}</p>` +
+        `<p><strong>Contact persons</strong><br>${
+          contacts.length
+            ? contacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.designation, k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')
+            : 'None added'
+        }</p>` +
+        (shopRows || docs.length
+          ? `<p>Attached: ${[shopRows ? `shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, docs.length ? `${docs.length} document${docs.length === 1 ? '' : 's'} from the handover` : null].filter(Boolean).join(' and ')}.</p>`
+          : '') +
         `<p>Regards,<br>${escapeHtml(bd?.name ?? 'BD Team')}</p>`,
     },
   };
@@ -107,13 +169,30 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     const again = (await listEmails(id, 'PROJECT_CODE_REQUEST')).find((e) => e.requestKey === input.requestKey);
     if (again) return again;
   }
+  // Steps in order: the handover details come first (the email carries them).
+  const client = await Client.findById(o.client).select('name contacts').lean();
+  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true }, client?.contacts?.length ?? 0);
+  if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Handover Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRoute(o, 'RECCE');
-  const client = await Client.findById(o.client).select('name').lean();
   const stored: StoredFile[] = [];
+  const store = (f: UploadedFile) => storeEmbeddedFile({ category: 'SALES_HANDOVER_DOCUMENT', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: ownerOf(o._id) });
   try {
-    for (const f of files) stored.push(await storeEmbeddedFile({ category: 'SALES_HANDOVER_DOCUMENT', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: ownerOf(o._id) }));
-    return await deliver({ order: o._id, client: o.client, kind: 'PROJECT_CODE_REQUEST', to: input.to, cc: input.cc, subject: input.subject, body: sanitizeHtml(input.body), attachments: stored, requestKey: input.requestKey, actor });
+    // Shop types: the shop table as it is now, as Excel (with sizes for Shop + Measurement).
+    if (o.handoverType && shopTypesList.includes(o.handoverType) && o.shopList?.total) {
+      const x = await exportShops(id);
+      stored.push(await store({ originalname: x.name, mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: x.buffer.length, buffer: x.buffer }));
+    }
+    for (const f of files) stored.push(await store(f));
+    // Documents shared in the handover Communication go as they are (no copy).
+    const attachments = [...stored, ...chatDocuments(o.toObject())];
+    const sent = await deliver({ order: o._id, client: o.client, kind: 'PROJECT_CODE_REQUEST', to: input.to, cc: input.cc, subject: input.subject, body: sanitizeHtml(input.body), attachments, requestKey: input.requestKey, actor });
+    const status = (sent as { status?: string }).status ?? 'SENT';
+    await SalesOrder.updateOne(
+      { _id: o._id },
+      { $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Project code request email ${status === 'SENT' ? 'sent' : status === 'SKIPPED' ? 'recorded (mail off)' : 'failed'}`, { step: 'email', newValue: { to: input.to, subject: input.subject, status } }) } },
+    );
+    return sent;
   } catch (e) {
     await discardStoredFiles(stored);
     throw e;
@@ -136,18 +215,34 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
   await claimRoute(o, 'RECCE');
   if (!(await emailDone(o._id))) throw invalid('projectCode', 'Send the project code request email first');
   await assertCodesFree(o._id, input.projectCode, input.estimationCode);
+  // Client ID in Zoho: an Existing client's comes from Zoho; a New client's is typed (created in Zoho after the email).
+  const c = await Client.findById(o.client).select('zohoCustomerNo zohoId source code').lean();
+  const fromZoho = o.clientType === 'EXISTING' ? await zohoClientIdOf(c) : null;
+  const clientId = fromZoho ?? input.clientId;
+  if (!clientId && o.clientType !== 'EXISTING') throw invalid('clientId', 'Enter the Client ID created in Zoho for this new client');
   const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
   try {
     const r = await SalesOrder.updateOne(
       { _id: o._id, csAssignee: null, 'recce.assignee': null },
-      { $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id } },
+      {
+        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
+        $push: {
+          leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode} / ${input.estimationCode}${clientId ? ` · Client ID ${clientId}` : ''}`, {
+            step: 'codes',
+            oldValue: o.recce?.projectCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode ?? null, clientId: o.recce.clientId ?? null } : null,
+            newValue: { projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null },
+          }),
+        },
+      },
     );
     if (!r.matchedCount) throw AppError.conflict('This project was assigned meanwhile. Reload the page.');
   } catch (e) {
     if ((e as { code?: number }).code === 11000) throw AppError.conflict('That project or estimation code was just used by another order. Check the codes.');
     throw e;
   }
-  await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'recce.projectCode', oldValue: o.recce?.projectCode ?? null, newValue: input.projectCode }], reason: `Project code ${input.projectCode}, estimation code ${input.estimationCode}` });
+  // A New client keeps its Zoho Client ID (shown in Client Management and on later orders).
+  if (clientId && o.clientType !== 'EXISTING') await Client.updateOne({ _id: o.client, $or: [{ zohoCustomerNo: null }, { zohoCustomerNo: '' }] } as Record<string, unknown>, { $set: { zohoCustomerNo: clientId } });
+  await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'recce.projectCode', oldValue: o.recce?.projectCode ?? null, newValue: input.projectCode }, { field: 'recce.clientId', oldValue: o.recce?.clientId ?? null, newValue: clientId ?? null }], reason: `Project code ${input.projectCode}, estimation code ${input.estimationCode}` });
   return getRecce(id, actor);
 }
 
@@ -166,6 +261,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   await claimRoute(o, 'RECCE');
   const codes = o.recce?.projectCode && o.recce.estimationCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode } : null;
   if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
+  if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
   const client = await Client.findById(o.client).select('name contacts').lean();
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true }, client?.contacts?.length ?? 0);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
@@ -176,7 +272,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   await assertCodesFree(o._id, codes.projectCode, codes.estimationCode);
 
   const type = o.handoverType as HandoverType;
-  const notes = [o.handoverNotes, input.note].filter(Boolean).join('\n\n');
+  const notes = input.note ?? '';
   const parsed = projectCreate.safeParse({
     clientId: String(o.client),
     code: codes.projectCode,

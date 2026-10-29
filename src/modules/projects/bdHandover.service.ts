@@ -1,13 +1,13 @@
 import { AppError } from '../../common/errors';
 import { Client } from '../clients/client.model';
-import { getHandover, listShops } from '../sales/handover.service';
+import { exportShops, getHandover, listShops } from '../sales/handover.service';
 import { orderFileUrl } from '../sales/order.service';
 import { SalesOrder } from '../sales/sales.model';
 import { Project } from './project.model';
 
 /**
  * BD handover of a project created from Lead Management > Assign to Recce Team: the sales order's codes, client,
- * handover type, notes, voice notes, documents and shop list, read-only for the assigned Recce / Operations person.
+ * handover type, communication (messages, files, voice notes) and shop list, read-only for the assigned Recce / Operations person.
  * The route is project-scoped, so only people who may open the project reach it.
  */
 async function sourceOrderId(projectId: string) {
@@ -32,13 +32,15 @@ export async function projectHandover(projectId: string) {
     orderNo: o.orderNo,
     projectCode: o.recce?.projectCode ?? null,
     estimationCode: o.recce?.estimationCode ?? null,
+    /** Client ID in Zoho (typed for a New client at Project Code, from Zoho for an Existing one). */
+    clientId: o.recce?.clientId ?? null,
     assignedAt: o.recce?.assignedAt ?? null,
     assignedBy: (o.recce?.assignedBy as unknown as { name?: string } | null)?.name ?? null,
     note: o.recce?.note ?? null,
     client,
     type: h.type,
-    notes: h.notes,
-    voiceNotes: h.voiceNotes,
+    /** Communication & attachments (chat) from the BD. */
+    messages: h.messages,
     documents: h.documents,
     shopList: h.shopList,
     declaredShopTotal: h.declaredShopTotal,
@@ -50,6 +52,13 @@ export async function projectHandoverShops(projectId: string, q: Parameters<type
   const orderId = await sourceOrderId(projectId);
   if (!orderId) throw AppError.notFound('This project has no BD handover');
   return listShops(orderId, q);
+}
+
+/** The BD's shop table as it is now, as Excel (same file as the BD's Download Excel). */
+export async function projectHandoverShopsExport(projectId: string) {
+  const orderId = await sourceOrderId(projectId);
+  if (!orderId) throw AppError.notFound('This project has no BD handover');
+  return exportShops(orderId);
 }
 
 export async function projectHandoverFileUrl(projectId: string, fileId: string) {

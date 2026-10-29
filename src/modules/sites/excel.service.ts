@@ -123,7 +123,8 @@ export async function buildTemplate(scenario: Scenario, omit: MappableField[] = 
   const cols: [string, MappableField, number][] = scenario === 'CLIENT_PROVIDED'
     ? [['Customer Name', 'dealerName', 34], ['District', 'district', 16], ['Size (W x H)', 'size', 12], ['Remarks', 'remarks', 16], ['Address 1', 'address1', 30], ['Address 2', 'address2', 26], ['Address 3', 'address3', 18], ['Pin', 'pincode', 10], ['PH', 'mobile', 18], ['GST', 'gstin', 20]]
     : [['Shop Name', 'shopName', 26], ['Dealer Name', 'dealerName', 22], ['Location / Area', 'location', 18], ['District', 'district', 16], ['Address 1', 'address1', 30], ['Address 2', 'address2', 24], ['Address 3', 'address3', 18], ['Pin', 'pincode', 10], ['Mobile', 'mobile', 16], ['GST No', 'gstin', 20], ['Contact Person', 'contactPerson', 18], ['Remarks', 'remarks', 20]];
-  ws.columns = cols.map(([header, key, width]) => ({ header, key, width }));
+  // `omit` applies to the client sheet columns too (Shop Details Only: no Size).
+  ws.columns = cols.filter(([, key]) => !omit.includes(key)).map(([header, key, width]) => ({ header, key, width }));
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
   ws.addRow(scenario === 'CLIENT_PROVIDED'

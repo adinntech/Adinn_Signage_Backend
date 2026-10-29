@@ -6,7 +6,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { linkZohoCustomer, registerCompany } from '../clients/client.service';
-import { getZohoClient } from '../zoho/zoho.customers';
+import { findZohoByGstin, getZohoClient } from '../zoho/zoho.customers';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { EmailTemplate } from '../templates/template.model';
@@ -15,7 +15,7 @@ import { ORDER_STAGES, SalesOrder, WITHOUT_ARRAYS, type OrderStage } from './sal
 import { revisionLabel } from '../ratecards/ratecard.model';
 import type { boardQuery, createOrderBody, orderListQuery, registerBody } from './sales.validators';
 
-const CLIENT_FIELDS = 'name clientName clientNo code email phone customFields gstCertificates industry address city district state pincode gstin contacts clientType status';
+const CLIENT_FIELDS = 'name clientName clientNo code zohoCustomerNo email phone customFields gstCertificates industry address city district state pincode gstin contacts clientType status';
 export const STAGE_LABELS: Record<OrderStage, string> = {
   NEW_ORDER: 'New Order',
   COMPANY_PROFILE: 'Company Profile',
@@ -45,7 +45,14 @@ async function nextOrderNo() {
 const defaultOwner = (actor: Actor) => (actor.role === 'BD' ? actor.id : undefined);
 
 /** Lead log entry (same shape as lead.service's; kept here because order.service is imported by it). */
-export const leadLog = (actor: Actor, action: string, fromStage: string | null, toStage: string | null, note?: string) => ({
+export const leadLog = (
+  actor: Actor,
+  action: string,
+  fromStage: string | null,
+  toStage: string | null,
+  note?: string,
+  change: { step?: string; oldValue?: unknown; newValue?: unknown } = {},
+) => ({
   _id: new Types.ObjectId(),
   action,
   fromStage,
@@ -54,6 +61,7 @@ export const leadLog = (actor: Actor, action: string, fromStage: string | null, 
   role: actor.role,
   at: new Date(),
   note,
+  ...change,
 });
 
 /**
@@ -114,6 +122,24 @@ export async function registerNewClient(input: z.infer<typeof registerBody>, act
 export async function createOrderForClient(input: z.infer<typeof createOrderBody>, actor: Actor) {
   const again = await replay(input.requestKey);
   if (again) return again;
+  const { client, flag } = await resolveOrderClient(input, actor);
+  try {
+    const order = await createOrder(client, flag, input.requestKey, actor, input.initialNotes);
+    return { client, order: await getOrder(String(order._id)), replayed: false };
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000 && input.requestKey) {
+      const raced = await replay(input.requestKey);
+      if (raced) return raced;
+    }
+    throw e;
+  }
+}
+
+/**
+ * The client an order (or a lead's client change) is for: a Client Management client (New) or a Zoho customer linked
+ * to / added as a local client (Existing). Rejects drafts, inactive clients and a New Client with a Zoho GSTIN.
+ */
+export async function resolveOrderClient(input: { clientId?: string | undefined; zohoId?: string | undefined; clientType?: 'NEW' | 'EXISTING' | undefined }, actor: Actor) {
   let client;
   if (input.zohoId) {
     const z = await getZohoClient(input.zohoId);
@@ -126,16 +152,16 @@ export async function createOrderForClient(input: z.infer<typeof createOrderBody
   if (client.status === 'DRAFT') throw AppError.badRequest('This client is still a draft. Finish it in Client Management before creating an order.');
   if (client.status !== 'ACTIVE') throw AppError.badRequest('This client is inactive. Reactivate it before creating an order.');
   const flag = input.clientType ?? (input.zohoId ? 'EXISTING' : 'NEW');
-  try {
-    const order = await createOrder(client, flag, input.requestKey, actor, input.initialNotes);
-    return { client, order: await getOrder(String(order._id)), replayed: false };
-  } catch (e) {
-    if ((e as { code?: number }).code === 11000 && input.requestKey) {
-      const raced = await replay(input.requestKey);
-      if (raced) return raced;
+  // A New Client order may not use a company that Zoho already has (same GSTIN): that is an Existing Client. An
+  // unverified Zoho lookup never blocks; clients without a GSTIN or already linked to Zoho are not checked.
+  if (flag === 'NEW' && client.gstin && !client.zohoId) {
+    const { match } = await findZohoByGstin(client.gstin);
+    if (match) {
+      const message = `GSTIN ${client.gstin} belongs to the Zoho customer "${match.name}". Create this order under Existing Client.`;
+      throw new AppError(409, 'ZOHO_DUPLICATE_GST', message, [{ path: 'gstin', message, zohoId: match.zohoId, name: match.name }]);
     }
-    throw e;
   }
+  return { client, flag };
 }
 
 /**
@@ -367,7 +393,7 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
 export async function orderFileUrl(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
     .select(
-      'client clientType salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file requirementNotesArray.attachments onboardingPdf handoverClient.gstCertificates',
+      'client clientType salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file handoverMessagesArray.attachments handoverMessagesArray.voice requirementNotesArray.attachments onboardingPdf handoverClient.gstCertificates',
     )
     .lean();
   if (!o) throw AppError.notFound('Order not found');
@@ -386,6 +412,7 @@ export async function orderFileUrl(id: string, fileId: string) {
     ...(o.handoverDocumentsArray ?? []).map((d) => d.file),
     ...(o.handoverShopsArray ?? []).flatMap((s) => s.attachments ?? []),
     ...(o.handoverVoiceNotesArray ?? []).map((v) => v.file),
+    ...(o.handoverMessagesArray ?? []).flatMap((m) => [...(m.attachments ?? []), m.voice?.file]),
   ];
   let file = all.find((f) => f && String(f.fileId) === fileId);
   if (!file) {

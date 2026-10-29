@@ -2,13 +2,17 @@ import type { Request } from 'express';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import * as s from './client.service';
-import { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration } from './client.validators';
+import { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration, gstinCheckQuery } from './client.validators';
 
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await s.listClients(clientListQuery.parse(req.query));
   ok(res, items, meta);
 });
 export const summary = asyncHandler(async (_req, res) => ok(res, await s.clientSummary()));
+export const gstinCheck = asyncHandler(async (req, res) => {
+  const q = gstinCheckQuery.parse(req.query);
+  ok(res, await s.checkGstin(q.gstin, q.exceptId));
+});
 export const get = asyncHandler(async (req, res) => ok(res, await s.getClientDetails(String(req.params.id))));
 export const create = asyncHandler(async (req, res) =>
   ok(res, await s.createClient(clientBody.parse(req.body), actorOf(req)), undefined, 201),

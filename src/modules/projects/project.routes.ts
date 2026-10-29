@@ -23,6 +23,7 @@ projectRouter.get('/:id/notification-log', requirePermission('projects:write'), 
 projectRouter.get('/:id/requirement', requirePermission('projects:read'), scoped, c.getRequirement);
 projectRouter.get('/:id/bd-handover', requirePermission('projects:read'), scoped, c.bdHandover);
 projectRouter.get('/:id/bd-handover/shops', requirePermission('projects:read'), scoped, c.bdHandoverShops);
+projectRouter.get('/:id/bd-handover/shops/export', requirePermission('projects:read'), scoped, c.bdHandoverShopsExport);
 projectRouter.get('/:id/bd-handover/files/:fileId/url', requirePermission('projects:read'), scoped, c.bdHandoverFileUrl);
 projectRouter.put('/:id/requirement', requirePermission('projects:write'), scoped, c.putRequirement);
 projectRouter.put('/:id/additional-shops', requirePermission('sites:write'), scoped, c.additionalShops);

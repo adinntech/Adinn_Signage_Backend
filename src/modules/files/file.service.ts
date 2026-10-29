@@ -411,6 +411,8 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
       'handoverDocumentsArray.file.key',
       'handoverShopsArray.attachments.key',
       'handoverVoiceNotesArray.file.key',
+      'handoverMessagesArray.attachments.key',
+      'handoverMessagesArray.voice.file.key',
       'requirementNotesArray.attachments.key',
       'onboardingPdf.key',
       'handoverClient.gstCertificates.key',

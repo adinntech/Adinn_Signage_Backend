@@ -13,6 +13,13 @@ export const recceCodesBody = z.object({
     .trim()
     .toUpperCase()
     .regex(/^EST-\d{6}$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343'),
+  /** New client: the Client ID created in Zoho. Existing clients take theirs from Zoho. */
+  clientId: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9-]{2,20}$/, 'Client ID: 2-20 letters, digits or -')
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
 });
 const day = z.coerce.date({ message: 'Choose a date' });
 /** Assign to Recce Team: the person, and what the operations project needs to be assigned. */
@@ -60,10 +67,36 @@ export const orderListQuery = listQuery.extend({
 
 export const handoverTypeBody = z.object({ type: z.enum(HANDOVER_TYPES, { message: 'Choose ASO, Shop Details Only or Shop + Measurement' }) });
 export const handoverScopeBody = z.object({ full: z.boolean({ message: 'Choose whether to send the full handover' }) });
-export const handoverNotesBody = z.object({ notes: z.string().trim().max(4000, 'Keep the notes under 4000 characters') });
-/** Voice note upload: the length the browser measured (recordings stop at 5 minutes). */
-export const voiceNoteBody = z.object({ durationSec: z.coerce.number().min(0).max(305, 'A voice note can be at most 5 minutes').optional() });
-export const shopTotalBody = z.object({ total: z.coerce.number({ message: 'Enter the total number of shops' }).int('Enter a whole number').min(1, 'Enter at least 1 shop').max(100000) });
+/** Handover chat message (multipart): text, and `voice` = the one attached file is a voice note of `durationSec`. */
+export const handoverMessageBody = z.object({
+  text: z.string().trim().max(4000, 'Keep the message under 4000 characters').optional(),
+  voice: z.enum(['1', 'true']).optional().transform((v) => !!v),
+  durationSec: z.coerce.number().min(0).max(305, 'A voice note can be at most 5 minutes').optional(),
+});
+const cell = (max: number) => z.string().trim().max(max).optional().or(z.null().transform(() => undefined));
+/** Shop row typed in the table (text values; the site import rules check and clean them). */
+export const shopRowBody = z.object({
+  shopName: cell(250),
+  dealerName: cell(250),
+  location: cell(250),
+  district: cell(250),
+  address1: cell(250),
+  address2: cell(250),
+  address3: cell(250),
+  pincode: cell(10),
+  mobile: cell(40),
+  mobileAlt: cell(40),
+  gstin: cell(20),
+  contactPerson: cell(250),
+  width: cell(20),
+  height: cell(20),
+  unit: cell(10),
+  boardType: cell(250),
+  quantity: cell(10),
+  remarks: cell(1000),
+  clientSiteCode: cell(250),
+});
+export const rowIdParam = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid row id');
 export const assignCsBody = z.object({
   csUserId: objectId,
   note: z.string().trim().max(1000).optional().or(z.literal('').transform(() => undefined)),
@@ -158,4 +191,14 @@ export const onboardingBody = z
     if (v.organisationType === 'OTHERS' && !v.organisationOther) ctx.addIssue({ code: 'custom', path: ['organisationOther'], message: 'Enter the type of organisation' });
   });
 
+/** Create Project > Change Client: the new client (Client Management for New, Zoho for Existing). */
+export const leadClientBody = z
+  .object({
+    clientId: objectId.optional(),
+    zohoId: z.string().trim().min(1).max(64).optional(),
+    clientType: z.enum(CLIENT_TYPES, { message: 'Choose New Client or Existing Client' }),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.clientId === !v.zohoId) ctx.addIssue({ code: 'custom', path: ['clientId'], message: 'Select the client company' });
+  });
 export const closeLeadBody =z.object({ reason: z.string().trim().min(3, 'Enter why the lead is closed').max(1000) });

@@ -9,7 +9,7 @@ import { discardStoredFiles, eraseStoredFile, storedFileUrl, storeEmbeddedFile, 
 import type { StoredFile } from '../files/storedFile.schema';
 import { purgeClientData } from './client.cascade';
 import { Client } from './client.model';
-import type { ZohoClient } from '../zoho/zoho.customers';
+import { findZohoByGstin, type ZohoClient } from '../zoho/zoho.customers';
 import type { z } from 'zod';
 import type { clientBody, clientDraft, clientListQuery, clientPatch, clientRegistration } from './client.validators';
 
@@ -24,13 +24,48 @@ async function assertUnique(input: { name?: string | undefined; gstin?: string |
     if (clash) throw AppError.conflict(`A client named "${clash.name}" already exists (${clash.clientNo ?? `code ${clash.code}`}). Use Existing Client to create a new order for it.`);
   }
   if (input.gstin) {
-    const clash = await Client.findOne({ deletedAt: null, gstin: input.gstin, ...notSelf }).select('name').lean();
-    if (clash) throw AppError.conflict(`GSTIN ${input.gstin} already belongs to client "${clash.name}"`);
+    const clash = await Client.findOne({ deletedAt: null, gstin: input.gstin, ...notSelf }).select('name clientNo').lean();
+    if (clash) gstConflict('CONFLICT', `GSTIN ${input.gstin} already belongs to client "${clash.name}"${clash.clientNo ? ` (${clash.clientNo})` : ''}`);
   }
   if (input.email) {
     const clash = await Client.findOne({ deletedAt: null, email: input.email.toLowerCase(), ...notSelf }).select('name').lean();
     if (clash) throw AppError.conflict(`Company email ${input.email} already belongs to client "${clash.name}"`);
   }
+}
+
+/** A GSTIN clash, put on the form's GST Number field. */
+function gstConflict(code: 'CONFLICT' | 'ZOHO_DUPLICATE_GST', message: string): never {
+  throw new AppError(409, code, message, [{ path: 'gstin', message }]);
+}
+
+/**
+ * A new client may not use the GSTIN of a Zoho customer: that company is an Existing Client. A Zoho lookup that fails
+ * is not a match (it never blocks); `zohoId` is the Zoho customer this client is already linked to.
+ */
+async function assertNotInZoho(gstin: string | undefined, zohoId?: string | null) {
+  if (!gstin) return;
+  const { match } = await findZohoByGstin(gstin);
+  if (match && match.zohoId !== zohoId)
+    gstConflict('ZOHO_DUPLICATE_GST', `GSTIN ${gstin} belongs to the Zoho customer "${match.name}". Choose it under Existing Client instead.`);
+}
+
+/** Add / Edit Client live check: who already has this GSTIN, in Client Management and in Zoho. */
+export async function checkGstin(gstin: string, exceptId?: string) {
+  const self = exceptId ? await Client.findById(exceptId).select('zohoId').lean() : null;
+  const [local, zoho] = await Promise.all([
+    Client.findOne({ deletedAt: null, gstin, status: { $ne: 'DRAFT' }, ...(exceptId ? { _id: { $ne: exceptId } } : {}) })
+      .select('name clientNo')
+      .lean(),
+    findZohoByGstin(gstin),
+  ]);
+  const z = zoho.match && zoho.match.zohoId !== self?.zohoId ? zoho.match : null;
+  return {
+    gstin,
+    local: local ? { id: String(local._id), name: local.name, clientNo: local.clientNo ?? null } : null,
+    zoho: z ? { zohoId: z.zohoId, name: z.name, clientName: z.clientName ?? null, email: z.email ?? null, phone: z.phone ?? null, city: z.city ?? null, state: z.state ?? null } : null,
+    /** false: Zoho could not be asked, so "no Zoho match" is not confirmed. */
+    zohoChecked: zoho.checked,
+  };
 }
 
 const FIELDS = ['name', 'clientName', 'email', 'phone', 'customFields', 'industry', 'contacts', 'address', 'city', 'district', 'state', 'pincode', 'gstin', 'notes', 'status'];
@@ -127,6 +162,7 @@ export async function createClient(input: z.infer<typeof clientBody>, actor: Act
 /** BD "New Client": company + all contact persons in one record, with a generated code and Client ID. */
 export async function registerCompany(input: z.infer<typeof clientRegistration>, actor: Actor) {
   await assertUnique(input);
+  await assertNotInZoho(input.gstin);
   const c = await Client.create({
     ...input,
     contacts: withPrimary(input.contacts),
@@ -238,6 +274,7 @@ export async function finalizeDraft(id: string, input: z.infer<typeof clientRegi
   if (!draft) throw AppError.notFound('Draft not found');
   if (draft.status !== 'DRAFT') throw AppError.conflict('This draft was already saved as a client.');
   await assertUnique(input, id);
+  await assertNotInZoho(input.gstin);
   const c = await Client.findOneAndUpdate(
     { _id: id, status: 'DRAFT', deletedAt: null },
     {
@@ -261,6 +298,8 @@ export async function finalizeDraft(id: string, input: z.infer<typeof clientRegi
 export async function updateClient(id: string, patch: z.infer<typeof clientPatch>, actor: Actor) {
   const before = await getClient(id);
   await assertUnique(patch, id);
+  // Only a changed GSTIN is checked against Zoho (a Zoho-linked client keeps its own customer's GSTIN).
+  if (patch.gstin && patch.gstin !== before.gstin) await assertNotInZoho(patch.gstin, before.zohoId);
   const set = patch.contacts?.length ? { ...patch, contacts: withPrimary(patch.contacts) } : patch;
   const c = await Client.findByIdAndUpdate(id, { ...set, updatedBy: actor.id }, { returnDocument: 'after' }).lean();
   await recordAudit({ actor, action: 'UPDATE', entity: 'Client', entityId: id, changes: diff(before as never, set as never, FIELDS) });
@@ -322,11 +361,13 @@ export async function clientFileUrl(id: string, fileId: string) {
  * it. Otherwise created as an EXISTING client from Zoho.
  */
 export async function linkZohoCustomer(z: ZohoClient, actor: Actor) {
-  const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, city: z.city, state: z.state };
+  const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, city: z.city, state: z.state, zohoCustomerNo: z.zohoCustomerNo };
   const linked = await Client.findOne({ zohoId: z.zohoId, deletedAt: null });
   if (linked) {
     // Only what Zoho actually has overwrites; a blank in Zoho keeps the CRM value.
-    const set = Object.fromEntries(Object.entries(fromZoho).filter(([, v]) => v));
+    const set: Record<string, unknown> = Object.fromEntries(Object.entries(fromZoho).filter(([, v]) => v));
+    // Zoho's contact persons fill an empty contact list; contacts already kept in the CRM are never replaced.
+    if (!linked.contacts?.length && z.contacts?.length) set.contacts = withPrimary(z.contacts);
     await Client.updateOne({ _id: linked._id }, { $set: { ...set, updatedBy: actor.id } });
     return (await Client.findById(linked._id).lean())!;
   }
@@ -349,7 +390,8 @@ export async function linkZohoCustomer(z: ZohoClient, actor: Actor) {
   }
   const c = await Client.create({
     ...fromZoho,
-    code: await generateCode(z.name),
+    contacts: withPrimary(z.contacts ?? []),
+    code: await codeForZoho(z.name, z.zohoCustomerNo),
     clientNo: await nextClientNo(),
     clientType: 'EXISTING',
     source: 'ZOHO',

@@ -32,7 +32,8 @@ export type HandoverType = (typeof HANDOVER_TYPES)[number];
 export const LEAD_STAGES = ['NEW_LEAD', 'PROJECT_ASSIGN', 'CLIENT_REGISTERED', 'REQUIREMENT_DISCUSSION', 'RATE_CARD', 'NEGOTIATION', 'CLIENT_APPROVAL'] as const;
 export type LeadStage = (typeof LEAD_STAGES)[number];
 export const LEAD_FLOW = ['NEW_LEAD', 'PROJECT_ASSIGN'] as const satisfies readonly LeadStage[];
-export const LEAD_ACTIONS = ['START', 'COMPLETE', 'BACK', 'CLOSE', 'REOPEN', 'NOTES'] as const;
+/** STEP: a Project Assign step saved (handover type, code email, codes); CLIENT_CHANGE: the lead's client switched. */
+export const LEAD_ACTIONS = ['START', 'COMPLETE', 'BACK', 'CLOSE', 'REOPEN', 'NOTES', 'STEP', 'CLIENT_CHANGE'] as const;
 
 /** Files keep their full metadata inside the order (no FileAsset row); see storedFile.schema. */
 const fileRef = storedFileSchema;
@@ -106,6 +107,11 @@ const leadLogSchema = new Schema({
   role: String,
   at: { type: Date, default: Date.now },
   note: String,
+  /** STEP: which step (handover-type, email, codes). */
+  step: String,
+  /** What changed: the value before and after (STEP, CLIENT_CHANGE). */
+  oldValue: { type: Schema.Types.Mixed, default: undefined },
+  newValue: { type: Schema.Types.Mixed, default: undefined },
 });
 
 /** requirementNotesArray: Requirement Discussion notes, each with optional documents / reference images. */
@@ -128,7 +134,39 @@ const handoverDocSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-/** handoverVoiceNotesArray: voice notes for Client Servicing, recorded in the browser or uploaded. */
+/**
+ * handoverMessagesArray: the handover's chat-style communication (text, attachments, voice notes), oldest first.
+ * Replaces the separate notes / voice notes / documents (kept below only for records from before it).
+ */
+const handoverMessageSchema = new Schema({
+  text: { type: String, trim: true, maxlength: 4000 },
+  attachments: { type: [fileRef], default: [] },
+  /** A voice note: recorded in the browser or an uploaded audio file. */
+  voice: {
+    type: new Schema({ file: { type: fileRef, required: true }, durationSec: Number }, { _id: false }),
+    default: null,
+  },
+  by: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  role: String,
+  /** Sent after the order was handed over. */
+  afterHandover: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+});
+
+/** handoverShopLogs: every change to a shop row (added, edited, deleted, imported), with the values before / after. */
+export const SHOP_LOG_ACTIONS = ['ADD', 'EDIT', 'DELETE', 'IMPORT', 'CLEAR', 'IMAGE_ADD', 'IMAGE_REMOVE'] as const;
+const shopLogSchema = new Schema({
+  rowId: String,
+  action: { type: String, enum: SHOP_LOG_ACTIONS, required: true },
+  before: { type: Schema.Types.Mixed, default: undefined },
+  after: { type: Schema.Types.Mixed, default: undefined },
+  note: String,
+  by: { type: Schema.Types.ObjectId, ref: 'User' },
+  role: String,
+  at: { type: Date, default: Date.now },
+});
+
+/** handoverVoiceNotesArray (legacy): voice notes for Client Servicing, recorded in the browser or uploaded. */
 const voiceNoteSchema = new Schema({
   file: { type: fileRef, required: true },
   /** Length in seconds as measured by the browser (at most 5 minutes). */
@@ -167,8 +205,12 @@ const handoverShopSchema = new Schema(
     extra: { type: Schema.Types.Mixed, default: undefined },
     state: { type: String, enum: ['VALID', 'WARNING', 'ERROR'] },
     issues: [String],
-    /** Shop + Measurement: photos / documents the client shared for this shop (where the board goes, measurements). */
+    /** Shop + Measurement: up to 10 images of this shop (where the board goes, measurements). */
     attachments: { type: [fileRef], default: undefined },
+    /** Stable id of the row (kept through edits, Excel export / import); rows from before it get one on first read. */
+    rowId: { type: String, index: true },
+    updatedAt: Date,
+    updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   { _id: false },
 );
@@ -213,6 +255,8 @@ const orderSchema = new Schema(
       default: null,
     },
     handoverType: { type: String, enum: HANDOVER_TYPES, default: null },
+    /** Last time any handover detail was saved (Handover Type & Details step on the mind map). */
+    handoverUpdatedAt: { type: Date, default: null },
     /**
      * Assign to Client Servicing toggle: true (default) = full handover (type, notes, voice notes, documents, shop
      * list); false = client details and contact persons only.
@@ -236,6 +280,8 @@ const orderSchema = new Schema(
           estimationCode: String,
           codesSavedAt: Date,
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */
+          clientId: String,
           assignee: { type: Schema.Types.ObjectId, ref: 'User' },
           assignedAt: Date,
           assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -334,6 +380,8 @@ const orderSchema = new Schema(
     handoverDocumentsArray: { type: [handoverDocSchema], default: [] },
     handoverShopsArray: { type: [handoverShopSchema], default: [] },
     handoverVoiceNotesArray: { type: [voiceNoteSchema], default: [] },
+    handoverMessagesArray: { type: [handoverMessageSchema], default: [] },
+    handoverShopLogs: { type: [shopLogSchema], default: [] },
     leadLogsArray: { type: [leadLogSchema], default: [] },
     requirementNotesArray: { type: [requirementNoteSchema], default: [] },
 
