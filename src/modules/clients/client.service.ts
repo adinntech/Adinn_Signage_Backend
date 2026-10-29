@@ -75,7 +75,7 @@ export async function listClients(q: z.infer<typeof clientListQuery>) {
   if (q.source === 'ZOHO') filter.source = 'ZOHO';
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    filter.$or = [{ name: re }, { clientName: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { phone: re }, { gstin: re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
+    filter.$or = [{ name: re }, { clientName: re }, { code: re }, { clientNo: re }, { city: re }, { email: re }, { phone: re }, { gstin: re }, { 'onboarding.pan': re }, { 'contacts.name': re }, { 'contacts.phone': re }, { 'contacts.email': re }];
   }
   const [items, total] = await Promise.all([
     Client.find(filter).sort(parseSort(q.sort, ['name', 'code', 'clientNo', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),

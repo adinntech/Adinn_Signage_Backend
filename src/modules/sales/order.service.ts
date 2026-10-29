@@ -171,6 +171,27 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
   return { items, meta: pageMeta(q.page, q.limit, total) };
 }
 
+/** Client Servicing dashboard: counts of the orders handed to this person, plus the newest few. Scoped like listOrders. */
+export async function csSummary(actor: Actor) {
+  const mine = { deletedAt: null, csAssignee: new Types.ObjectId(actor.id) };
+  const weekAgo = new Date(Date.now() - 7 * 86_400_000);
+  const [total, unseen, newClient, existingClient, thisWeek, recent] = await Promise.all([
+    SalesOrder.countDocuments(mine),
+    SalesOrder.countDocuments({ ...mine, 'handover.seenAt': null }),
+    SalesOrder.countDocuments({ ...mine, clientType: 'NEW' }),
+    SalesOrder.countDocuments({ ...mine, clientType: { $ne: 'NEW' } }),
+    SalesOrder.countDocuments({ ...mine, 'handover.assignedAt': { $gte: weekAgo } }),
+    SalesOrder.find(mine)
+      .select('orderNo client clientType owner handover createdAt')
+      .sort({ 'handover.assignedAt': -1, createdAt: -1 })
+      .limit(6)
+      .populate('client', 'name clientName clientNo city')
+      .populate('owner', 'name')
+      .lean(),
+  ]);
+  return { total, unseen, newClient, existingClient, thisWeek, recent };
+}
+
 /** Kanban: each column's newest cards plus its total, with the same filters applied to every column. */
 export async function orderBoard(q: z.infer<typeof boardQuery>) {
   const filter: Record<string, unknown> = { deletedAt: null };

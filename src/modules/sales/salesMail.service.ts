@@ -20,8 +20,8 @@ import type { sendEmailBody } from './sales.validators';
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
-export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING' | 'PROJECT_CODE_REQUEST';
-const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form', PROJECT_CODE_REQUEST: 'Project code request' };
+export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING' | 'PROJECT_CODE_REQUEST' | 'CLIENT_CODE_REQUEST' | 'COMBINED_CODE_REQUEST';
+const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form', PROJECT_CODE_REQUEST: 'Project code request', CLIENT_CODE_REQUEST: 'Client code request', COMBINED_CODE_REQUEST: 'Client code and project code request' };
 
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
@@ -37,6 +37,8 @@ export async function deliver(rec: {
   kind: Kind;
   to: string[];
   cc: string[];
+  bcc?: string[] | undefined;
+  from?: string | undefined;
   subject: string;
   body: string;
   attachments: Attachment[];
@@ -70,6 +72,8 @@ export async function deliver(rec: {
         await sendMail({
           to: rec.to.join(', '),
           cc: rec.cc,
+          ...(rec.bcc?.length ? { bcc: rec.bcc } : {}),
+          ...(rec.from ? { from: rec.from } : {}),
           subject: rec.subject,
           html,
           text: htmlToText(rec.body),
@@ -85,7 +89,7 @@ export async function deliver(rec: {
   const entry = {
     _id: emailId,
     kind: rec.kind,
-    from: env.MAIL_FROM ?? '',
+    from: rec.from ?? env.MAIL_FROM ?? '',
     to: rec.to,
     cc: rec.cc,
     subject: rec.subject,

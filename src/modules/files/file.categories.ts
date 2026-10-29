@@ -20,6 +20,9 @@ export const FILE_CATEGORIES = [
   'SALES_APPROVAL_PROOF',
   'SALES_RATE_CARD_PDF',
   'SALES_HANDOVER_DOCUMENT',
+  'CODE_REQUEST_ATTACHMENT',
+  'CONNECT_ATTACHMENT',
+  'WORKSPACE_ATTACHMENT',
   'SALES_HANDOVER_VOICE_NOTE',
   'LEAD_REQUIREMENT_DOCUMENT',
   'LEAD_ONBOARDING_FORM',
@@ -67,6 +70,12 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   SALES_RATE_CARD_PDF: { folder: (c, p) => `BD/Sales/${c}/${p}/Rate_Card`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: true, standalone: true },
   // BD -> Client Servicing handover: shop list Excel and client documents. Removable only until the order is handed over.
   SALES_HANDOVER_DOCUMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
+  // Client Servicing code request emails (client code / project code). Kept with the order's email record.
+  CODE_REQUEST_ATTACHMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Code_Requests`, write: 'sales:read', read: ['sales:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
+  // Adinn Connect messages: documents, images and voice notes. Kept inside the message; deleting the message or its project erases them.
+  CONNECT_ATTACHMENT: { folder: (c, p) => `Connect/${c}/${p}`, write: 'connect:use', read: ['connect:use'], kinds: ['document', 'image', 'sheet', 'audio'], evidence: false, standalone: true },
+  // Project workspace: files on notes and recorded voice notes. Deleting the note, the voice note or the project erases them.
+  WORKSPACE_ATTACHMENT: { folder: (c, p) => `Workspace/${c}/${p}`, write: 'connect:use', read: ['connect:use'], kinds: ['document', 'image', 'sheet', 'audio'], evidence: false, standalone: true },
   // Voice notes recorded (or uploaded) for the handover. Removable only until the order is handed over.
   SALES_HANDOVER_VOICE_NOTE: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover/Voice_Notes`, write: 'sales:write', read: ['sales:read'], kinds: ['audio'], evidence: false, standalone: true },
   // Lead Management > Requirement Discussion: documents and reference images on requirement notes. Deleting a note erases them.
@@ -90,6 +99,9 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   SALES_APPROVAL_PROOF: 'Sales - Approval Proof',
   SALES_RATE_CARD_PDF: 'Sales - Rate Card PDF',
   SALES_HANDOVER_DOCUMENT: 'Sales - Handover Documents',
+  CODE_REQUEST_ATTACHMENT: 'Sales - Code Request Attachments',
+  CONNECT_ATTACHMENT: 'Adinn Connect - Attachments',
+  WORKSPACE_ATTACHMENT: 'Project Workspace - Notes and Voice Notes',
   SALES_HANDOVER_VOICE_NOTE: 'Sales - Handover Voice Notes',
   LEAD_REQUIREMENT_DOCUMENT: 'Lead - Requirement Documents',
   LEAD_ONBOARDING_FORM: 'Lead - Customer Onboarding Form',

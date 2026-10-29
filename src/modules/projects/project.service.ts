@@ -11,6 +11,8 @@ import { notify, type NotifySpec } from '../notifications/notification.service';
 import { Client } from '../clients/client.model';
 import { CommunicationMessage } from '../communications/communication.model';
 import { Site } from '../sites/site.model';
+import { removeProjectConnectData } from '../connect/connect.service';
+import { removeProjectWorkspaceData } from '../workspace/workspace.service';
 import { User } from '../users/user.model';
 import { SurveyArea } from './surveyArea.model';
 import { PROJECT_STATUSES, Project, Requirement, type RequirementType } from './project.model';
@@ -262,7 +264,10 @@ export async function deleteProject(id: string, actor: Actor) {
   if (!p) throw AppError.notFound('Project not found');
   if (actor.role !== 'SUPER_ADMIN' && (p.assignedTo || !(UNASSIGNED.includes(p.status) || p.status === 'CANCELLED'))) throw AppError.conflict(NOT_DELETABLE_HINT);
   // Files first: if one cannot be erased from storage, nothing is deleted and the person can simply try again.
-  const { failed } = await removeProjectFiles(id);
+  const { failed: connectFailed } = await removeProjectConnectData(id);
+  const { failed: workspaceFailed } = await removeProjectWorkspaceData(id);
+  const { failed: projectFailed } = await removeProjectFiles(id);
+  const failed = [...connectFailed, ...workspaceFailed, ...projectFailed];
   if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the project was not deleted: ${failed.join(', ')}. Try again.`);
   return { id, removed: await purgeProjectData(id) };
 }

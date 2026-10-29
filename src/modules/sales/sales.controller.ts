@@ -68,6 +68,10 @@ export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
   ok(res, items, meta);
 });
+export const csSummary = asyncHandler(async (req, res) => {
+  if (!handover.isCs(actorOf(req))) throw AppError.forbidden();
+  ok(res, await orders.csSummary(actorOf(req)));
+});
 export const board = asyncHandler(async (req, res) => {
   if (handover.isCs(actorOf(req))) throw AppError.forbidden();
   ok(res, await orders.orderBoard(boardQuery.parse(req.query)));

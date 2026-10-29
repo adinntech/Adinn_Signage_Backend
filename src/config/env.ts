@@ -73,6 +73,13 @@ const schema = z
     SMTP_USER: optional,
     SMTP_PASS: optional,
     MAIL_FROM: optional,
+    /** Extra sender identities Client Servicing may choose for code request emails, separated by ";" e.g. "Client Servicing <cs@x.com>;Accounts <ac@x.com>". MAIL_FROM is always allowed. */
+    MAIL_FROM_IDENTITIES: optional,
+    /** Recipient groups for code request emails: comma-separated addresses that fill To for a client code / project code request. */
+    CODE_REQUEST_CLIENT_RECIPIENTS: optional,
+    CODE_REQUEST_PROJECT_RECIPIENTS: optional,
+    /** Public URL of the Adinn logo shown in the footer of code request emails. */
+    MAIL_LOGO_URL: optional,
     /** PHP mail service for client emails (Customer Onboarding Form). JSON is POSTed here; the PDF goes as a link. Empty = not sent. */
     PHP_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     /** Optional key sent to the PHP mail service in the X-Api-Key header. */

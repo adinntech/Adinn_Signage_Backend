@@ -300,7 +300,7 @@ export interface EmbeddedFileInput {
   file: UploadedFile;
   actor: Actor;
   /** The record the file belongs to (audit trail). */
-  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client'; id: Types.ObjectId | string };
+  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'ConnectChannel' | 'Project'; id: Types.ObjectId | string };
 }
 
 /**

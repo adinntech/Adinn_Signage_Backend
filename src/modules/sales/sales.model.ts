@@ -11,7 +11,7 @@ export type OrderStage = (typeof ORDER_STAGES)[number];
  * ONBOARDING = Customer Onboarding Form (Lead Management > Client Registered), sent through the PHP mail service.
  * PROJECT_CODE_REQUEST = Project Assign > Recce team: asks for the project code to be created.
  */
-export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING', 'PROJECT_CODE_REQUEST'] as const;
+export const EMAIL_KINDS = ['COMPANY_PROFILE', 'RATE_CARD', 'ONBOARDING', 'PROJECT_CODE_REQUEST', 'CLIENT_CODE_REQUEST', 'COMBINED_CODE_REQUEST'] as const;
 export const DELIVERY_STATUSES = ['SENT', 'FAILED', 'SKIPPED'] as const;
 export const ASSIGN_ROUTES = ['HANDOVER', 'RECCE'] as const;
 export type AssignRoute = (typeof ASSIGN_ROUTES)[number];

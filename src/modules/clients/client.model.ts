@@ -83,6 +83,10 @@ const clientSchema = new Schema(
     state: String,
     pincode: String,
     gstin: { type: String, uppercase: true, trim: true },
+    /** Client code confirmed by the business authority (Code Confirmation). Different from the CRM Client ID (clientNo). */
+    approvedCode: { type: String, uppercase: true, trim: true },
+    approvedCodeAt: Date,
+    approvedCodeBy: { type: Schema.Types.ObjectId, ref: 'User' },
     /** GST certificate scans / PDFs (category CLIENT_GST_CERTIFICATE). */
     gstCertificates: { type: [storedFileSchema], default: [] },
     customFields: { type: [customFieldSchema], default: [] },
@@ -106,4 +110,5 @@ const clientSchema = new Schema(
 clientSchema.index({ name: 1 });
 clientSchema.index({ clientType: 1, createdAt: -1 });
 clientSchema.index({ zohoId: 1 }, { sparse: true });
+clientSchema.index({ approvedCode: 1 }, { unique: true, partialFilterExpression: { approvedCode: { $type: 'string' } } });
 export const Client = model('Client', clientSchema);

@@ -42,6 +42,8 @@ export const PERMISSIONS = [
   'jobs:read',
   // Import existing clients from Zoho Books into the client master (SUPER_ADMIN).
   'zoho:sync',
+  // Adinn Connect: team channels, project channels and direct messages. Every web role has it; what each person can see is decided per channel.
+  'connect:use',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -49,17 +51,17 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS,
   // Client Servicing: the orders BD hands over to them (scoped to their own orders in the sales module) and the clients.
   // Add more permissions here as its modules are built.
-  CLIENT_SERVICING: ['sales:read', 'clients:read'],
-  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client'],
+  CLIENT_SERVICING: ['sales:read', 'clients:read', 'connect:use'],
+  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client', 'connect:use'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',
-    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read',
+    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use',
   ],
   RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute'],
   VENDOR: ['dashboard:view', 'sites:read', 'field:execute'],
-  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read'],
-  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read'],
-  MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read'],
+  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use'],
+  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read', 'connect:use'],
+  MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read', 'connect:use'],
 };
 
 export const permissionsFor = (role: Role): readonly Permission[] => ROLE_PERMISSIONS[role];
