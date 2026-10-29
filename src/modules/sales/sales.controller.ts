@@ -27,6 +27,8 @@ import {
   handoverTypeBody,
   rowIdParam,
   shopRowBody,
+  shopUploadBody,
+  soContactsBody,
   leadCandidatesQuery,
   leadListQuery,
   leadMoveBody,
@@ -117,7 +119,7 @@ export const shops = asyncHandler(async (req, res) => {
   const { items, meta } = await handover.listShops(id(req), shopRowsQuery.parse(req.query));
   ok(res, items, meta);
 });
-export const uploadShops = asyncHandler(async (req, res) => ok(res, await handover.uploadShopList(id(req), uploaded(req)[0], actorOf(req)), undefined, 201));
+export const uploadShops = asyncHandler(async (req, res) => ok(res, await handover.uploadShopList(id(req), uploaded(req)[0], actorOf(req), shopUploadBody.parse(req.body ?? {})), undefined, 201));
 export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
 export const exportShops = asyncHandler(async (req, res) => {
   const f = await handover.exportShops(id(req));
@@ -138,6 +140,7 @@ export const addMessage = asyncHandler(async (req, res) => ok(res, await handove
 export const removeMessage = asyncHandler(async (req, res) => ok(res, await handover.removeMessage(id(req), objectId.parse(req.params.messageId), actorOf(req))));
 export const handoverScope = asyncHandler(async (req, res) => ok(res, await handover.setHandoverScope(id(req), handoverScopeBody.parse(req.body).full, actorOf(req))));
 export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
+export const soContacts = asyncHandler(async (req, res) => ok(res, await handover.setSoContacts(id(req), soContactsBody.parse(req.body).contacts, actorOf(req))));
 export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowId(req), uploaded(req), actorOf(req)), undefined, 201));
 export const removeShopFile = asyncHandler(async (req, res) => ok(res, await handover.removeShopFile(id(req), rowId(req), objectId.parse(req.params.fileId), actorOf(req))));
 export const assignCs =asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));

@@ -29,13 +29,13 @@ const PATTERNS: [MappableField, string[], string[]][] = [
   ['width', ['width', 'w', 'widthft', 'wft', 'widthin'], []],
   ['height', ['height', 'h', 'heightft', 'hft', 'heightin'], []],
   ['gstin', ['gst', 'gstno', 'gstnumber', 'gstin', 'gstnum'], ['gst']],
-  ['mobile', ['mobile', 'mobileno', 'mobilenumber', 'phone', 'phoneno', 'ph', 'phonenumber', 'contactno', 'contactnumber', 'mobilenumberph'], ['mobile', 'phone']],
+  ['mobile', ['mobile', 'mobileno', 'mobilenumber', 'phone', 'phoneno', 'ph', 'phonenumber', 'contactno', 'contactnumber', 'mobilenumberph', 'cell', 'cellno', 'whatsapp', 'whatsappno'], ['mobile', 'phone']],
   ['district', ['district', 'dist'], ['district']],
-  ['pincode', ['pincode', 'pin', 'zip', 'zipcode', 'postalcode'], ['pincode']],
+  ['pincode', ['pincode', 'pin', 'zip', 'zipcode', 'postalcode', 'postcode', 'pinno'], ['pincode', 'postalcode']],
   ['address3', ['addressline3', 'address3', 'addr3'], ['line3', 'address3']],
   ['address2', ['addressline2', 'address2', 'addr2'], ['line2', 'address2']],
   ['address1', ['addressline1', 'address1', 'address', 'addr', 'fulladdress', 'completeaddress'], ['address']],
-  ['shopName', ['shopname', 'shop', 'storename', 'store', 'outletname', 'outlet', 'firmname', 'firm', 'businessname', 'dealershopname'], ['shopname', 'storename', 'outletname']],
+  ['shopName', ['shopname', 'shop', 'storename', 'store', 'outletname', 'outlet', 'firmname', 'firm', 'businessname', 'dealershopname', 'retailer', 'retailername', 'countername'], ['shopname', 'storename', 'outletname', 'retailername']],
   ['dealerName', ['dealername', 'dealer', 'customername', 'customer', 'customerdealername', 'partyname', 'party', 'ownername', 'name'], ['dealer', 'customer']],
   ['contactPerson', ['contactperson', 'contactname', 'contact'], ['contactperson']],
   ['location', ['location', 'area', 'locality', 'place', 'town', 'city'], ['location']],
@@ -43,7 +43,7 @@ const PATTERNS: [MappableField, string[], string[]][] = [
   ['boardType', ['boardtype', 'signagetype', 'type'], ['boardtype']],
   ['quantity', ['qty', 'quantity', 'noofboards', 'boards', 'nos'], []],
   ['remarks', ['remarks', 'remark', 'notes', 'comments', 'comment'], ['remark']],
-  ['clientSiteCode', ['sitecode', 'siteid', 'clientcode', 'storecode', 'dealercode', 'code', 'clientsitecode'], ['sitecode', 'storecode']],
+  ['clientSiteCode', ['sitecode', 'siteid', 'clientcode', 'storecode', 'dealercode', 'code', 'clientsitecode', 'outletcode', 'outletid', 'shopcode', 'retailercode', 'customercode'], ['sitecode', 'storecode', 'outletcode']],
 ];
 
 /** Suggest header -> field. Each field is used at most once; unmatched headers become 'extra'. */

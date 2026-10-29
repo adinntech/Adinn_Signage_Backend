@@ -66,7 +66,7 @@ const shopTypesList: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType soContacts shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -83,7 +83,7 @@ export async function getRecce(id: string, actor: Actor) {
   const zohoNo = existing ? await zohoClientIdOf(client) : (client?.zohoCustomerNo ?? null);
   const contacts = client?.contacts ?? [];
   // The Recce team always gets the full handover (there is no "client details only" option here).
-  const handoverMissing = handoverGaps({ ...o, handoverFull: true }, contacts.length);
+  const handoverMissing = handoverGaps({ ...o, handoverFull: true });
   const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
   // Steps in order: handover details, the request email, the codes (+ Client ID for a New client), then the assignment.
   const missing = r?.assignee
@@ -152,6 +152,9 @@ export async function getRecce(id: string, actor: Actor) {
             ? contacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.designation, k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')
             : 'None added'
         }</p>` +
+        (o.handoverType === 'ASO' && o.soContacts?.length
+          ? `<p><strong>SO contacts</strong><br>${o.soContacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')}</p>`
+          : '') +
         (shopRows || docs.length
           ? `<p>Attached: ${[shopRows ? `shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, docs.length ? `${docs.length} document${docs.length === 1 ? '' : 's'} from the handover` : null].filter(Boolean).join(' and ')}.</p>`
           : '') +
@@ -171,7 +174,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   }
   // Steps in order: the handover details come first (the email carries them).
   const client = await Client.findById(o.client).select('name contacts').lean();
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true }, client?.contacts?.length ?? 0);
+  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Handover Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRoute(o, 'RECCE');
@@ -263,10 +266,15 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
   if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
   const client = await Client.findById(o.client).select('name contacts').lean();
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true }, client?.contacts?.length ?? 0);
+  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
-  const contacts = (client?.contacts ?? []).filter((k) => k.phone && k.email).map((k) => ({ name: k.name, email: k.email!, phone: k.phone! }));
-  if (!contacts.length) throw invalid('contacts', 'Add a contact person with both a mobile number and an email: the Recce team needs one to call');
+  // Contact persons are optional. Those with a mobile and an email go on the project (ASO: the SO contacts too).
+  const so = o.handoverType === 'ASO' ? (o.soContacts ?? []) : [];
+  const contacts = [...(client?.contacts ?? []), ...so]
+    .filter((k) => k.name && k.phone && k.email)
+    .map((k) => ({ name: k.name!, email: k.email!, phone: k.phone! }))
+    .filter((k, i, all) => all.findIndex((x) => x.phone === k.phone || x.email === k.email) === i)
+    .slice(0, 20);
   const person = await User.findOne({ _id: input.assigneeId, role: { $in: ['OPERATIONS', 'RECCE_COORDINATOR'] }, isActive: true, deletedAt: null }).select('name').lean();
   if (!person) throw invalid('assigneeId', 'Choose an active Recce / Operations person');
   await assertCodesFree(o._id, codes.projectCode, codes.estimationCode);

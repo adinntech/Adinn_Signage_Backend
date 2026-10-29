@@ -7,8 +7,8 @@ import { Client } from '../clients/client.model';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
-import { buildTemplate, parseWorkbook } from '../sites/excel.service';
-import { autoMap, dupKeyOf, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
+import { buildTemplate, MAX_ROWS, readGrids, type SheetGrid } from '../sites/excel.service';
+import { autoMap, dupKeyOf, MAPPABLE, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
 import { User } from '../users/user.model';
 import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
@@ -46,18 +46,13 @@ type GapInput = {
 const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
 
 /**
- * What is still missing before the order can be handed over (empty = ready). ASO: contact persons, no shop list.
- * Shop types: at least one shop row and no row with errors (Total Shops = the rows in the table).
+ * What is still missing before the order can be handed over (empty = ready). Contact persons are optional.
+ * ASO: no shop list. Shop types: at least one shop row and no row with errors (Total Shops = the rows in the table).
  */
-export function handoverGaps(o: GapInput, contactCount: number): string[] {
-  if (!isFull(o)) return contactCount ? [] : ['Add at least one contact person'];
+export function handoverGaps(o: GapInput): string[] {
+  if (!isFull(o)) return [];
   if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
-  if (o.handoverType === 'ASO') {
-    const g: string[] = [];
-    if (!contactCount) g.push('Add at least one contact person');
-    if (o.shopList?.total) g.push('Clear the shop list: an ASO handover goes without one');
-    return g;
-  }
+  if (o.handoverType === 'ASO') return o.shopList?.total ? ['Clear the shop list: an ASO handover goes without one'] : [];
   if (!o.shopList?.total) return ['Add the shop list: upload the Excel or add the shops'];
   const bad = o.shopList.error ?? 0;
   if (bad) return [`${bad} shop row${bad === 1 ? ' has' : 's have'} errors: edit or delete ${bad === 1 ? 'it' : 'them'}`];
@@ -67,13 +62,12 @@ export function handoverGaps(o: GapInput, contactCount: number): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverFull handoverType declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
-  const client = await Client.findById(o.client).select('contacts').lean();
   const shops = o.handoverShopsArray ?? [];
   return {
     orderId: String(o._id),
@@ -92,7 +86,10 @@ export async function getHandover(id: string) {
     documents: [...(o.handoverDocumentsArray ?? [])].filter((d) => d.kind === 'SHOP_LIST').sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)),
     /** Communication & attachments, oldest first (chat order). */
     messages: o.handoverMessagesArray ?? [],
-    missing: o.csAssignee ? [] : handoverGaps(o, client?.contacts?.length ?? 0),
+    /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
+    soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    updatedAt: o.handoverUpdatedAt ?? null,
+    missing: o.csAssignee ? [] : handoverGaps(o),
   };
 }
 
@@ -179,6 +176,29 @@ export async function setHandoverType(id: string, type: HandoverType, actor: Act
   return getHandover(id);
 }
 
+type SoContact = { name: string; phone: string; email?: string | undefined; isPrimary: boolean };
+const soLine = (k: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }) =>
+  [k.name, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
+
+/**
+ * ASO: saves the whole SO contact list (validated and given one primary by soContactsBody). The list is kept apart
+ * from the client's contact persons and stays on the order if the type changes later (shown for ASO only).
+ */
+export async function setSoContacts(id: string, contacts: SoContact[], actor: Actor) {
+  const o = await liveOrder(id);
+  assertNotHandedOver(o);
+  if (o.handoverType !== 'ASO') throw AppError.conflict('SO contacts are for ASO handovers. Choose ASO first.');
+  await handoverRoute(o);
+  const before = (o.soContacts ?? []).map(soLine);
+  const after = contacts.map(soLine);
+  const r = await SalesOrder.updateOne(stillOpen(o), { $set: { soContacts: contacts.map((k) => ({ ...k, email: k.email ?? null })), updatedBy: actor.id } });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  if (before.join('\n') !== after.join('\n')) {
+    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `SO contacts saved (${contacts.length})` });
+  }
+  return getHandover(id);
+}
+
 /* ------------------------------- shop table ------------------------------- */
 
 /** Fields of a shop row the BD can edit (same names as the project site import). */
@@ -217,10 +237,34 @@ function cleanRow(values: ShopRowInput, type: string | null | undefined) {
   };
 }
 
-/** The filled fields of a row (history before / after values). */
-const snapshot = (r: Record<string, unknown>) => Object.fromEntries(SHOP_FIELDS.filter((f) => r[f] !== null && r[f] !== undefined && r[f] !== '').map((f) => [f, r[f]]));
+type Extra = Record<string, string>;
+const MAX_EXTRA = 40;
+/** Extra (unmapped) columns: blank values dropped, keys safe for MongoDB (no dots, no leading $). */
+function cleanExtra(e: Record<string, unknown> | null | undefined): Extra | undefined {
+  const out: Extra = {};
+  for (const [k, v] of Object.entries(e ?? {})) {
+    const key = k.replace(/\./g, ' ').replace(/^\$+/, '').trim().slice(0, 120);
+    const val = v == null ? '' : String(v).trim().slice(0, 500);
+    if (key && val && Object.keys(out).length < MAX_EXTRA) out[key] = val;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+/** Extra columns whose value changed (history), as { header: value } before and after. */
+function extraDiff(a: Extra | undefined, b: Extra | undefined) {
+  const keys = [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].filter((k) => (a?.[k] ?? '') !== (b?.[k] ?? ''));
+  return keys.length ? { before: Object.fromEntries(keys.map((k) => [k, a?.[k] ?? null])), after: Object.fromEntries(keys.map((k) => [k, b?.[k] ?? null])) } : null;
+}
+
+/** The filled fields of a row (history before / after values), with its extra columns. */
+const snapshot = (r: Record<string, unknown>) => {
+  const s: Record<string, unknown> = Object.fromEntries(SHOP_FIELDS.filter((f) => r[f] !== null && r[f] !== undefined && r[f] !== '').map((f) => [f, r[f]]));
+  if (r.extra && Object.keys(r.extra).length) s.extra = r.extra;
+  return s;
+};
+/** How a row is named in the history, so it stays recognisable after it is deleted. */
+const rowLabel = (r: Record<string, unknown>) => [`Row ${r.rowNumber ?? '?'}`, r.shopName || r.dealerName].filter(Boolean).join(' · ');
 const newRowId = () => new Types.ObjectId().toHexString();
-const shopLog = (actor: Actor, action: string, rowId: string | null, extra: { before?: unknown; after?: unknown; note?: string } = {}) => ({
+const shopLog = (actor: Actor, action: string, rowId: string | null, extra: { before?: unknown; after?: unknown; note?: string; label?: string } = {}) => ({
   _id: new Types.ObjectId(),
   rowId,
   action,
@@ -260,8 +304,10 @@ async function findRow(orderId: Types.ObjectId, rowId: string) {
   return row as typeof row & Record<string, unknown>;
 }
 
+type ShopRowBody = ShopRowInput & { extra?: Extra | undefined };
+
 /** Add one shop row by hand. */
-export async function addShopRow(id: string, values: ShopRowInput, actor: Actor) {
+export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   assertShopType(o);
@@ -270,9 +316,9 @@ export async function addShopRow(id: string, values: ShopRowInput, actor: Actor)
   const c = cleanRow(values, o.handoverType);
   const last = await SalesOrder.findById(o._id).select('handoverShopsArray.rowNumber').lean();
   const rowNumber = Math.max(0, ...(last?.handoverShopsArray ?? []).map((r) => r.rowNumber ?? 0)) + 1;
-  const row = { rowNumber, ...c.fields, state: c.state, issues: c.issues, rowId: newRowId(), updatedAt: new Date(), updatedBy: new Types.ObjectId(actor.id) };
+  const row = { rowNumber, ...c.fields, extra: cleanExtra(values.extra), state: c.state, issues: c.issues, rowId: newRowId(), updatedAt: new Date(), updatedBy: new Types.ObjectId(actor.id) };
   const r = await SalesOrder.updateOne(stillOpen(o), {
-    $push: { handoverShopsArray: row, handoverShopLogs: shopLog(actor, 'ADD', row.rowId, { after: snapshot(row) }) },
+    $push: { handoverShopsArray: row, handoverShopLogs: shopLog(actor, 'ADD', row.rowId, { after: snapshot(row), label: rowLabel(row) }) },
     $set: { updatedBy: actor.id },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
@@ -281,7 +327,7 @@ export async function addShopRow(id: string, values: ShopRowInput, actor: Actor)
 }
 
 /** Edit a shop row: the changed fields are logged with their old and new values. */
-export async function updateShopRow(id: string, rowId: string, values: ShopRowInput, actor: Actor) {
+export async function updateShopRow(id: string, rowId: string, values: ShopRowBody, actor: Actor) {
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   assertShopType(o);
@@ -289,8 +335,11 @@ export async function updateShopRow(id: string, rowId: string, values: ShopRowIn
   const before = await findRow(o._id, rowId);
   const c = cleanRow(values, o.handoverType);
   const changed = SHOP_FIELDS.filter((f) => String(before[f] ?? '') !== String(c.fields[f] ?? ''));
-  if (!changed.length) return before;
-  const set: Record<string, unknown> = { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id };
+  const oldExtra = cleanExtra(before.extra as Extra | undefined);
+  const newExtra = values.extra === undefined ? oldExtra : cleanExtra(values.extra);
+  const extraChange = extraDiff(oldExtra, newExtra);
+  if (!changed.length && !extraChange) return before;
+  const set: Record<string, unknown> = { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.extra': newExtra ?? null, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id };
   for (const f of SHOP_FIELDS) set[`handoverShopsArray.$.${f}`] = c.fields[f];
   const r = await SalesOrder.updateOne(
     { ...stillOpen(o), 'handoverShopsArray.rowId': rowId },
@@ -298,8 +347,9 @@ export async function updateShopRow(id: string, rowId: string, values: ShopRowIn
       $set: set,
       $push: {
         handoverShopLogs: shopLog(actor, 'EDIT', rowId, {
-          before: Object.fromEntries(changed.map((f) => [f, before[f] ?? null])),
-          after: Object.fromEntries(changed.map((f) => [f, c.fields[f]])),
+          before: { ...Object.fromEntries(changed.map((f) => [f, before[f] ?? null])), ...(extraChange ? { extra: extraChange.before } : {}) },
+          after: { ...Object.fromEntries(changed.map((f) => [f, c.fields[f]])), ...(extraChange ? { extra: extraChange.after } : {}) },
+          label: rowLabel({ ...before, ...c.fields }),
         }),
       },
     },
@@ -317,7 +367,7 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   const before = await findRow(o._id, rowId);
   const r = await SalesOrder.updateOne(stillOpen(o), {
     $pull: { handoverShopsArray: { rowId } },
-    $push: { handoverShopLogs: shopLog(actor, 'DELETE', rowId, { before: snapshot(before) }) },
+    $push: { handoverShopLogs: shopLog(actor, 'DELETE', rowId, { before: snapshot(before), label: rowLabel(before) }) },
     $set: { updatedBy: actor.id },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
@@ -417,26 +467,119 @@ async function storeHandoverFile(o: { _id: Types.ObjectId; orderNo: string; clie
   return storeEmbeddedFile({ category, clientName: client?.name ?? 'Client', folderKey: o.orderNo, file, actor, owner: ownerOf(o._id) });
 }
 
+const NAME_FIELDS: readonly string[] = ['shopName', 'dealerName'];
+const HEADER_SCAN = 15;
+const SIZED_TARGETS: readonly string[] = ['width', 'height', 'size', 'unit'];
+
+/** Header cells made non-blank and unique ("Column 3", "Mobile (2)"), and safe as stored keys. */
+function headerNames(cells: string[], width: number) {
+  const seen = new Map<string, number>();
+  return Array.from({ length: width }, (_, i) => {
+    const base = (cells[i] ?? '').replace(/\./g, ' ').replace(/^\$+/, '').replace(/\s+/g, ' ').trim().slice(0, 120) || `Column ${i + 1}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n > 1 ? `${base} (${n})` : base;
+  });
+}
+
+/** The likeliest header row of a sheet: the most recognised columns, one of them a shop or dealer name. */
+function detectHeader(g: SheetGrid): { index: number; score: number } | null {
+  let best: { index: number; score: number } | null = null;
+  g.rows.slice(0, HEADER_SCAN).forEach((r, index) => {
+    const known = Object.values(autoMap(headerNames(r.cells, r.cells.length))).filter((t) => t !== 'extra' && t !== 'ignore');
+    if (known.some((t) => NAME_FIELDS.includes(t)) && (!best || known.length > best.score)) best = { index, score: known.length };
+  });
+  return best;
+}
+
+type UploadOptions = { sheet?: string | undefined; headerRow?: number | undefined; mapping?: Record<string, string> | undefined; preview?: boolean | undefined };
+
 /**
- * Shop list Excel / CSV, read with the project site import rules (header auto-mapping, phone / GST / size checks).
- * Rows are ADDED to the table; a row carrying a "Row ID" of the downloaded Excel updates that row instead (its images
- * stay with it). Every change is logged.
+ * Works out which sheet, header row and column mapping to import. When the workbook is ambiguous (several sheets with
+ * data, no recognisable header, no shop / dealer name column) nothing is guessed: a 422 SHOP_MAPPING_REQUIRED carries
+ * a compact preview so the BD picks the sheet / header row and maps the columns, then uploads again with them.
  */
-export async function uploadShopList(id: string, file: UploadedFile | undefined, actor: Actor) {
+export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: string | null | undefined) {
+  const filled = grids.filter((g) => g.rows.length);
+  if (!filled.length) throw AppError.badRequest('The file is empty: no sheet has any rows.');
+  const fields = MAPPABLE.filter((f) => type === 'SHOP_MEASUREMENT' || !SIZED_TARGETS.includes(f));
+  const ask = (sheet: SheetGrid, headerIndex: number, message: string, headers: string[], mapping: Record<string, MapTarget>, problems: string[] = []): never => {
+    throw new AppError(422, 'SHOP_MAPPING_REQUIRED', message, {
+      preview: {
+        sheets: filled.map((g) => ({ name: g.name, rows: g.rows.length })),
+        sheet: sheet.name,
+        headerRow: sheet.rows[headerIndex]?.rowNumber ?? null,
+        rows: sheet.rows.slice(0, 8).map((r) => ({ rowNumber: r.rowNumber, cells: r.cells.slice(0, 40) })),
+        headers,
+        mapping,
+        problems,
+        fields,
+      },
+    });
+  };
+
+  let sheet: SheetGrid | undefined;
+  if (opts.sheet) {
+    sheet = filled.find((g) => g.name === opts.sheet);
+    if (!sheet) throw new AppError(422, 'VALIDATION_ERROR', `Sheet "${opts.sheet}" was not found or is empty`, [{ path: 'sheet', message: 'Choose another sheet' }]);
+  } else if (filled.length === 1) sheet = filled[0];
+  else {
+    const named = filled.filter((g) => detectHeader(g));
+    if (named.length === 1) sheet = named[0];
+  }
+  if (!sheet) {
+    const first = filled[0]!;
+    const h = headerNames(first.rows[0]!.cells, first.rows[0]!.cells.length);
+    return ask(first, 0, 'This workbook has several sheets with data. Choose the sheet with the shop list.', h, autoMap(h));
+  }
+
+  let headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? -1);
+  if (opts.headerRow && headerIndex < 0) throw new AppError(422, 'VALIDATION_ERROR', `Row ${opts.headerRow} is blank or outside the sheet`, [{ path: 'headerRow', message: 'Choose another header row' }]);
+  const guessed = headerIndex < 0;
+  if (guessed) headerIndex = 0;
+  const dataRows = sheet.rows.slice(headerIndex + 1);
+  const width = Math.max(sheet.rows[headerIndex]!.cells.length, ...dataRows.slice(0, 2000).map((r) => r.cells.length));
+  const headers = headerNames(sheet.rows[headerIndex]!.cells, width);
+
+  let mapping: Record<string, MapTarget>;
+  if (opts.mapping) {
+    const allowed = new Set<string>([...fields, 'extra', 'ignore']);
+    mapping = Object.fromEntries(headers.map((h) => [h, (allowed.has(opts.mapping![h] ?? '') ? opts.mapping![h] : 'extra') as MapTarget]));
+  } else {
+    mapping = autoMap(headers);
+    for (const h of headers) {
+      if (EXPORT_ONLY.includes(h.toLowerCase())) mapping[h] = 'ignore';
+      // Shop Details Only has no size: a size column stays on the row as an extra column instead.
+      else if (mapping[h] !== 'extra' && !fields.includes(mapping[h] as MappableField)) mapping[h] = 'extra';
+    }
+  }
+  const problems = validateMapping(mapping, 'MEASUREMENT_REQUIRED');
+  // The mapping step re-reads another sheet / header row without importing anything.
+  if (opts.preview) return ask(sheet, headerIndex, 'Check the sheet, header row and columns, then import.', headers, mapping, problems);
+  if (guessed && !opts.mapping) return ask(sheet, headerIndex, 'No shop or dealer name column was recognised. Choose the header row and match the columns.', headers, mapping, problems);
+  if (problems.length) return ask(sheet, headerIndex, `${problems.join('. ')}.`, headers, mapping, problems);
+  if (!dataRows.length) throw new AppError(422, 'VALIDATION_ERROR', 'The sheet has a header row but no shop rows below it', [{ path: 'file', message: 'No data rows' }]);
+  if (dataRows.length > MAX_ROWS) throw AppError.badRequest(`Too many rows (limit ${MAX_ROWS}). Split the file and upload it in parts.`);
+  return { sheet: sheet.name, headers, mapping, rows: dataRows.map((r) => ({ rowNumber: r.rowNumber, raw: Object.fromEntries(headers.map((h, i) => [h, r.cells[i] ?? ''])) as Record<string, string> })) };
+}
+
+/**
+ * Shop list Excel (.xlsx / .xls) or CSV, read with the project site import rules (header auto-mapping, phone / GST /
+ * size checks). Any column order and header names work; unrecognised columns are kept on the row as extra columns.
+ * Rows are ADDED to the table; a row carrying a "Row ID" of the downloaded Excel updates that row instead (its images
+ * stay with it). Rows with problems are kept and flagged, never dropped. Every change is logged.
+ */
+export async function uploadShopList(id: string, file: UploadedFile | undefined, actor: Actor, opts: UploadOptions = {}) {
   if (!file) throw new AppError(422, 'VALIDATION_ERROR', 'Choose the shop list file', [{ path: 'file', message: 'Choose the shop list file' }]);
-  if (!/\.(xlsx|csv)$/i.test(file.originalname)) throw AppError.badRequest('Upload the shop list as an .xlsx or .csv file');
+  if (!/\.(xlsx|xls|csv)$/i.test(file.originalname)) throw AppError.badRequest('Upload the shop list as an Excel (.xlsx / .xls) or .csv file');
   const o = await liveOrder(id);
   assertNotHandedOver(o);
   assertShopType(o);
-  await handoverRoute(o);
   await ensureRowIds(o._id);
 
-  const parsed = await parseWorkbook(file.buffer, file.originalname);
-  const mapping = autoMap(parsed.headers);
-  const rowIdHeader = parsed.headers.find((h) => h.trim().toLowerCase() === 'row id');
-  for (const h of parsed.headers) if (EXPORT_ONLY.includes(h.trim().toLowerCase())) mapping[h] = 'ignore';
-  const problems = validateMapping(mapping, 'MEASUREMENT_REQUIRED');
-  if (problems.length) throw new AppError(422, 'VALIDATION_ERROR', `${problems.join('. ')}. Use the shop list template columns.`, problems.map((message) => ({ path: 'file', message })));
+  const parsed = resolveImport(await readGrids(file.buffer, file.originalname), opts, o.handoverType);
+  const mapping = parsed.mapping;
+  const rowIdHeader = parsed.headers.find((h) => h.toLowerCase() === 'row id');
 
   const current = (await SalesOrder.findById(o._id).select('handoverShopsArray').lean())?.handoverShopsArray ?? [];
   const byId = new Map(current.map((r) => [r.rowId!, r as typeof r & Record<string, unknown>]));
@@ -450,20 +593,36 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const updates = new Map<string, Record<string, unknown>>();
   const added: Record<string, unknown>[] = [];
   const logs: ReturnType<typeof shopLog>[] = [];
+  /** Rows of the file that came in with problems (Excel line, table row), so the BD can fix them in the table. */
+  const flagged: { line: number; row: number; state: string; issues: string[] }[] = [];
+  const source = `${file.originalname} (${parsed.sheet})`;
   for (const row of parsed.rows) {
     const values: Record<string, string> = {};
+    const extraRaw: Record<string, string> = {};
     for (const [header, target] of Object.entries(mapping) as [string, MapTarget][]) {
       const v = row.raw[header] ?? '';
-      if (target !== 'ignore' && target !== 'extra' && v) values[target as MappableField] = v;
+      if (!v || target === 'ignore') continue;
+      if (target === 'extra') extraRaw[header] = v;
+      else values[target as MappableField] = v;
     }
+    const extra = cleanExtra(extraRaw);
     const c = cleanRow(values, o.handoverType);
     const rid = rowIdHeader ? (row.raw[rowIdHeader] ?? '').trim() : '';
     const existing = rid ? byId.get(rid) : undefined;
     if (existing) {
       const changed = SHOP_FIELDS.filter((f) => String(existing[f] ?? '') !== String(c.fields[f] ?? ''));
-      if (!changed.length) continue;
-      updates.set(rid, { ...c.fields, state: c.state, issues: c.issues, updatedAt: now, updatedBy: new Types.ObjectId(actor.id) });
-      logs.push(shopLog(actor, 'EDIT', rid, { before: Object.fromEntries(changed.map((f) => [f, existing[f] ?? null])), after: Object.fromEntries(changed.map((f) => [f, c.fields[f]])), note: `From ${file.originalname}` }));
+      const xd = extraDiff(cleanExtra(existing.extra as Extra | undefined), extra);
+      if (!changed.length && !xd) continue;
+      updates.set(rid, { ...c.fields, extra: extra ?? null, state: c.state, issues: c.issues, updatedAt: now, updatedBy: new Types.ObjectId(actor.id) });
+      logs.push(
+        shopLog(actor, 'EDIT', rid, {
+          before: { ...Object.fromEntries(changed.map((f) => [f, existing[f] ?? null])), ...(xd ? { extra: xd.before } : {}) },
+          after: { ...Object.fromEntries(changed.map((f) => [f, c.fields[f]])), ...(xd ? { extra: xd.after } : {}) },
+          note: `From ${source}`,
+          label: rowLabel({ ...existing, ...c.fields }),
+        }),
+      );
+      if (c.state !== 'VALID') flagged.push({ line: row.rowNumber, row: existing.rowNumber ?? 0, state: c.state, issues: c.issues });
       continue;
     }
     const key = dupKeyOf(c.fields as never);
@@ -475,9 +634,10 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     }
     const rowNumber = ++next;
     if (key) seen.set(key, `row ${rowNumber}`);
-    const fresh = { rowNumber, ...c.fields, state, issues, rowId: newRowId(), updatedAt: now, updatedBy: new Types.ObjectId(actor.id) };
+    const fresh = { rowNumber, ...c.fields, extra, state, issues, rowId: newRowId(), updatedAt: now, updatedBy: new Types.ObjectId(actor.id) };
     added.push(fresh);
-    logs.push(shopLog(actor, 'ADD', fresh.rowId, { after: snapshot(fresh), note: `From ${file.originalname}` }));
+    logs.push(shopLog(actor, 'ADD', fresh.rowId, { after: snapshot(fresh), note: `From ${source}`, label: rowLabel(fresh) }));
+    if (state !== 'VALID') flagged.push({ line: row.rowNumber, row: rowNumber, state, issues });
   }
   if (!added.length && !updates.size) throw AppError.badRequest('Nothing to add: the file has no new or changed shop rows.');
 
@@ -485,11 +645,15 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   const stored = await storeHandoverFile(o, file, actor);
   // Large imports keep one summary entry instead of a log line per row.
   const history = logs.length <= 500 ? logs : [];
-  history.push(shopLog(actor, 'IMPORT', null, { note: `${file.originalname}: ${added.length} added, ${updates.size} updated` }));
+  history.push(shopLog(actor, 'IMPORT', null, { note: `${source}: ${added.length} added, ${updates.size} updated` }));
+  const count = (st: string) => merged.filter((r) => r.state === st).length;
+  // The summary is written whole: a dotted "shopList.x" path cannot be set while shopList is null (a new or cleared
+  // table), which made MongoDB reject the first upload of every order.
+  const shopList = { fileId: stored.fileId, fileName: file.originalname.slice(0, 200), uploadedBy: new Types.ObjectId(actor.id), uploadedAt: now, total: merged.length, valid: count('VALID'), warning: count('WARNING'), error: count('ERROR'), duplicates: 0 };
   const r = await SalesOrder.updateOne(
     { ...stillOpen(o), handoverShopsArray: { $size: current.length } },
     {
-      $set: { handoverShopsArray: merged, 'shopList.fileId': stored.fileId, 'shopList.fileName': file.originalname.slice(0, 200), 'shopList.uploadedBy': actor.id, 'shopList.uploadedAt': now, updatedBy: actor.id },
+      $set: { handoverShopsArray: merged, shopList, declaredShopTotal: merged.length, handoverUpdatedAt: now, updatedBy: actor.id },
       $push: {
         handoverShopLogs: { $each: history },
         handoverDocumentsArray: { kind: 'SHOP_LIST', file: stored, uploadedBy: actor.id, role: actor.role, createdAt: now },
@@ -503,9 +667,18 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     await discardStoredFiles([stored]);
     throw AppError.conflict('The shop list changed meanwhile (or the order was handed over). Reload and upload again.');
   }
-  await syncShopSummary(o._id);
-  await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${file.originalname}: ${added.length} rows added, ${updates.size} updated` });
-  return { ...(await getHandover(id)), imported: { added: added.length, updated: updates.size } };
+  await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${source}: ${added.length} rows added, ${updates.size} updated` });
+  return {
+    ...(await getHandover(id)),
+    imported: {
+      added: added.length,
+      updated: updates.size,
+      sheet: parsed.sheet,
+      extraColumns: parsed.headers.filter((h) => mapping[h] === 'extra'),
+      flaggedCount: flagged.length,
+      flagged: flagged.slice(0, 100),
+    },
+  };
 }
 
 /** Clears the whole shop table (before handover only); the rows stay in the history. */
@@ -556,6 +729,10 @@ export async function exportShops(id: string) {
     ['Qty', (r) => r.quantity, 7],
     ['Remarks', (r) => r.remarks, 28],
     ['Client Site Code', (r) => r.clientSiteCode, 16],
+    // Extra columns of the uploaded files, in the order they first appear (uploading this file again keeps them).
+    ...[...new Set((o.handoverShopsArray ?? []).flatMap((r) => Object.keys((r as { extra?: Record<string, string> }).extra ?? {})))].map(
+      (k) => [k, (r: Record<string, any>) => r.extra?.[k], 18] as [string, (r: Record<string, any>) => unknown, number],
+    ),
     ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0, 8]] as [string, (r: Record<string, any>) => unknown, number][]) : []),
     ['Status', (r) => r.state, 10],
     ['Issues', (r) => (r.issues ?? []).join('; '), 36],
@@ -612,11 +789,17 @@ export async function addMessage(id: string, input: { text?: string | undefined;
     await discardStoredFiles(stored);
     throw e;
   }
-  if (o.csAssignee) {
+  // The other side hears about it: a Client Servicing reply goes to the BD (order owner and who handed it over);
+  // a BD message after handover goes to the Client Servicing person.
+  const recipients = (isCs(actor) ? [o.owner, o.handover?.assignedBy] : [o.csAssignee])
+    .filter((u): u is NonNullable<typeof u> => !!u)
+    .map(String)
+    .filter((u, i, all) => u !== actor.id && all.indexOf(u) === i);
+  if (recipients.length) {
     await notify({
-      recipients: [o.csAssignee],
+      recipients,
       kind: 'ORDER_ASSIGNED',
-      title: 'New handover message',
+      title: isCs(actor) ? 'Client Servicing replied on a handover' : 'New handover message',
       body: `${input.voice ? 'A voice note' : stored.length ? `A message with ${stored.length} file${stored.length === 1 ? '' : 's'}` : 'A message'} was added to ${o.orderNo}.`,
       order: { _id: o._id, orderNo: o.orderNo },
       actorId: actor.id,
@@ -648,7 +831,7 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
-export async function clientSnapshot(o: { client: unknown; clientType?: string | null }) {
+export async function clientSnapshot(o: { client: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null }) {
   const c = await Client.findById(o.client).select('name clientName clientNo email phone gstin gstCertificates customFields contacts').lean();
   if (!c) return null;
   const crm = o.clientType !== 'EXISTING';
@@ -663,6 +846,7 @@ export async function clientSnapshot(o: { client: unknown; clientType?: string |
     gstCertificates: crm ? (c.gstCertificates ?? []) : undefined,
     customFields: crm ? (c.customFields ?? []).map((f) => ({ label: f.label, value: f.value })) : undefined,
     contacts: (c.contacts ?? []).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
+    soContacts: o.handoverType === 'ASO' ? (o.soContacts ?? []).map((k) => ({ name: k.name, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
     takenAt: new Date(),
   };
 }
@@ -680,8 +864,8 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
   if (o.recce?.assignee) throw AppError.conflict('This project is already assigned to the Recce team.');
   if (!handoverUnlocked(o.lead)) throw AppError.conflict('Assign Client Servicing from the Project Assign stage in Lead Management.');
   if ((await routeOf(o)) === 'RECCE') throw AppError.conflict(ROUTE_LOCKED.RECCE);
-  const client = await Client.findById(o.client).select('name contacts').lean();
-  const gaps = handoverGaps(o, client?.contacts?.length ?? 0);
+  const client = await Client.findById(o.client).select('name').lean();
+  const gaps = handoverGaps(o);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
   const cs = await User.findOne({ _id: input.csUserId, role: 'CLIENT_SERVICING', isActive: true, deletedAt: null }).select('name').lean();
   if (!cs) throw new AppError(422, 'VALIDATION_ERROR', 'Choose an active Client Servicing person', [{ path: 'csUserId', message: 'Choose an active Client Servicing person' }]);
@@ -700,7 +884,8 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
       'recce.assignee': null,
       assignRoute: { $in: [null, 'HANDOVER'] },
       ...(full
-        ? { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.fileId': o.shopList?.fileId, shopsVerifiedAt: { $ne: null } }) }
+        ? // Shop types: the table checked above (row count, no error rows) is still the one handed over.
+          { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.total': o.shopList?.total, 'shopList.error': { $in: [0, null] } }) }
         : { handoverFull: false }),
       ...(lead ? { 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' } : {}),
     },

@@ -157,6 +157,8 @@ const handoverMessageSchema = new Schema({
 export const SHOP_LOG_ACTIONS = ['ADD', 'EDIT', 'DELETE', 'IMPORT', 'CLEAR', 'IMAGE_ADD', 'IMAGE_REMOVE'] as const;
 const shopLogSchema = new Schema({
   rowId: String,
+  /** Row identity as the BD sees it ("Row 12 · ABC Traders"), kept so deleted rows stay recognisable. */
+  label: String,
   action: { type: String, enum: SHOP_LOG_ACTIONS, required: true },
   before: { type: Schema.Types.Mixed, default: undefined },
   after: { type: Schema.Types.Mixed, default: undefined },
@@ -189,6 +191,7 @@ const handoverShopSchema = new Schema(
     district: String,
     address1: String,
     address2: String,
+    address3: String,
     pincode: String,
     mobile: String,
     mobileAlt: String,
@@ -258,10 +261,12 @@ const orderSchema = new Schema(
     /** Last time any handover detail was saved (Handover Type & Details step on the mind map). */
     handoverUpdatedAt: { type: Date, default: null },
     /**
-     * Assign to Client Servicing toggle: true (default) = full handover (type, notes, voice notes, documents, shop
-     * list); false = client details and contact persons only.
+     * Assign to Client Servicing toggle: true = full handover (type, chat, shop list); false = client details and
+     * contact persons only. New orders start OFF; orders saved before keep their stored value.
      */
-    handoverFull: { type: Boolean, default: true },
+    handoverFull: { type: Boolean, default: false },
+    /** ASO: the client's SO (sales officer) contacts, kept apart from the client's contact persons. */
+    soContacts: { type: [new Schema({ name: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
     /**
      * Project Assign route, taken by the first save on it: HANDOVER (Client Servicing: handover details) or RECCE
      * (Recce team: project code request email). The other route is then disabled.
@@ -309,6 +314,8 @@ const orderSchema = new Schema(
           gstCertificates: { type: [fileRef], default: undefined },
           customFields: { type: [new Schema({ label: String, value: String }, { _id: false })], default: undefined },
           contacts: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })],
+          /** ASO handovers: the SO contacts as handed over. */
+          soContacts: { type: [new Schema({ name: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })], default: undefined },
           takenAt: Date,
         },
         { _id: false },

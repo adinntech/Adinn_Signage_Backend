@@ -68,6 +68,70 @@ export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<P
   return { sheetName: ws.name, headers, rows };
 }
 
+/** One worksheet as text cells: its non-blank rows (Excel row numbers), first MAX_ROWS + a few header rows. */
+export interface SheetGrid {
+  name: string;
+  rows: { rowNumber: number; cells: string[] }[];
+}
+
+/** Number cells formatted as fixed digits ("000000") keep their leading zeros, as Excel shows them. */
+function cellString(cell: ExcelJS.Cell): string {
+  const fmt = typeof cell.numFmt === 'string' ? cell.numFmt : '';
+  if (typeof cell.value === 'number' && /^0+$/.test(fmt) && Number.isInteger(cell.value)) return String(cell.value).padStart(fmt.length, '0');
+  return cellText(cell.value);
+}
+
+/**
+ * Optional reader for legacy .xls workbooks (SheetJS, the `xlsx` package). Loaded only when installed, so the rest of
+ * the import keeps working without it; formatted text is used so codes, phones and pincodes keep their zeros.
+ */
+function readXls(buffer: Buffer): SheetGrid[] {
+  let XLSX: any;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    XLSX = require('xlsx');
+  } catch {
+    throw AppError.badRequest('.xls files cannot be read on this server yet. Save the file as .xlsx (Excel: File > Save As > Excel Workbook) and upload it again.');
+  }
+  let wb: any;
+  try {
+    wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  } catch {
+    throw AppError.badRequest('Could not read the file. Upload a valid .xls, .xlsx or .csv file.');
+  }
+  return (wb.SheetNames as string[]).map((name) => {
+    const aoa: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '', blankrows: true });
+    const rows: SheetGrid['rows'] = [];
+    aoa.forEach((r, i) => {
+      const cells = r.slice(0, MAX_COLS).map((v) => (v == null ? '' : String(v).trim()));
+      if (cells.some((c) => c !== '') && rows.length <= MAX_ROWS + 20) rows.push({ rowNumber: i + 1, cells });
+    });
+    return { name, rows };
+  });
+}
+
+/** Every worksheet of an .xlsx / .xls / .csv file as text grids (header detection and mapping happen on top). */
+export async function readGrids(buffer: Buffer, fileName: string): Promise<SheetGrid[]> {
+  if (/\.xls$/i.test(fileName)) return readXls(buffer);
+  const wb = new ExcelJS.Workbook();
+  try {
+    if (/\.csv$/i.test(fileName)) await wb.csv.read(Readable.from(buffer));
+    else await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+  } catch {
+    throw AppError.badRequest('Could not read the file. Upload a valid .xlsx, .xls or .csv file (it may be damaged or password protected).');
+  }
+  return wb.worksheets.map((ws) => {
+    const rows: SheetGrid['rows'] = [];
+    ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      if (rows.length > MAX_ROWS + 20) return;
+      const cells: string[] = [];
+      for (let c = 1; c <= Math.min(row.cellCount, MAX_COLS); c++) cells.push(cellString(row.getCell(c)));
+      if (cells.some((c) => c !== '')) rows.push({ rowNumber, cells });
+    });
+    return { name: ws.name, rows };
+  });
+}
+
 // ---------- export ----------
 export const EXPORT_COLUMNS: Record<string, { header: string; get: (s: Record<string, any>) => unknown; width: number }> = {
   siteCode: { header: 'Site ID', get: (s) => s.siteCode, width: 26 },

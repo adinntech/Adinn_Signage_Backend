@@ -39,6 +39,8 @@ export async function projectHandover(projectId: string) {
     note: o.recce?.note ?? null,
     client,
     type: h.type,
+    /** ASO: the SO contacts as handed over (or as they are now, for projects from before the snapshot kept them). */
+    soContacts: h.type === 'ASO' ? (o.handoverClient?.soContacts ?? h.soContacts) : [],
     /** Communication & attachments (chat) from the BD. */
     messages: h.messages,
     documents: h.documents,

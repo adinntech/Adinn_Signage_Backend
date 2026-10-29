@@ -1,10 +1,17 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, requirePermission } from '../../common/auth.middleware';
+import { AppError } from '../../common/errors';
 import { receive } from '../files/file.controller';
 import * as c from './sales.controller';
 
 const read = requirePermission('sales:read');
 const write = requirePermission('sales:write');
+/**
+ * Handover chat: the BD team (sales:write) and the Client Servicing person the order is handed to (the :id param
+ * scope already limits Client Servicing to their own orders, so they can reply on those only).
+ */
+const chat = (req: Request, res: Response, next: NextFunction) =>
+  req.auth?.role === 'CLIENT_SERVICING' ? next() : write(req, res, next);
 
 /** BD sales pipeline: client registration -> orders -> Company Profile -> Rate Card -> Client Approval Proof. */
 export const salesRouter = Router();
@@ -41,10 +48,12 @@ salesRouter.get('/orders/:id/handover/shop-history', read, c.shopHistory);
 salesRouter.post('/orders/:id/handover/shop-rows/:rowId/files', write, receive, c.addShopFiles);
 salesRouter.delete('/orders/:id/handover/shop-rows/:rowId/files/:fileId', write, c.removeShopFile);
 // Communication & attachments (chat): text, files and voice notes
-salesRouter.post('/orders/:id/handover/messages', write, receive, c.addMessage);
+salesRouter.post('/orders/:id/handover/messages', read, chat, receive, c.addMessage);
 salesRouter.delete('/orders/:id/handover/messages/:messageId', write, c.removeMessage);
 salesRouter.patch('/orders/:id/handover/scope', write, c.handoverScope);
 salesRouter.patch('/orders/:id/handover/type', write, c.handoverType);
+// ASO: the client's SO contacts (saved as one list)
+salesRouter.put('/orders/:id/handover/so-contacts', write, c.soContacts);
 salesRouter.post('/orders/:id/handover/assign', write, c.assignCs);
 salesRouter.get('/orders/:id/comments', read, c.comments);
 salesRouter.post('/orders/:id/comments', write, receive, c.addComment);

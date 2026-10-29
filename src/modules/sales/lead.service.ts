@@ -234,9 +234,8 @@ export async function getLead(id: string) {
   const revisions = o.rateCardArray ?? [];
   const open = (lead.status ?? 'OPEN') === 'OPEN';
   // Mind map steps of the two Project Assign branches (what is done, what is still missing).
-  const contacts = (order.client as unknown as { contacts?: unknown[] } | null)?.contacts ?? [];
-  const csGaps = order.csAssignee ? [] : handoverGaps(order, contacts.length);
-  const recceGaps = order.recce?.assignee ? [] : handoverGaps({ ...order, handoverFull: true }, contacts.length);
+  const csGaps = order.csAssignee ? [] : handoverGaps(order);
+  const recceGaps = order.recce?.assignee ? [] : handoverGaps({ ...order, handoverFull: true });
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const route = await routeOf({ _id: o._id, assignRoute: order.assignRoute, csAssignee: order.csAssignee, recce: order.recce });
   const shops = order.shopList ? { total: order.shopList.total ?? 0, valid: order.shopList.valid ?? 0, declared: order.declaredShopTotal ?? null, verified: !!order.shopsVerifiedAt } : null;

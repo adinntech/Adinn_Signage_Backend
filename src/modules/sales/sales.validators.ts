@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { listQuery, objectId } from '../../common/query';
+import { mobileRule, optionalEmail, rejectDuplicateContacts } from '../../common/validators/contact';
 import { CLIENT_TYPES, ORGANISATION_TYPES } from '../clients/client.model';
 import { clientRegistration } from '../clients/client.validators';
 import { PRIORITIES } from '../projects/project.model';
@@ -95,6 +96,59 @@ export const shopRowBody = z.object({
   quantity: cell(10),
   remarks: cell(1000),
   clientSiteCode: cell(250),
+  /** Columns of the uploaded Excel that are not shop fields (header -> value); omitted = keep the row's current ones. */
+  extra: z.record(z.string().trim().min(1).max(120), z.string().trim().max(500)).optional(),
+});
+/**
+ * Shop list upload options (multipart text fields), sent from the mapping step when the file was ambiguous: the sheet,
+ * the Excel row number of the header row, and header -> field (or "extra" / "ignore").
+ */
+export const shopUploadBody = z.object({
+  sheet: z.string().trim().max(120).optional(),
+  headerRow: z.coerce.number().int().min(1).max(1_000_000).optional(),
+  /** '1': only return the preview of this sheet / header row (the mapping step), import nothing. */
+  preview: z.enum(['1', 'true']).optional().transform((v) => !!v),
+  mapping: z
+    .string()
+    .max(20000)
+    .optional()
+    .transform((s, ctx) => {
+      if (!s) return undefined;
+      try {
+        const v = JSON.parse(s) as unknown;
+        if (v && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every((t) => typeof t === 'string')) return v as Record<string, string>;
+      } catch {
+        /* reported below */
+      }
+      ctx.addIssue({ code: 'custom', message: 'Invalid column mapping' });
+      return z.NEVER;
+    }),
+});
+/**
+ * ASO: the client's SO contacts. Completely blank rows are dropped; a contact that is kept needs a name and a mobile
+ * number, the email is optional. One contact is primary (the first one when none is marked).
+ */
+export const soContactsBody = z.object({
+  contacts: z
+    .array(z.object({ name: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional() }))
+    .max(50, 'Up to 50 SO contacts')
+    .transform((list) => list.filter((c) => [c.name, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
+    .pipe(
+      z
+        .array(
+          z.object({
+            name: z.string().trim().min(1, 'Enter the contact name').max(120),
+            phone: mobileRule,
+            email: optionalEmail,
+            isPrimary: z.boolean().optional(),
+          }),
+        )
+        .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),
+    )
+    .transform((list) => {
+      const p = Math.max(0, list.findIndex((c) => c.isPrimary));
+      return list.map((c, i) => ({ ...c, isPrimary: i === p }));
+    }),
 });
 export const rowIdParam = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid row id');
 export const assignCsBody = z.object({
