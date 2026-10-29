@@ -75,7 +75,7 @@ export const zohoClients = asyncHandler(async (req, res) => {
     if (z) items.unshift({ ...z, contacts: undefined });
   }
   const linked = await linkedZohoClients(items.map((z) => z.zohoId));
-  ok(res, items.map((z) => ({ ...z, clientId: linked.get(z.zohoId)?.clientId ?? null, clientNo: linked.get(z.zohoId)?.clientNo ?? null })), { mode: zohoMode() });
+  ok(res, items.map((z) => ({ ...z, clientId: linked.get(z.zohoId)?.clientId ?? null, clientNo: linked.get(z.zohoId)?.clientNo ?? null, code: linked.get(z.zohoId)?.code ?? null })), { mode: zohoMode() });
 });
 /** One Zoho customer with its contact persons (read-only preview in the Existing Client picker). */
 export const zohoClient = asyncHandler(async (req, res) => {
@@ -83,7 +83,8 @@ export const zohoClient = asyncHandler(async (req, res) => {
   const c = await getZohoClient(zohoId);
   if (!c) throw AppError.notFound('This customer is no longer in Zoho.');
   const linked = (await linkedZohoClients([c.zohoId])).get(c.zohoId);
-  ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null }, { mode: zohoMode() });
+  // clientNo / code: the local client's (null until it is added); zohoId = Zoho contact id; zohoCustomerNo = Zoho's customer number.
+  ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null, code: linked?.code ?? null }, { mode: zohoMode() });
 });
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
@@ -241,6 +242,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
   }
   ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), bd(req)), undefined, 201);
 });
+export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), bd(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), bd(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), bd(req))));
 

@@ -187,7 +187,7 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
       .sort(parseSort(q.sort, ['createdAt', 'orderNo', 'updatedAt', 'handover.assignedAt'], '-createdAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
-      .populate('client', 'name clientName clientNo city')
+      .populate('client', 'name clientName clientNo zohoCustomerNo city')
       .populate('owner', 'name')
       .populate('csAssignee', 'name')
       .lean(),
@@ -218,7 +218,7 @@ export async function orderBoard(q: z.infer<typeof boardQuery>) {
     ORDER_STAGES.map(async (stage) => {
       const f = { ...filter, stage };
       const [items, total] = await Promise.all([
-        SalesOrder.find(f).select(WITHOUT_ARRAYS).sort({ createdAt: -1 }).limit(q.limit).populate('client', 'name clientNo').populate('owner', 'name').lean(),
+        SalesOrder.find(f).select(WITHOUT_ARRAYS).sort({ createdAt: -1 }).limit(q.limit).populate('client', 'name clientNo zohoCustomerNo').populate('owner', 'name').lean(),
         SalesOrder.countDocuments(f),
       ]);
       return { stage, label: STAGE_LABELS[stage], total, items };

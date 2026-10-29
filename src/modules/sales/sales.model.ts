@@ -295,6 +295,9 @@ const orderSchema = new Schema(
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */
           clientId: String,
+          /** Recce route step 1 confirmed ("Continue: Project Code Request Email"). */
+          handoverDoneAt: Date,
+          handoverDoneBy: { type: Schema.Types.ObjectId, ref: 'User' },
           assignee: { type: Schema.Types.ObjectId, ref: 'User' },
           assignedAt: Date,
           assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -316,6 +319,8 @@ const orderSchema = new Schema(
           name: String,
           clientName: String,
           clientNo: String,
+          /** Zoho customer number (the Client ID shown for an Existing client). */
+          zohoCustomerNo: String,
           email: String,
           phone: String,
           gstin: String,

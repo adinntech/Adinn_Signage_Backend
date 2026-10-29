@@ -22,6 +22,7 @@ salesRouter.get('/client-servicing-users', write, c.csUsers);
 salesRouter.get('/recce-users', write, c.recceUsers);
 // Project Assign > Assign to Recce Team
 salesRouter.get('/orders/:id/recce', write, c.getRecce);
+salesRouter.post('/orders/:id/recce/handover-done', write, c.confirmRecceHandover);
 salesRouter.post('/orders/:id/recce/code-request', write, receive, c.sendCodeRequest);
 salesRouter.put('/orders/:id/recce/codes', write, c.saveRecceCodes);
 salesRouter.post('/orders/:id/recce/assign', write, c.assignRecce);

@@ -157,7 +157,7 @@ export async function listLeads(q: z.infer<typeof leadListQuery>) {
       .sort(parseSort(q.sort, ['lead.stageChangedAt', 'lead.startedAt', 'orderNo', 'createdAt'], '-lead.stageChangedAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
-      .populate('client', 'name clientName clientNo city')
+      .populate('client', 'name clientName clientNo zohoCustomerNo city')
       .populate('owner', 'name')
       .populate('csAssignee', 'name')
       .lean(),
@@ -290,6 +290,8 @@ export async function getLead(id: string) {
       },
       /** The full handover (type and details) is complete. */
       handoverReady: recceGaps.length === 0,
+      /** Step 1 confirmed with "Continue" (older orders: once a request email went). */
+      handoverDone: !!order.recce?.handoverDoneAt || requests.some((e) => e.status === 'SENT' || e.status === 'SKIPPED'),
       missing: recceGaps[0] ?? null,
     },
     summary: {

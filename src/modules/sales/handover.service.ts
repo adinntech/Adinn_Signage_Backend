@@ -1048,7 +1048,7 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
 export async function clientSnapshot(o: { client: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null }) {
-  const c = await Client.findById(o.client).select('name clientName clientNo email phone gstin gstCertificates customFields contacts').lean();
+  const c = await Client.findById(o.client).select('name clientName clientNo zohoCustomerNo email phone gstin gstCertificates customFields contacts').lean();
   if (!c) return null;
   const crm = o.clientType !== 'EXISTING';
   return {
@@ -1056,6 +1056,8 @@ export async function clientSnapshot(o: { client: unknown; clientType?: string |
     name: c.name,
     clientName: c.clientName,
     clientNo: c.clientNo,
+    /** Client ID shown for an Existing client (Zoho customer number); for a New one, its confirmed Zoho client ID. */
+    zohoCustomerNo: c.zohoCustomerNo ?? undefined,
     email: c.email,
     phone: c.phone,
     gstin: c.gstin,

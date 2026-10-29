@@ -106,7 +106,8 @@ const fromBooks = (c: ZohoContact): ZohoClient => {
     name: f.name,
     clientName: f.contacts.find((k) => k.isPrimary)?.name,
     email: f.email,
-    phone: digits(c.phone) ?? digits(c.mobile),
+    // Mobile first, as Admin > Zoho Import and the contact persons.
+    phone: digits(c.mobile) ?? digits(c.phone),
     gstin: f.gstin,
     city: f.city,
     state: f.state,

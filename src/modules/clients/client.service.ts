@@ -361,21 +361,23 @@ export async function clientFileUrl(id: string, fileId: string) {
  * it. Otherwise created as an EXISTING client from Zoho.
  */
 export async function linkZohoCustomer(z: ZohoClient, actor: Actor) {
-  const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, city: z.city, state: z.state, zohoCustomerNo: z.zohoCustomerNo };
-  const linked = await Client.findOne({ zohoId: z.zohoId, deletedAt: null });
+  const fromZoho = { name: z.name, clientName: z.clientName, email: z.email, phone: z.phone, gstin: z.gstin, industry: z.industry, address: z.address, city: z.city, state: z.state, pincode: z.pincode, zohoCustomerNo: z.zohoCustomerNo };
+  // The same Zoho contact id is stored as zohoId (picker) or zohoContactId (Admin > Zoho Import): either is this customer.
+  const linked = await Client.findOne({ deletedAt: null, $or: [{ zohoId: z.zohoId }, { zohoContactId: z.zohoId }] });
   if (linked) {
     // Only what Zoho actually has overwrites; a blank in Zoho keeps the CRM value.
     const set: Record<string, unknown> = Object.fromEntries(Object.entries(fromZoho).filter(([, v]) => v));
-    // Zoho's contact persons fill an empty contact list; contacts already kept in the CRM are never replaced.
-    if (!linked.contacts?.length && z.contacts?.length) set.contacts = withPrimary(z.contacts);
+    if (!linked.zohoId) set.zohoId = z.zohoId;
+    // Zoho's contact persons are added (and Zoho's primary kept primary); contacts added in the CRM are never removed.
+    if (z.contacts?.length) set.contacts = mergeZohoContacts((linked.toObject().contacts ?? []) as ZohoContactRow[], z.contacts);
     await Client.updateOne({ _id: linked._id }, { $set: { ...set, updatedBy: actor.id } });
     return (await Client.findById(linked._id).lean())!;
   }
   const or: Record<string, unknown>[] = [];
   if (z.gstin) or.push({ gstin: z.gstin });
   if (z.email) or.push({ email: z.email });
-  // A draft is not a client yet, so a Zoho customer never links to one.
-  const live: Record<string, unknown> = { deletedAt: null, zohoId: null, status: { $ne: 'DRAFT' } };
+  // A draft is not a client yet, so a Zoho customer never links to one; nor to a client of another Zoho customer.
+  const live: Record<string, unknown> = { deletedAt: null, zohoId: null, zohoContactId: null, status: { $ne: 'DRAFT' } };
   let same = or.length ? await Client.findOne({ ...live, $or: or }).lean() : null;
   if (!same) {
     const key = normKey(z.name);
@@ -404,8 +406,27 @@ export async function linkZohoCustomer(z: ZohoClient, actor: Actor) {
   return c.toObject();
 }
 
-/** Local clients already linked to these Zoho ids: zohoId -> client id. */
+/** Local clients already linked to these Zoho ids (as zohoId, or zohoContactId from Admin > Zoho Import): Zoho id -> client. */
 export async function linkedZohoClients(zohoIds: string[]) {
-  const rows = await Client.find({ deletedAt: null, zohoId: { $in: zohoIds } }).select('zohoId clientNo').lean();
-  return new Map(rows.map((r) => [r.zohoId!, { clientId: String(r._id), clientNo: r.clientNo ?? null }]));
+  const rows = await Client.find({ deletedAt: null, $or: [{ zohoId: { $in: zohoIds } }, { zohoContactId: { $in: zohoIds } }] }).select('zohoId zohoContactId clientNo code').lean();
+  const out = new Map<string, { clientId: string; clientNo: string | null; code: string | null }>();
+  for (const r of rows) {
+    const key = zohoIds.includes(r.zohoId ?? '') ? r.zohoId! : r.zohoContactId!;
+    if (!out.has(key)) out.set(key, { clientId: String(r._id), clientNo: r.clientNo ?? null, code: r.code ?? null });
+  }
+  return out;
+}
+
+type ZohoContactRow = { name: string; designation?: string | undefined; phone?: string | undefined; email?: string | undefined; isPrimary?: boolean | undefined };
+/** CRM contacts + Zoho's contacts not already there (same mobile, email or name); Zoho's primary is the primary. */
+function mergeZohoContacts(crm: ZohoContactRow[], zoho: ZohoContactRow[]) {
+  const same = (a: ZohoContactRow, b: ZohoContactRow) => (!!a.phone && a.phone === b.phone) || (!!a.email && a.email === b.email) || a.name.trim().toLowerCase() === b.name.trim().toLowerCase();
+  const phones = new Set(crm.map((c) => c.phone).filter(Boolean));
+  const mails = new Set(crm.map((c) => c.email).filter(Boolean));
+  const added = zoho.filter((k) => !crm.some((c) => same(c, k)) && !(k.phone && phones.has(k.phone)) && !(k.email && mails.has(k.email)));
+  const all = [...crm.map((c) => ({ ...c, isPrimary: false })), ...added.map((k) => ({ ...k, isPrimary: false }))];
+  const zp = zoho.find((k) => k.isPrimary);
+  const idx = zp ? all.findIndex((c) => same(c, zp)) : -1;
+  const keep = crm.findIndex((c) => c.isPrimary);
+  return all.map((c, i) => ({ ...c, isPrimary: i === (idx >= 0 ? idx : Math.max(0, keep)) }));
 }

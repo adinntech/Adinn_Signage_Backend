@@ -49,11 +49,13 @@ const emailDone = (orderId: Types.ObjectId) => SalesOrder.exists({ _id: orderId,
  * Client ID in Zoho for this client: saved on the client, else (Existing / Zoho clients) read from Zoho once and kept.
  * Null when it is not known (New clients until it is typed at Project Code; Zoho unreachable).
  */
-async function zohoClientIdOf(c: { _id: unknown; zohoCustomerNo?: string | null; zohoId?: string | null; source?: string | null; code?: string | null } | null) {
+async function zohoClientIdOf(c: { _id: unknown; zohoCustomerNo?: string | null; zohoId?: string | null; zohoContactId?: string | null; source?: string | null; code?: string | null } | null) {
   if (!c) return null;
   if (c.zohoCustomerNo) return c.zohoCustomerNo;
-  if (!c.zohoId) return null;
-  const z = await getZohoClient(c.zohoId).catch(() => null);
+  // zohoId (Existing Client picker) or zohoContactId (Admin > Zoho Import): the same Zoho contact id.
+  const zid = c.zohoId ?? c.zohoContactId;
+  if (!zid) return null;
+  const z = await getZohoClient(zid).catch(() => null);
   const no = z?.zohoCustomerNo ?? (c.source === 'ZOHO' && c.code && /^\d{2,8}$/.test(c.code) ? c.code : null);
   if (no) await Client.updateOne({ _id: c._id, $or: [{ zohoCustomerNo: null }, { zohoCustomerNo: '' }] } as Record<string, unknown>, { $set: { zohoCustomerNo: no } });
   return no;
@@ -73,7 +75,7 @@ export async function getRecce(id: string, actor: Actor) {
     .populate('recce.project', 'code status')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
-  const client = await Client.findById(o.client).select('name clientNo email phone gstin contacts zohoCustomerNo zohoId source code').lean();
+  const client = await Client.findById(o.client).select('name clientNo email phone gstin contacts zohoCustomerNo zohoId zohoContactId source code').lean();
   const r = o.recce ?? null;
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const codes = r?.projectCode
@@ -85,11 +87,14 @@ export async function getRecce(id: string, actor: Actor) {
   // The Recce team always gets the full handover (there is no "client details only" option here).
   const handoverMissing = handoverGaps({ ...o, handoverFull: true });
   const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
+  // Step 1 is done when the BD confirmed it ("Continue"); orders from before the confirmation count once an email went.
+  const handoverDone = !!r?.handoverDoneAt || sentOk;
   // Steps in order: handover details, the request email, the codes (+ Client ID for a New client), then the assignment.
   const missing = r?.assignee
     ? []
     : [
         ...handoverMissing,
+        ...(handoverDone ? [] : ['Confirm Handover Type & Details (Continue)']),
         ...(sentOk ? [] : ['Send the project code request email']),
         ...(codes ? [] : ['Enter the project code and estimation code']),
         ...(codes && !existing && !codes.clientId ? ['Enter the Client ID created in Zoho'] : []),
@@ -111,6 +116,8 @@ export async function getRecce(id: string, actor: Actor) {
     emailDone: sentOk,
     /** Handover Type & Details (step 1) complete: unlocks the request email. */
     handoverReady: handoverMissing.length === 0,
+    /** Handover Type & Details confirmed with "Continue" (unlocks the request email). */
+    handoverDone,
     clientType: o.clientType,
     /** Client ID in Zoho: Existing clients have it from Zoho (read-only); New clients type it at Project Code. */
     zohoClientId: { value: codes?.clientId ?? zohoNo, fromZoho: existing },
@@ -133,12 +140,16 @@ export async function getRecce(id: string, actor: Actor) {
     draft: {
       to: [] as string[],
       cc: [] as string[],
-      subject: `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
+      // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
+      subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
       body:
-        `<p>Dear Team,</p><p>Please create the project code and estimation code for the order below${existing ? '' : ', and the Client ID in Zoho for this new client'}.</p>` +
+        (existing
+          ? `<p>Dear Team,</p><p>Please create the project code and estimation code for the order below, under the existing Client ID ${escapeHtml(zohoNo ?? '-')}.</p>`
+          : `<p>Dear Team,</p><p>This is a new client. Please create the <strong>client code in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below.</p>`) +
         `<p><strong>Client details</strong><br>${[
           row('Client', client?.name ?? '-'),
-          row(existing ? 'Zoho Client ID' : 'CRM Client ID', (existing ? zohoNo : client?.clientNo) ?? '-'),
+          // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
+          ...(existing ? [row('Client ID', zohoNo ?? '-')] : [row('Client ID', 'To be created in Zoho'), row('CRM Reference (temporary)', client?.clientNo ?? '-')]),
           row('Client Flag', existing ? 'Existing Client' : 'New Client'),
           row('Email', client?.email ?? '-'),
           row('Phone', client?.phone ?? '-'),
@@ -176,6 +187,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   const client = await Client.findById(o.client).select('name contacts').lean();
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Handover Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
+  if (!o.recce?.handoverDoneAt && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Handover Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Handover Type & Details first' }]);
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRoute(o, 'RECCE');
   const stored: StoredFile[] = [];
@@ -212,6 +224,27 @@ async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, est
   if (other) throw invalid('estimationCode', `Estimation code ${estimationCode} is already used by order ${other.orderNo}`);
 }
 
+/** Step 1 of the Recce route: the BD confirms Handover Type & Details ("Continue"), which unlocks the request email. */
+export async function confirmHandover(id: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertBranchOpen(o);
+  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
+  if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
+  await claimRoute(o, 'RECCE');
+  if (!o.recce?.handoverDoneAt) {
+    const now = new Date();
+    const r = await SalesOrder.updateOne(
+      { _id: o._id, csAssignee: null, 'recce.assignee': null },
+      {
+        $set: o.recce ? { 'recce.handoverDoneAt': now, 'recce.handoverDoneBy': actor.id } : { recce: { handoverDoneAt: now, handoverDoneBy: actor.id } },
+        $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, 'Handover Type & Details completed (Recce route)', { step: 'handover' }) },
+      },
+    );
+    if (!r.matchedCount) throw AppError.conflict('This project was assigned meanwhile. Reload the page.');
+  }
+  return getRecce(id, actor);
+}
+
 export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody>, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o);
@@ -223,6 +256,10 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
   const fromZoho = o.clientType === 'EXISTING' ? await zohoClientIdOf(c) : null;
   const clientId = fromZoho ?? input.clientId;
   if (!clientId && o.clientType !== 'EXISTING') throw invalid('clientId', 'Enter the Client ID created in Zoho for this new client');
+  if (clientId && o.clientType !== 'EXISTING') {
+    const other = await Client.findOne({ _id: { $ne: o.client }, deletedAt: null, $or: [{ code: clientId }, { zohoCustomerNo: clientId }] }).select('name').lean();
+    if (other) throw invalid('clientId', `Client code ${clientId} already belongs to ${other.name}`);
+  }
   const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
   try {
     const r = await SalesOrder.updateOne(
@@ -243,8 +280,14 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
     if ((e as { code?: number }).code === 11000) throw AppError.conflict('That project or estimation code was just used by another order. Check the codes.');
     throw e;
   }
-  // A New client keeps its Zoho Client ID (shown in Client Management and on later orders).
-  if (clientId && o.clientType !== 'EXISTING') await Client.updateOne({ _id: o.client, $or: [{ zohoCustomerNo: null }, { zohoCustomerNo: '' }] } as Record<string, unknown>, { $set: { zohoCustomerNo: clientId } });
+  // A New client keeps its confirmed client code (Client Management, later orders and emails); _id and clientNo stay.
+  if (clientId && o.clientType !== 'EXISTING') {
+    await Client.updateOne({ _id: o.client }, { $set: { zohoCustomerNo: clientId, code: clientId, updatedBy: actor.id } }).catch(async (e: { code?: number }) => {
+      // Business code taken meanwhile: keep the Zoho client code at least.
+      if (e.code !== 11000) throw e;
+      await Client.updateOne({ _id: o.client }, { $set: { zohoCustomerNo: clientId } });
+    });
+  }
   await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'recce.projectCode', oldValue: o.recce?.projectCode ?? null, newValue: input.projectCode }, { field: 'recce.clientId', oldValue: o.recce?.clientId ?? null, newValue: clientId ?? null }], reason: `Project code ${input.projectCode}, estimation code ${input.estimationCode}` });
   return getRecce(id, actor);
 }

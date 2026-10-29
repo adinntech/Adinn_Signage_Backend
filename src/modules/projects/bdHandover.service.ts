@@ -24,10 +24,10 @@ export async function projectHandover(projectId: string) {
   // The client as handed over; projects assigned before the snapshot existed show the client as it is now.
   const [h, live] = await Promise.all([
     getHandover(orderId),
-    o.handoverClient ? null : Client.findById(o.client).select('name clientName clientNo email phone gstin gstCertificates customFields contacts').lean(),
+    o.handoverClient ? null : Client.findById(o.client).select('name clientName clientNo zohoCustomerNo email phone gstin gstCertificates customFields contacts').lean(),
   ]);
   const crm = o.clientType !== 'EXISTING';
-  const client = o.handoverClient ?? (live && { ...live, gstCertificates: crm ? live.gstCertificates : undefined, customFields: crm ? live.customFields : undefined });
+  const client = o.handoverClient ?? (live && { ...live, clientType: o.clientType, gstCertificates: crm ? live.gstCertificates : undefined, customFields: crm ? live.customFields : undefined });
   return {
     orderNo: o.orderNo,
     projectCode: o.recce?.projectCode ?? null,
