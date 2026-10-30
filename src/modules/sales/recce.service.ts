@@ -99,7 +99,7 @@ const uniqueFiles = (files: StoredFile[]) => files.filter((f, i, all) => all.fin
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientType lead recce csAssignee assignRoute handoverFull handoverType soContacts shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientType lead recce csAssignee assignRoute handoverFull handoverType handoverUpdatedAt soContacts shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -149,6 +149,8 @@ export async function getRecce(id: string, actor: Actor) {
     /** Client Servicing workflow on an order handed to this person: `handoverSent` = the BD sent the handover details (no step 1). */
     csFlow: cs ? { handoverSent: handoverReceived(o) } : null,
     handoverType: (o.handoverType ?? null) as HandoverType | null,
+    /** Last save of any handover detail (the Handover Type & Details card). */
+    handoverUpdatedAt: o.handoverUpdatedAt ?? null,
     /** Gaps of the full handover (step 1). */
     handoverMissing,
     codes,
