@@ -124,3 +124,24 @@ describe('project journey (admin monitoring)', () => {
     expect((await api().get('/api/v1/journey/projects/not-an-id').set(as('MGMT'))).status).toBe(422);
   });
 });
+
+describe('stage comments', () => {
+  it('lets Management comment on a stage, shows it newest first, and only the author or Super Admin removes it', async () => {
+    const { project } = await make();
+    const post = (role: string, body: unknown) => api().post(`/api/v1/journey/projects/${project._id}/comments`).set(as(role)).send(body);
+    expect((await post('BD', { stage: 'PLANNING', body: 'x' })).status).toBe(403);
+    expect((await post('MGMT', { stage: 'NOPE', body: 'x' })).status).toBe(422);
+    expect((await post('MGMT', { stage: 'PLANNING', body: '   ' })).status).toBe(422);
+    expect((await post('MGMT', { stage: 'PLANNING', body: 'x'.repeat(501) })).status).toBe(422);
+    expect((await post('MGMT', { stage: 'PLANNING', body: 'Waiting for the client PO' })).status).toBe(201);
+    const res = await post('MGMT', { stage: 'PLANNING', body: 'Chased on call' });
+    const stages = byKey(res.body.data.stages) as Record<string, { comments: { id: string; text: string; author: string }[] }>;
+    expect(stages.PLANNING!.comments.map((c) => c.text)).toEqual(['Chased on call', 'Waiting for the client PO']);
+    expect(stages.FIELD_RECCE!.comments).toHaveLength(0);
+    const id = stages.PLANNING!.comments[0]!.id;
+    const del = (role: string) => api().delete(`/api/v1/journey/projects/${project._id}/comments/${id}`).set(as(role));
+    expect((await del('BD')).status).toBe(403);
+    expect((await del('ADMIN')).status).toBe(200);
+    expect(((await journey(project._id)) as { stages: Stage[] }).stages.find((s) => s.key === 'PLANNING')).toBeTruthy();
+  });
+});

@@ -8,7 +8,9 @@ import { CodeRequest } from '../codeRequests/codeRequest.model';
 import { Project } from '../projects/project.model';
 import { SalesOrder } from '../sales/sales.model';
 import { User } from '../users/user.model';
-import type { portfolioQuery } from './journey.validators';
+import { JourneyComment } from './journeyComment.model';
+import type { commentBody, portfolioQuery } from './journey.validators';
+import type { Actor } from '../../common/query';
 
 /**
  * The project journey, built only from what the system records. The first four stages come from the BD handover and the
@@ -56,9 +58,10 @@ async function statusChanges(projectId: Types.ObjectId | string) {
 export async function projectJourney(id: string) {
   const p = await Project.findOne({ _id: id, deletedAt: null }).select('+files').populate('client', 'name clientNo approvedCode').populate('assignedTo', 'name').populate('owner', 'name').lean();
   if (!p) throw AppError.notFound('Project not found');
-  const [order, changes] = await Promise.all([
+  const [order, changes, commentRows] = await Promise.all([
     p.salesOrder ? SalesOrder.findById(p.salesOrder).select('orderNo owner csAssignee handover createdAt handoverDocumentsArray recce').populate('owner', 'name').populate('csAssignee', 'name').lean() : null,
     statusChanges(p._id),
+    JourneyComment.find({ project: p._id }).sort({ createdAt: -1 }).limit(300).populate('author', 'name').lean(),
   ]);
   const rows = await CodeRequest.find({ order: order?._id ?? new Types.ObjectId() }).lean();
   const clientRef = p.client as unknown as { _id: Types.ObjectId; name: string; clientNo?: string; approvedCode?: string };
@@ -148,6 +151,7 @@ export async function projectJourney(id: string) {
       overdueReason: liveOverdue ? `Target date ${new Date(p.targetDate!).toISOString().slice(0, 10)} has passed` : codeOverdue ? `Waiting more than ${CODE_WAIT_DAYS} days` : null,
       notes,
       attachments,
+      comments: commentRows.filter((c) => c.stage === s.key).map((c) => ({ id: String(c._id), text: c.body, at: c.createdAt as Date, author: name(c.author) ?? 'Removed user', authorId: String((c.author as { _id?: Types.ObjectId } | null)?._id ?? '') })),
     };
   });
   const currentStage = stages.find((s) => s.state === 'IN_PROGRESS' || s.state === 'BLOCKED') ?? stages.find((s) => s.state === 'PENDING') ?? stages[stages.length - 1]!;
@@ -234,3 +238,18 @@ export async function portfolio(q: z.infer<typeof portfolioQuery>) {
 }
 
 export const userNameOf = async (id: Types.ObjectId) => (await User.findById(id).select('name').lean())?.name ?? null;
+
+export async function addComment(projectId: string, input: z.infer<typeof commentBody>, a: Actor) {
+  if (!(await Project.exists({ _id: projectId, deletedAt: null }))) throw AppError.notFound('Project not found');
+  await JourneyComment.create({ project: projectId, stage: input.stage, body: input.body, author: a.id });
+  return projectJourney(projectId);
+}
+
+/** The author or Super Admin removes a comment. */
+export async function deleteComment(projectId: string, commentId: string, a: Actor) {
+  const c = await JourneyComment.findOne({ _id: commentId, project: projectId });
+  if (!c) throw AppError.notFound('Comment not found');
+  if (String(c.author) !== a.id && a.role !== 'SUPER_ADMIN') throw AppError.forbidden();
+  await c.deleteOne();
+  return projectJourney(projectId);
+}

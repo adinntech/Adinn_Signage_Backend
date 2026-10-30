@@ -471,7 +471,7 @@ export async function orderStates(q: z.infer<typeof orderStatesQuery>, actor: Ac
     filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
   }
   const orders = await SalesOrder.find(filter)
-    .select('orderNo client handover.assignedAt createdAt recce.projectCode salesprofile.kind salesprofile.status')
+    .select('orderNo client handover.assignedAt createdAt recce.projectCode recce.project salesprofile.kind salesprofile.status')
     .sort({ 'handover.assignedAt': -1, createdAt: -1 })
     .limit(500)
     .lean();
@@ -495,7 +495,7 @@ export async function orderStates(q: z.infer<typeof orderStatesQuery>, actor: Ac
     const codes = { CLIENT_CODE: stateOf('CLIENT_CODE'), PROJECT_CODE: stateOf('PROJECT_CODE') };
     const all = [codes.CLIENT_CODE.state, codes.PROJECT_CODE.state];
     const bucket = all.every((x) => x === 'CONFIRMED') ? 'DONE' : all.some((x) => x === 'NOT_REQUESTED' || x === 'FAILED') ? 'TODO' : 'WAITING';
-    return { orderId: String(o._id), orderNo: o.orderNo, client: { id: String(o.client), name: c?.name ?? '-', clientNo: c?.clientNo ?? null }, assignedAt: o.handover?.assignedAt ?? o.createdAt ?? null, codes, bucket };
+    return { orderId: String(o._id), orderNo: o.orderNo, client: { id: String(o.client), name: c?.name ?? '-', clientNo: c?.clientNo ?? null }, assignedAt: o.handover?.assignedAt ?? o.createdAt ?? null, codes, bucket, hasProject: !!o.recce?.project };
   });
   const counts = { ALL: items.length, TODO: items.filter((i) => i.bucket === 'TODO').length, WAITING: items.filter((i) => i.bucket === 'WAITING').length, DONE: items.filter((i) => i.bucket === 'DONE').length };
   const shown = q.bucket ? items.filter((i) => i.bucket === q.bucket) : items;

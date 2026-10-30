@@ -56,7 +56,7 @@ beforeAll(async () => {
   const { User } = await import('../src/modules/users/user.model');
   const { hashPassword } = await import('../src/modules/auth/auth.service');
   app = (await import('../src/app')).createApp();
-  for (const [key, role] of [['BD', 'BD'], ['CS', 'CLIENT_SERVICING'], ['CS2', 'CLIENT_SERVICING'], ['ADMIN', 'SUPER_ADMIN']] as const) {
+  for (const [key, role] of [['BD', 'BD'], ['CS', 'CLIENT_SERVICING'], ['CS2', 'CLIENT_SERVICING'], ['ADMIN', 'SUPER_ADMIN'], ['OPS', 'OPERATIONS'], ['OPS2', 'RECCE_COORDINATOR'], ['EXEC', 'RECCE_EXECUTIVE']] as const) {
     const u = await User.create({ name: key, email: `${key.toLowerCase()}@t.com`, role, passwordHash: await hashPassword('Passw0rd!x') });
     uid[key] = String(u._id);
     tokens[key] = (await api().post('/api/v1/auth/login').send({ email: `${key.toLowerCase()}@t.com`, password: 'Passw0rd!x' })).body.data.accessToken;
@@ -276,6 +276,105 @@ describe('confirmation evidence', () => {
     expect((await confirmWith(order, '12', [[PDF, 'stray.pdf']])).status).toBe(422);
     expect(fs.readdirSync(root, { recursive: true }).filter((f) => String(f).endsWith('stray.pdf')).length).toBe(0);
     expect((await confirmWith(order, '33445577', [[Buffer.from('MZ'), 'bad.exe']])).status).toBe(400);
+  });
+});
+
+describe('create project from the order', () => {
+  const body = (over: Record<string, unknown> = {}) => ({
+    campaign: 'Diwali Boards', district: 'Chennai', startDate: '2026-11-01', targetDate: '2026-11-30', priority: 'HIGH', requirementType: 'SHOP_DETAILS', expectedShops: 40,
+    contacts: [{ name: 'Ravi Kumar', email: 'ravi@client.test', phone: '9876543210' }], instructions: 'Call before visiting', ...over,
+  });
+  const draft = (order: string, role = 'CS') => api().get(`/api/v1/sales/orders/${order}/project-draft`).set(as(role));
+  const create = (order: string, b: unknown, role = 'CS') => api().post(`/api/v1/sales/orders/${order}/project`).set(as(role)).send(b);
+
+  it('needs both confirmed codes, then creates the project with the confirmed code and assigns it', async () => {
+    const order = await makeOrder();
+    expect((await draft(order)).body.data.ready).toBe(false);
+    expect((await create(order, body())).status).toBe(409); // no codes yet
+    await api().post(`/api/v1/sales/orders/${order}/codes/already-sent`).set(as('CS')).send({ kinds: ['CLIENT_CODE', 'PROJECT_CODE'], note: 'Phoned accounts' });
+    expect((await confirm(order, 'CLIENT_CODE', 'CLI-PR01')).status).toBe(200);
+    expect((await create(order, body())).status).toBe(409); // project code still missing
+    expect((await confirm(order, 'PROJECT_CODE', '44556677')).status).toBe(200);
+    const d = (await draft(order)).body.data;
+    expect(d.ready).toBe(true);
+    expect(d.codes).toEqual({ client: 'CLI-PR01', project: '44556677' });
+
+    expect((await create(order, body({ campaign: 'x' }))).status).toBe(422);
+    expect((await create(order, body({ contacts: [{ name: 'Ravi', email: 'bad', phone: '123' }] }))).status).toBe(422);
+    const res = await create(order, body());
+    expect(res.status).toBe(201);
+    expect(res.body.data.code).toBe('44556677');
+    const { Project } = await import('../src/modules/projects/project.model');
+    const p = await Project.findById(res.body.data.projectId).lean();
+    expect(String(p?.salesOrder)).toBe(order);
+    expect(p?.assignedTo).toBeFalsy(); // assigned on the Recce Assignment screen
+    expect(p?.code).toBe('44556677');
+    expect((await draft(order)).body.data.project.code).toBe('44556677');
+    expect((await create(order, body())).status).toBe(409); // one project per order
+    const states = await api().get('/api/v1/sales/codes/orders?bucket=DONE').set(as('CS'));
+    expect(states.body.data.find((x: { orderId: string }) => x.orderId === order).hasProject).toBe(true);
+  });
+
+  it('is for the Client Servicing person of the order and Super Admin only', async () => {
+    const order = await makeOrder('CS');
+    expect((await draft(order, 'CS2')).status).toBe(404);
+    expect((await create(order, body(), 'CS2')).status).toBe(404);
+    expect((await draft(order, 'BD')).status).toBe(403);
+    expect((await create(order, body(), 'BD')).status).toBe(403);
+    expect((await draft(order, 'ADMIN')).status).toBe(200);
+  });
+});
+
+describe('recce assignment', () => {
+  const setup = async (type = 'SHOP_DETAILS') => {
+    const order = await makeOrder();
+    await api().post(`/api/v1/sales/orders/${order}/codes/already-sent`).set(as('CS')).send({ kinds: ['CLIENT_CODE', 'PROJECT_CODE'], note: 'Phoned accounts' });
+    const n = String(seq).padStart(4, '0');
+    await confirm(order, 'CLIENT_CODE', `CLI-RA${n}`);
+    await confirm(order, 'PROJECT_CODE', `7788${n}`);
+    const res = await api().post(`/api/v1/sales/orders/${order}/project`).set(as('CS')).send({
+      campaign: `Camp ${n}`, district: 'Madurai', startDate: '2026-11-01', targetDate: '2026-11-30', priority: 'MEDIUM', requirementType: type, expectedShops: type === 'ASO' ? null : 12,
+      contacts: [{ name: 'Ravi Kumar', email: 'ravi@client.test', phone: '9876543210' }],
+    });
+    expect(res.status).toBe(201);
+    return order;
+  };
+  const view = (order: string, role = 'CS') => api().get(`/api/v1/sales/orders/${order}/recce-assignment`).set(as(role));
+  const assign = (order: string, b: unknown, role = 'CS') => api().post(`/api/v1/sales/orders/${order}/recce-assignment`).set(as(role)).send(b);
+
+  it('lists the team with workload, assigns with a note and due date, keeps the history and allows a reassignment', async () => {
+    const order = await setup();
+    const v = (await view(order)).body.data;
+    expect(v.project.assignedTo).toBeNull();
+    expect(v.canAssign).toBe(true);
+    const ops = v.people.find((x: { id: string }) => x.id === uid.OPS);
+    expect(ops).toMatchObject({ eligible: true, openProjects: 0, current: false });
+    expect(v.people.find((x: { id: string }) => x.id === uid.EXEC).eligible).toBe(false); // not an ASO survey
+
+    expect((await assign(order, { assigneeId: uid.EXEC })).status).toBe(400); // executives only take ASO surveys
+    expect((await assign(order, { assigneeId: uid.OPS, targetDate: '2026-10-01' })).status).toBe(422); // before the start date
+    const res = await assign(order, { assigneeId: uid.OPS, targetDate: '2026-12-15', note: 'Start with Madurai north' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.project.assignedTo.id).toBe(uid.OPS);
+    expect(res.body.data.project.status).toBe('RECCE_ASSIGNED');
+    expect(res.body.data.project.targetDate).toContain('2026-12-15');
+    expect(res.body.data.people.find((x: { id: string }) => x.id === uid.OPS)).toMatchObject({ openProjects: 1, current: true });
+    expect(res.body.data.history[0].text).toContain('Start with Madurai north');
+
+    const again = await assign(order, { assigneeId: uid.OPS2 });
+    expect(again.status).toBe(200);
+    expect(again.body.data.project.assignedTo.id).toBe(uid.OPS2);
+    expect(again.body.data.history.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('lets an ASO survey go straight to a Recce executive, and is closed to other roles and other Client Servicing people', async () => {
+    const order = await setup('ASO');
+    expect((await assign(order, { assigneeId: uid.EXEC })).status).toBe(200);
+    const mine = await makeOrder('CS');
+    expect((await view(mine)).status).toBe(404); // no project yet
+    expect((await view(order, 'CS2')).status).toBe(404);
+    expect((await view(order, 'BD')).status).toBe(403);
+    expect((await assign(order, { assigneeId: uid.OPS }, 'BD')).status).toBe(403);
   });
 });
 

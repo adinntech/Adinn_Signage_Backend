@@ -64,3 +64,23 @@ export const orderStatesQuery = z.object({
   /** TODO: something still to request. WAITING: asked, waiting for the code. DONE: both codes confirmed. */
   bucket: z.enum(['TODO', 'WAITING', 'DONE']).optional(),
 });
+
+/** Create Project by Client Servicing. Contacts, dates and shop count are checked again by the project rules. */
+export const csProjectBody = z.object({
+  campaign: z.string().trim().min(2, 'Enter the campaign name').max(120),
+  district: z.string().trim().min(2, 'Enter the district / location').max(120),
+  startDate: z.string().min(1, 'Pick a start date'),
+  targetDate: z.string().min(1, 'Pick the expected end date'),
+  priority: z.enum(['HIGH', 'MEDIUM', 'LOW']),
+  requirementType: z.enum(['ASO', 'SHOP_DETAILS', 'SHOP_MEASUREMENT']),
+  expectedShops: z.number().int().min(1).max(100000).nullable().default(null),
+  contacts: z.array(z.object({ name: z.string().trim().min(2).max(120), email: z.string().trim().toLowerCase(), phone: z.string().trim() })).min(1, 'Add at least one client contact').max(10),
+  instructions: z.string().trim().max(1000).optional(),
+});
+
+/** Recce Assignment: who gets the project, an optional new due date and a note that goes to them. */
+export const recceAssignmentBody = z.object({
+  assigneeId: objectId,
+  targetDate: z.string().min(1).optional(),
+  note: z.string().trim().max(300).optional(),
+});

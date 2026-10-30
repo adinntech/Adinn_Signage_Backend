@@ -64,7 +64,7 @@ async function notifyProject(p: { _id: Types.ObjectId; code: string; client: unk
 }
 
 /** Tells the new owner (and the previous one, if the project moved) about an assignment. Email + in-app, stored per person. */
-async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS') {
+async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS', note?: string) {
   const [client, by] = await Promise.all([Client.findById(p.client).select('name').lean(), User.findById(actor.id).select('name').lean()]);
   const when = p.assignedAt!.getTime();
   const shops = p.requirementType === 'ASO' ? 'Shop count unknown (ASO survey)' : p.expectedShops ? `${p.expectedShops} shops` : '';
@@ -75,7 +75,7 @@ async function notifyAssignment(p: InstanceType<typeof Project>, previous: strin
     kind: 'PROJECT_ASSIGNED',
     recipients: [String(p.assignedTo)],
     title: assigneeRole === 'RECCE_EXECUTIVE' ? 'New Recce Job Assigned' : 'New Project Assigned',
-    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.${assigneeRole === 'RECCE_EXECUTIVE' ? ' Go to the area and add each shop\'s details as you reach it.' : ''}`,
+    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.${note ? ` Note: ${note}.` : ''}${assigneeRole === 'RECCE_EXECUTIVE' ? ' Go to the area and add each shop\'s details as you reach it.' : ''}`,
     dedupe: (r) => `assigned:${id}:${r}:${when}`,
     actor,
   });
@@ -312,9 +312,9 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   if (UNASSIGNED.includes(p.status)) p.status = 'RECCE_ASSIGNED';
   p.updatedBy = new Types.ObjectId(actor.id);
   await p.save();
-  await recordAudit({ actor, action: 'ASSIGN', entity: 'Project', entityId: id, project: id, changes: [{ field: 'assignedTo', oldValue: previous, newValue: body.assigneeId }], reason: `Assigned to ${assignee.name}` });
+  await recordAudit({ actor, action: 'ASSIGN', entity: 'Project', entityId: id, project: id, changes: [{ field: 'assignedTo', oldValue: previous, newValue: body.assigneeId }], reason: `Assigned to ${assignee.name}${body.note ? `: ${body.note}` : ''}` });
   await systemMessage(id, `Assigned to ${assignee.name} (${assignee.role.toLowerCase().replace('_', ' ')})`, actor);
-  await notifyAssignment(p, previous, assignee.name, actor, assignee.role);
+  await notifyAssignment(p, previous, assignee.name, actor, assignee.role, body.note);
   return getProject(id);
 }
 

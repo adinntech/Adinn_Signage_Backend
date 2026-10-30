@@ -3,7 +3,9 @@ import { AppError } from '../../common/errors';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import * as svc from './codeRequest.service';
-import { alreadySentBody, codeListQuery, orderStatesQuery, confirmBody, draftBody, rejectBody, retryBody, sendBody } from './codeRequest.validators';
+import * as project from './projectFromOrder.service';
+import * as recce from './recceAssignment.service';
+import { alreadySentBody, codeListQuery, orderStatesQuery, confirmBody, csProjectBody, draftBody, recceAssignmentBody, rejectBody, retryBody, sendBody } from './codeRequest.validators';
 
 const id = (req: Request) => objectId.parse(req.params.id);
 const uploaded = (req: Request) =>
@@ -27,6 +29,10 @@ export const alreadySent = asyncHandler(async (req, res) => ok(res, await svc.ma
 export const retry = asyncHandler(async (req, res) => ok(res, await svc.retryBatch(id(req), retryBody.parse(req.body).mailBatchId, actorOf(req))));
 export const confirm = asyncHandler(async (req, res) => ok(res, await svc.confirmCode(id(req), confirmBody.parse(payload(req)), uploaded(req), actorOf(req))));
 export const evidenceUrl = asyncHandler(async (req, res) => ok(res, await svc.evidenceUrl(id(req), objectId.parse(req.params.fileId), actorOf(req))));
+export const projectDraft = asyncHandler(async (req, res) => ok(res, await project.projectDraft(id(req), actorOf(req))));
+export const createProject = asyncHandler(async (req, res) => ok(res, await project.createFromOrder(id(req), csProjectBody.parse(req.body), actorOf(req)), undefined, 201));
+export const recceAssignment = asyncHandler(async (req, res) => ok(res, await recce.recceAssignment(id(req), actorOf(req))));
+export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecceTeam(id(req), recceAssignmentBody.parse(req.body), actorOf(req))));
 export const reject = asyncHandler(async (req, res) => ok(res, await svc.rejectRequest(id(req), rejectBody.parse(req.body), actorOf(req))));
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await svc.listRequests(codeListQuery.parse(req.query), actorOf(req));

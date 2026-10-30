@@ -117,7 +117,7 @@ export const statusBody = z
     path: ['reason'],
   });
 
-export const assignBody = z.object({ assigneeId: objectId });
+export const assignBody = z.object({ assigneeId: objectId, note: z.string().trim().max(300).optional() });
 export const stageBody = z.object({ stage: z.enum(['PLANNING', 'IN_PROGRESS', 'CLIENT_APPROVAL', 'COMPLETED']) });
 
 const csv = (values: readonly string[]) =>

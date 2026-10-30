@@ -10,6 +10,7 @@ import { CostPlan } from '../costing/costing.model';
 import { Expense } from '../expenses/expense.model';
 import { SurveyArea } from './surveyArea.model';
 import { ConnectChannel, ConnectMessage } from '../connect/connect.model';
+import { JourneyComment } from '../journey/journeyComment.model';
 import { NoteDraft, ProjectNote, ProjectVoiceNote } from '../workspace/workspace.model';
 
 /**
@@ -34,6 +35,7 @@ export const PROJECT_OWNED: { name: string; model: Model<any>; field: string }[]
   { name: 'Project notes', model: ProjectNote, field: 'project' },
   { name: 'Note drafts', model: NoteDraft, field: 'project' },
   { name: 'Voice notes', model: ProjectVoiceNote, field: 'project' },
+  { name: 'Journey comments', model: JourneyComment, field: 'project' },
   { name: 'Notifications', model: Notification, field: 'project' },
   { name: 'Audit history', model: AuditLog, field: 'project' },
 ];
