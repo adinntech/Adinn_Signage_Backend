@@ -25,6 +25,19 @@ When the key is rotated, update `config.local.php` on the server, `.env.developm
 
 Call the API only from the backend or a test client, never from browser or mobile code (the key must stay secret). Use HTTPS.
 
+## Header / footer images
+
+Upload banner images to `templates/images/` (public URL `.../templates/images/<file>`; override the base with `SIGNAGE_ASSET_URL` in `config.local.php`):
+
+| File | Used by | Size |
+|---|---|---|
+| `header_combined.png` | `combined` mail | 1400 px wide (shown at 700 px) |
+| `header_client.png` | `client` mail | same |
+| `header_project.png` | `project` mail | same |
+| `footer.png` | all three (division icons strip) | same |
+
+Each image is optional: if a file is missing the mail falls back to an HTML banner with the title, so nothing breaks. The header image should already contain the title text. Logo in the sign-off: `https://adinnroadshows.com/images/logo/AdinnLogo.png` (white theme); dark theme logo is `https://adinnoutdoors.com/images/adinnHeaderlogo.svg`.
+
 ## Request
 
 ```
