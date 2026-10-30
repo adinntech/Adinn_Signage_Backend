@@ -282,7 +282,7 @@ function missingForAssignment(p: { startDate?: Date | null; targetDate?: Date | 
   if (!p.startDate) m.push('start date');
   if (!p.targetDate) m.push('expected end date');
   if (!p.district) m.push('district / location');
-  if (!p.contacts?.length) m.push('at least one client contact');
+  // Client contacts are optional (Lead Management, BD and Client Servicing routes): none blocks the assignment.
   if (p.requirementType && p.requirementType !== 'ASO' && !p.expectedShops) m.push('number of shops');
   return m;
 }
