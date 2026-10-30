@@ -5,10 +5,10 @@
 
 function esc($v):string{return htmlspecialchars(is_scalar($v)?(string)$v:'',ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
 function asset(array $config,string $file):string{return rtrim($config['asset_url'],'/').'/'.$file;}
-function hasAsset(string $file):bool{return is_file(__DIR__.'/images/'.$file);}
+function hasAsset(string $file):bool{return is_file(__DIR__.'/Images/'.$file);}
 
-/* Emoji icons as numeric entities so the file encoding can never garble them. */
-const ICON=['id'=>'&#35;&#65039;&#8419;','date'=>'&#128197;','type'=>'&#129513;','source'=>'&#128228;','building'=>'&#127970;','gst'=>'&#129534;','pan'=>'&#128179;','person'=>'&#128100;','mail'=>'&#9993;&#65039;','phone'=>'&#128222;','pin'=>'&#128205;','folder'=>'&#128193;','tag'=>'&#127991;&#65039;','briefcase'=>'&#128188;','note'=>'&#128172;','desc'=>'&#128221;','key'=>'&#128273;','clip'=>'&#128206;','info'=>'&#8505;&#65039;'];
+/* Icons are Font Awesome glyphs pre-rendered to PNG in templates/Images/icons/ (icon fonts do not work in Gmail/Outlook). */
+function ic(string $k,int $w=16,string $prefix=''):string{return '<img src="'.esc(rtrim($GLOBALS['signage_asset']??'','/').'/icons/'.$prefix.$k.'.png').'" width="'.$w.'" height="'.$w.'" alt="" style="display:block;border:0;width:'.$w.'px;height:'.$w.'px">';}
 
 function fileSizeText(array $a):string{
  $raw=(string)($a['base64']??'');
@@ -21,17 +21,18 @@ function fileBadge(string $name):array{
  return match($e){'pdf'=>['PDF','#e11d48'],'xls','xlsx'=>['XLS','#16a34a'],'doc','docx'=>['DOC','#2563eb'],'zip'=>['ZIP','#2563eb'],'png','jpg','jpeg'=>['IMG','#f59e0b'],default=>['FILE','#64748b']};
 }
 
-function pageStart(string $img,string $title,string $subtitle,array $config):void{
- echo '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.esc($title).'</title></head>';
- echo '<body style="margin:0;padding:0;background:#eef2f8;font-family:\'Segoe UI\',Arial,Helvetica,sans-serif;color:#14294d">';
+function pageStart(string $title,string $subtitle,array $config):void{
+ $img='Signage_Email_Header.png';$GLOBALS['signage_asset']=$config['asset_url'];
+ echo '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&display=swap" rel="stylesheet"><title>'.esc($title).'</title></head>';
+ echo '<body style="margin:0;padding:0;background:#eef2f8;font-family:\'Montserrat\',\'Segoe UI\',Arial,Helvetica,sans-serif;color:#14294d">';
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f8"><tr><td align="center" style="padding:20px 8px">';
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:700px;background:#ffffff;border:1px solid #dfe7f3;border-radius:10px;overflow:hidden">';
  if(hasAsset($img)){
   echo '<tr><td style="padding:0;line-height:0;font-size:0"><img src="'.esc(asset($config,$img)).'" alt="'.esc($title).'" width="700" style="display:block;width:100%;max-width:700px;height:auto;border:0"></td></tr>';
  }else{
-  echo '<tr><td style="padding:28px 30px;background:#10244a;border-bottom:4px solid #ed2435"><div style="font-size:12px;letter-spacing:2px;color:#9fb3d9;font-weight:bold">ADINN &middot; SIGNAGE SOLUTIONS</div><div style="font-size:28px;line-height:1.2;font-weight:800;color:#ffffff;margin:10px 0 8px">'.esc($title).'</div><div style="font-size:13px;line-height:1.6;color:#c9d6ee">'.esc($subtitle).'</div></td></tr>';
+  echo '<tr><td style="padding:22px 30px;background:#10244a;border-bottom:4px solid #ed2435;font-size:12px;letter-spacing:2px;color:#9fb3d9;font-weight:bold">ADINN &middot; SIGNAGE SOLUTIONS</td></tr>';
  }
- echo '<tr><td style="padding:18px 22px 6px">';
+ echo '<tr><td style="padding:20px 22px 6px"><div style="font-size:26px;line-height:1.25;font-weight:800;color:#10244a;margin:0 0 6px">'.esc($title).'</div><div style="font-size:13px;line-height:1.6;color:#61718a;margin:0 0 16px">'.esc($subtitle).'</div>';
 }
 
 /* Four summary cards: Request ID, Date, Type, Source. */
@@ -39,7 +40,7 @@ function chips(array $data,string $typeLabel):void{
  $cells=[['id','Request ID',$data['requestId']??'','#fde8ea','#e11d48'],['date','Request Date',$data['requestDate']??date('d M Y'),'#e6f7ef','#16a34a'],['type','Request Type',$typeLabel,'#efeafd','#7c3aed'],['source','Request Source',$data['source']??'Client Servicing Team','#e6f6f1','#0f9d78']];
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="6" style="margin:0 -6px 8px;width:calc(100% + 12px)"><tr>';
  foreach($cells as [$ic,$label,$val,$bg,$fg]){
-  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="width:30px"><div style="width:28px;height:28px;line-height:28px;text-align:center;border-radius:7px;background:'.$bg.';color:'.$fg.';font-size:14px">'.ICON[$ic].'</div></td><td valign="middle" style="padding-left:8px"><div style="font-size:10px;color:#6a7890">'.esc($label).'</div><div style="font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.esc($val).'</div></td></tr></table></td>';
+  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="width:30px">'.ic($ic,28,'chip-').'</td><td valign="middle" style="padding-left:8px"><div style="font-size:10px;color:#6a7890">'.esc($label).'</div><div style="font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.esc($val).'</div></td></tr></table></td>';
  }
  echo '</tr></table>';
 }
@@ -49,7 +50,7 @@ function rowsHtml(array $rows):string{
  $o='<table role="presentation" width="100%" cellpadding="0" cellspacing="0">';
  foreach($rows as [$ic,$label,$val]){
   if($val===null||trim((string)$val)==='')continue;
-  $o.='<tr><td valign="top" width="24" style="padding:7px 0;border-bottom:1px solid #edf1f7;font-size:13px">'.ICON[$ic].'</td><td valign="top" width="36%" style="padding:7px 6px;border-bottom:1px solid #edf1f7;font-size:12px;color:#6a7890">'.esc($label).'</td><td valign="top" style="padding:7px 0;border-bottom:1px solid #edf1f7;font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.nl2br(esc($val)).'</td></tr>';
+  $o.='<tr><td valign="top" width="24" style="padding:7px 0;border-bottom:1px solid #edf1f7;">'.ic($ic,16).'</td><td valign="top" width="36%" style="padding:7px 6px;border-bottom:1px solid #edf1f7;font-size:12px;color:#6a7890">'.esc($label).'</td><td valign="top" style="padding:7px 0;border-bottom:1px solid #edf1f7;font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.nl2br(esc($val)).'</td></tr>';
  }
  return $o.'</table>';
 }
@@ -74,7 +75,7 @@ function attachmentsCard(array $data,string $title,string $headBg,string $accent
 }
 
 function noteBar(string $text):void{
- echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px"><tr><td style="background:#eaf3ff;border:1px solid #cfe2fb;border-radius:8px;padding:11px 14px;font-size:12px;line-height:1.6;color:#1d4f91"><strong>'.ICON['info'].'</strong>&nbsp; '.esc($text).'</td></tr></table>';
+ echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px"><tr><td width="28" valign="top" style="background:#eaf3ff;border:1px solid #cfe2fb;border-right:0;border-radius:8px 0 0 8px;padding:12px 0 12px 14px">'.ic('info',16).'</td><td style="background:#eaf3ff;border:1px solid #cfe2fb;border-left:0;border-radius:0 8px 8px 0;padding:11px 14px 11px 8px;font-size:12px;line-height:1.6;color:#1d4f91">'.esc($text).'</td></tr></table>';
 }
 
 function messageBlock(array $data):void{

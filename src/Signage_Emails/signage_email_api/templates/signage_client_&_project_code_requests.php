@@ -1,7 +1,7 @@
 <?php require_once __DIR__.'/_common.php';
 $c=is_array($data['client']??null)?$data['client']:[];$p=is_array($data['project']??null)?$data['project']:[];
 
-pageStart('header_combined.png','Client Code & Project Code Request','Please review the details below and create the required client code and project code as per the enclosed documents.',$config);
+pageStart('Client Code & Project Code Request','Please review the details below and create the required client code and project code as per the enclosed documents.',$config);
 chips($data,'Client Code & Project Code');
 
 $clientCard=card('Client Code Creation Request',rowsHtml([

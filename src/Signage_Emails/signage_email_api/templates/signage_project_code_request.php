@@ -1,7 +1,7 @@
 <?php require_once __DIR__.'/_common.php';
 $c=is_array($data['client']??null)?$data['client']:[];$p=is_array($data['project']??null)?$data['project']:[];
 
-pageStart('header_project.png','New Project Code Creation Request',"Please raise the project code as per the client's requirement and enclosed project documents.",$config);
+pageStart('New Project Code Creation Request',"Please raise the project code as per the client's requirement and enclosed project documents.",$config);
 chips($data,'Project Code Creation');
 
 echo card('Project Details (For Code Creation)',rowsHtml([

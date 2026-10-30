@@ -29,14 +29,15 @@ Call the API only from the backend or a test client, never from browser or mobil
 
 Upload banner images to `templates/images/` (public URL `.../templates/images/<file>`; override the base with `SIGNAGE_ASSET_URL` in `config.local.php`):
 
-| File | Used by | Size |
-|---|---|---|
-| `header_combined.png` | `combined` mail | 1400 px wide (shown at 700 px) |
-| `header_client.png` | `client` mail | same |
-| `header_project.png` | `project` mail | same |
-| `footer.png` | all three (division icons strip) | same |
+The folder is `templates/Images/` (capital I; Linux is case-sensitive).
 
-Each image is optional: if a file is missing the mail falls back to an HTML banner with the title, so nothing breaks. The header image should already contain the title text. Logo in the sign-off: `https://adinnroadshows.com/images/logo/AdinnLogo.png` (white theme); dark theme logo is `https://adinnoutdoors.com/images/adinnHeaderlogo.svg`.
+| File | Used by |
+|---|---|
+| `Signage_Email_Header.png` | header banner of all three mails (the title is rendered as HTML text below it) |
+| `footer.png` | optional footer strip |
+| `icons/*.png` | Font Awesome glyphs pre-rendered to PNG (`chip-*.png` for the four summary cards, the rest for detail rows). Icon fonts and web fonts do not work in Gmail/Outlook, so images are used. Upload the whole `icons/` folder. |
+
+Font: Montserrat via Google Fonts link (Apple Mail, iOS Mail, some Outlook); Gmail and others fall back to Segoe UI/Arial. If the header image is missing the mail falls back to an HTML banner. Logo in the sign-off: `https://adinnroadshows.com/images/logo/AdinnLogo.png` (white theme); dark theme logo is `https://adinnoutdoors.com/images/adinnHeaderlogo.svg`.
 
 ## Request
 

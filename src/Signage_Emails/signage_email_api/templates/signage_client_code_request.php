@@ -1,7 +1,7 @@
 <?php require_once __DIR__.'/_common.php';
 $c=is_array($data['client']??null)?$data['client']:[];
 
-pageStart('header_client.png','New Client Code Creation Request','Please create a new client code as per the enclosed onboarding documents.',$config);
+pageStart('New Client Code Creation Request','Please create a new client code as per the enclosed onboarding documents.',$config);
 chips($data,'Client Code Creation');
 
 $left=[['building','Client Name',$c['clientName']??''],['person','Contact Person',$c['contactPerson']??''],['mail','Email ID',$c['email']??''],['phone','Phone Number',$c['phone']??'']];

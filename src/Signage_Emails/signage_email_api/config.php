@@ -16,6 +16,6 @@ return [
  'from_name'=>'Adinn Advertising Services Ltd.',
  // White-theme logo (mail body is white). Dark-theme logo: https://adinnoutdoors.com/images/adinnHeaderlogo.svg
  'logo_url'=>'https://adinnroadshows.com/images/logo/AdinnLogo.png',
- // Optional banner images uploaded to templates/images/ (header_combined.png, header_client.png, header_project.png, footer.png).
- 'asset_url'=>(string)$env('SIGNAGE_ASSET_URL','https://adinndigital.com/api/signage_emails/signage_email_api/templates/images/'),
+ // Optional banner images uploaded to templates/Images/ (Signage_Email_Header.png, footer.png).
+ 'asset_url'=>(string)$env('SIGNAGE_ASSET_URL','https://adinndigital.com/api/signage_emails/signage_email_api/templates/Images/'),
 ];
