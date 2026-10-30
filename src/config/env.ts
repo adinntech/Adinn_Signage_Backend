@@ -84,6 +84,10 @@ const schema = z
     PHP_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     /** Optional key sent to the PHP mail service in the X-Api-Key header. */
     PHP_MAIL_KEY: optional,
+    /** Signage code-request PHP mail API (signage_email_api/index_signage.php). Structured JSON (mailtype, client, project) is POSTed here. Empty = not sent. */
+    SIGNAGE_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
+    /** Must equal SIGNAGE_API_KEY in the PHP API's config.local.php; sent in the X-API-Key header. */
+    SIGNAGE_MAIL_KEY: optional,
     /**
      * Zoho (existing client list in Order Management / Lead Management). OAuth self client: client id + secret + a
      * refresh token. Without them a sample list is served so the screens can be used before Zoho is connected.
@@ -150,6 +154,7 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
+  signageMailEnabled: !!(parsed.data.SIGNAGE_MAIL_URL && parsed.data.SIGNAGE_MAIL_KEY),
   zohoCustomersLive: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),

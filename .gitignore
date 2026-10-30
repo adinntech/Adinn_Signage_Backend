@@ -9,3 +9,7 @@ dist
 !.env.*.example
 # local file storage
 public/uploads
+
+# cPanel signage mail API secrets
+src/Signage_Emails/signage_email_api/config.local.php
+src/Signage_Emails/signage_email_api/error_log
