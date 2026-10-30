@@ -205,7 +205,9 @@ export const leadCandidates = asyncHandler(async (req, res) => {
 });
 export const startLead = asyncHandler(async (req, res) => ok(res, await leads.startLead(startLeadBody.parse(req.body), bd(req)), undefined, 201));
 export const getLead = asyncHandler(async (req, res) => {
-  bd(req);
+  // Read-only lead detail: the BD, or the Client Servicing person the order is handed to (scopeOrder: their orders only)
+  // for Full Details / History in My Orders. Every lead write keeps the BD-only check.
+  flowActor(req);
   ok(res, await leads.getLead(id(req)));
 });
 export const leadNotes = asyncHandler(async (req, res) => ok(res, await leads.updateInitialNotes(id(req), leadNotesBody.parse(req.body).initialNotes, bd(req))));
