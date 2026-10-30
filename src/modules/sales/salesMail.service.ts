@@ -15,6 +15,7 @@ import { ensureTemplate } from '../templates/template.service';
 import { User } from '../users/user.model';
 import { ORDER_STAGES, SalesOrder, type OrderStage } from './sales.model';
 import { liveOrder, orderArray } from './order.service';
+import { sendSignageCodeMail, signageMailAvailable, type SignageCodeMailInput } from '../codeRequests/signageCodeMail';
 import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
 
@@ -45,6 +46,8 @@ export async function deliver(rec: {
   rateCardRevision?: number | undefined;
   requestKey?: string | undefined;
   resentFrom?: Types.ObjectId | undefined;
+  /** Code request emails: structured fields sent to the signage PHP API (it renders the branded mail). Falls back to SMTP when the API is not configured. */
+  signage?: SignageCodeMailInput | undefined;
   actor: Actor;
 }) {
   const sentWithKey = async () => {
@@ -58,13 +61,17 @@ export async function deliver(rec: {
   let status: 'SENT' | 'FAILED' | 'SKIPPED' = 'SENT';
   let error: string | undefined;
   const php = rec.kind === 'ONBOARDING';
+  const viaSignage = !!rec.signage && signageMailAvailable();
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
-  if (php ? !phpMailAvailable() : !mailAvailable()) {
+  if (viaSignage ? false : php ? !phpMailAvailable() : !mailAvailable()) {
     status = 'SKIPPED';
     error = php ? 'The PHP mail service is not configured on the server (PHP_MAIL_URL), so nothing was sent' : 'Email is not configured on the server (SMTP), so nothing was sent';
   } else {
     try {
-      if (php) {
+      if (viaSignage) {
+        const files = await Promise.all(rec.attachments.map((a) => readStoredFile(a)));
+        await sendSignageCodeMail({ ...rec.signage!, to: rec.to, cc: rec.cc, ...(rec.bcc?.length ? { bcc: rec.bcc } : {}), subject: rec.subject, attachments: files.map((f) => ({ filename: f.name, content: f.content })) });
+      } else if (php) {
         const links = await Promise.all(rec.attachments.map(async (a) => ({ name: a.name ?? 'attachment.pdf', url: (await storedFileUrl(a)).url })));
         await sendViaPhpMail({ from: env.MAIL_FROM, to: rec.to, cc: rec.cc, subject: rec.subject, html, text: htmlToText(rec.body), attachments: links });
       } else {

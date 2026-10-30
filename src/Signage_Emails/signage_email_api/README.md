@@ -6,7 +6,7 @@ PHP API on cPanel that renders the branded HTML mail and sends it. Three mail ty
 |---|---|---|
 | `combined` | Client Code & Project Code Request | `requestId`, `toEmail`, `client.clientName`, `project.projectName` |
 | `client` | New Client Code Creation Request | `requestId`, `toEmail`, `client.clientName` |
-| `project` | New Project Code Creation Request | `requestId`, `toEmail`, `client.clientCode`, `project.projectName` |
+| `project` | New Project Code Creation Request | `requestId`, `toEmail`, `client.clientName`, `project.projectName` (`client.clientCode` is shown when sent) |
 
 ## Deploy
 
@@ -49,7 +49,7 @@ X-API-Key: <SIGNAGE_API_KEY>
 
 In Bruno: Headers tab -> `Content-Type` and `X-API-Key` (the header name is `X-API-Key`, not `SIGNAGE_MAIL_KEY`). Body tab -> JSON.
 
-Common fields: `mailtype`, `toEmail` (array or comma-separated), `ccEmail`, `subject` (optional, max 200 chars, no line breaks), `requestId` (max 100 chars), `requestDate`, `source`, `message`, `replyTo`, `attachments`.
+Common fields: `mailtype`, `toEmail` (array or comma-separated), `ccEmail`, `bccEmail`, `subject` (optional, max 200 chars, no line breaks), `requestId` (max 100 chars), `requestDate`, `source`, `message`, `replyTo`, `attachments`.
 
 ### 1. Combined (`mailtype: "combined"`)
 
@@ -112,7 +112,7 @@ Common fields: `mailtype`, `toEmail` (array or comma-separated), `ccEmail`, `sub
 
 ### 3. Project code only (`mailtype: "project"`)
 
-`client.clientCode` is required (the client already has a code). `description` is shown in this mail.
+`client.clientCode` is optional but should be sent when the client already has a code (shown as "(Existing)"). `description` is shown in this mail.
 
 ```json
 {

@@ -12,6 +12,7 @@ export interface SignageCodeMail {
   mailType: SignageMailType;
   to: string[];
   cc?: string[];
+  bcc?: string[];
   subject?: string;
   requestId: string;
   requestDate?: string;
@@ -24,6 +25,9 @@ export interface SignageCodeMail {
   attachments?: { filename: string; content: Buffer }[];
 }
 
+/** Everything except the parts `deliver()` already holds (recipients, subject, files). */
+export type SignageCodeMailInput = Omit<SignageCodeMail, 'to' | 'cc' | 'bcc' | 'subject' | 'attachments'>;
+
 export const signageMailAvailable = () => env.signageMailEnabled;
 
 export async function sendSignageCodeMail(m: SignageCodeMail) {
@@ -32,6 +36,7 @@ export async function sendSignageCodeMail(m: SignageCodeMail) {
     mailtype: m.mailType,
     toEmail: m.to,
     ccEmail: m.cc ?? [],
+    ...(m.bcc?.length ? { bccEmail: m.bcc } : {}),
     ...(m.subject ? { subject: m.subject } : {}),
     requestId: m.requestId,
     requestDate: m.requestDate,

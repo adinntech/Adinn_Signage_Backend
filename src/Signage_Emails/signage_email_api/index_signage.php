@@ -29,7 +29,7 @@ try{
  $type=clean($data['mailtype']??'');
  $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php'];
  if(!isset($templates[$type]))throw new InvalidArgumentException('Invalid mailtype');
- $to=emails($data['toEmail']??[]);$cc=emails($data['ccEmail']??[]);
+ $to=emails($data['toEmail']??[]);$cc=emails($data['ccEmail']??[]);$bcc=emails($data['bccEmail']??[]);
  if(!$to)throw new InvalidArgumentException('toEmail is required');
  $requestId=clean($data['requestId']??'');
  if($requestId===''||strlen($requestId)>100)throw new InvalidArgumentException('Valid requestId required');
@@ -37,7 +37,7 @@ try{
  $project=is_array($data['project']??null)?$data['project']:[];
  if(in_array($type,['combined','client'],true)&&clean($client['clientName']??'')==='')throw new InvalidArgumentException('client.clientName required');
  if(in_array($type,['combined','project'],true)&&clean($project['projectName']??'')==='')throw new InvalidArgumentException('project.projectName required');
- if($type==='project'&&clean($client['clientCode']??'')==='')throw new InvalidArgumentException('client.clientCode required');
+ if($type==='project'&&clean($client['clientName']??'')==='')throw new InvalidArgumentException('client.clientName required');
  $subject=clean($data['subject']??'');
  if($subject==='')$subject=ucfirst($type).' Signage Code Request - '.$requestId;
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
@@ -68,6 +68,7 @@ try{
  $mail->CharSet='UTF-8';$mail->setFrom($config['from_email'],$config['from_name']);
  foreach($to as $email)$mail->addAddress($email);
  foreach($cc as $email)if(!in_array($email,$to,true))$mail->addCC($email);
+ foreach($bcc as $email)if(!in_array($email,$to,true)&&!in_array($email,$cc,true))$mail->addBCC($email);
  if(!empty($data['replyTo'])&&filter_var($data['replyTo'],FILTER_VALIDATE_EMAIL))$mail->addReplyTo($data['replyTo']);
  foreach($attachments as $a)$mail->addStringAttachment($a['binary'],$a['filename'],'base64',$a['mime']);
  $mail->isHTML(true);$mail->Subject=$subject;$mail->Body=$body;

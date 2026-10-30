@@ -17,6 +17,8 @@ import { SalesOrder } from '../sales/sales.model';
 import { deliver, listEmails, type Kind } from '../sales/salesMail.service';
 import { User } from '../users/user.model';
 import { CodeRequest, type CodeKind, type CodeStatus } from './codeRequest.model';
+import { buildCodeMail } from './codeRequestMail';
+import { signageMailAvailable } from './signageCodeMail';
 import { CODE_RULES, type alreadySentBody, type codeListQuery, type orderStatesQuery, type confirmBody, type draftBody, type mailBody, type rejectBody, type sendBody } from './codeRequest.validators';
 
 /** Client Servicing works the requests of the orders handed to them (scoped upstream); Super Admin may work any. */
@@ -82,6 +84,16 @@ function defaultDrafts(o: Doc, client: { name?: string | null; clientNo?: string
   const projectBlock =
     `<h3>Project Code Request</h3><p>Please create a project code for the order below.</p>` +
     `<p>${[row('Client', client.name ?? '-'), row('Order No', o.orderNo)].join('<br>')}</p>`;
+  if (signageMailAvailable()) {
+    // The PHP template prints every detail; this text only goes out as "Additional Notes".
+    const note = (what: string) => `<p>Please create the ${what} and confirm once it is done.</p>`;
+    const s = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
+    return {
+      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code') },
+      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code') },
+      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code') },
+    };
+  }
   const subj = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
   const wrap = (blocks: string) => `<p>Dear Team,</p>${blocks}${sig}`;
   return {
@@ -154,7 +166,7 @@ export async function overview(orderId: string, actor: Actor) {
     kinds: { CLIENT_CODE: await stateOf('CLIENT_CODE'), PROJECT_CODE: await stateOf('PROJECT_CODE') },
     requests,
     mail: {
-      enabled: mailAvailable(),
+      enabled: mailAvailable() || signageMailAvailable(),
       from: env.MAIL_FROM ?? null,
       identities: senderIdentities(),
       groups: { CLIENT_CODE: group(env.CODE_REQUEST_CLIENT_RECIPIENTS), PROJECT_CODE: group(env.CODE_REQUEST_PROJECT_RECIPIENTS) },
@@ -229,7 +241,7 @@ async function setSent(rows: Types.ObjectId[], entry: { _id: Types.ObjectId; sta
 export async function sendRequests(orderId: string, input: z.infer<typeof sendBody>, uploads: UploadedFile[], actor: Actor) {
   assertCodeActor(actor);
   const o = await liveOrder(orderId);
-  const client = await Client.findById(o.client).select('name approvedCode gstCertificates').lean();
+  const client = await Client.findById(o.client).select('name clientNo gstin address email phone approvedCode onboarding.pan contacts gstCertificates').lean();
   if (!client) throw AppError.notFound('Client not found');
   const keyOf = (i: number) => `${input.requestKey}-${i}`;
 
@@ -272,8 +284,9 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
       bcc: m.bcc,
       from: m.from,
       subject: m.subject,
-      body: sanitizeHtml(m.body) + footer(),
+      body: signageMailAvailable() ? sanitizeHtml(m.body) : sanitizeHtml(m.body) + footer(),
       attachments: stored,
+      ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, m.kinds, mailBatchId, m.body) } : {}),
       requestKey: keyOf(i),
       actor,
     });
@@ -317,6 +330,8 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
   }
   const prior = (await listEmails(orderId)).find((e) => String(e._id) === String(rows[0]!.mailRef));
   if (!prior) throw AppError.notFound('The original email was not found');
+  const client = await Client.findById(o.client).select('name clientNo gstin address email phone approvedCode onboarding.pan contacts').lean();
+  if (!client) throw AppError.notFound('Client not found');
   const entry = await deliver({
     order: o._id,
     client: o.client,
@@ -328,6 +343,7 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
     body: prior.body ?? '',
     attachments: (prior.attachments ?? []).filter((a) => a.fileId) as StoredFile[],
     resentFrom: prior._id,
+    ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, rows.map((r) => r.kind), rows[0]!.mailBatchId ?? String(rows[0]!._id), prior.body ?? '') } : {}),
     actor,
   });
   if (!entry) throw new AppError(500, 'INTERNAL', 'The email record could not be saved');
