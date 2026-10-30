@@ -90,6 +90,11 @@ async function zohoClientIdOf(c: { _id: unknown; zohoCustomerNo?: string | null;
 const chatDocuments = (o: { handoverMessagesArray?: { attachments?: unknown[] }[] | null }) =>
   ((o.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[])).filter((f, i, all) => all.findIndex((x) => String(x.fileId) === String(f.fileId)) === i);
 const shopTypesList: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
+/** New Client only (the branch saved on the order): the GST certificates go with the request, for creating the client ID. */
+const newClientCertificates = (clientType: string | null | undefined, c: { gstCertificates?: unknown[] | null } | null) =>
+  clientType === 'EXISTING' ? [] : ((c?.gstCertificates ?? []) as StoredFile[]);
+/** One copy of each file. */
+const uniqueFiles = (files: StoredFile[]) => files.filter((f, i, all) => all.findIndex((x) => String(x.fileId) === String(f.fileId)) === i);
 
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
@@ -101,7 +106,7 @@ export async function getRecce(id: string, actor: Actor) {
     .populate('recce.project', 'code status')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
-  const client = await Client.findById(o.client).select('name clientNo email phone gstin contacts zohoCustomerNo zohoId zohoContactId source code').lean();
+  const client = await Client.findById(o.client).select('name clientNo email phone gstin contacts zohoCustomerNo zohoId zohoContactId source code gstCertificates customFields').lean();
   const r = o.recce ?? null;
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const codes = r?.projectCode
@@ -129,6 +134,9 @@ export async function getRecce(id: string, actor: Actor) {
       ];
   const shopRows = o.handoverType && shopTypesList.includes(o.handoverType) ? (o.shopList?.total ?? 0) : 0;
   const docs = chatDocuments(o);
+  const certs = newClientCertificates(o.clientType, client);
+  // New Client only: custom fields go in the message (with the certificate) for the client ID creation.
+  const custom = existing ? [] : (client?.customFields ?? []).filter((f) => f.label && f.value);
   const bd = await User.findById(actor.id).select('name').lean();
   const typeLabel = o.handoverType ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'To be confirmed';
   const shops = shopRows ? `${shopRows} shops` : o.handoverType === 'ASO' ? 'ASO (shop details to be collected)' : 'To be confirmed';
@@ -158,6 +166,8 @@ export async function getRecce(id: string, actor: Actor) {
     autoAttachments: {
       shopExcel: shopRows ? { rows: shopRows, sized: o.handoverType === 'SHOP_MEASUREMENT' } : null,
       documents: docs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType })),
+      /** New Client only: the client's GST certificates (they support the client ID creation). */
+      gstCertificates: certs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType })),
     },
     /** Project Assign route: HANDOVER (Client Servicing), RECCE, or null until the first save. */
     route: await routeOf({ _id: o._id, assignRoute: o.assignRoute, csAssignee: o.csAssignee, recce: o.recce }),
@@ -175,10 +185,13 @@ export async function getRecce(id: string, actor: Actor) {
       cc: [] as string[],
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
       subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
+      // Formal layout: greeting, the request, client details, project details, contacts, attachments, sign-off. Plain
+      // paragraphs and line breaks only (no lists), so the editor keeps it as written.
       body:
+        `<p>Dear Team,</p>` +
         (existing
-          ? `<p>Dear Team,</p><p>Please create the project code and estimation code for the order below, under the existing Client ID ${escapeHtml(zohoNo ?? '-')}.</p>`
-          : `<p>Dear Team,</p><p>This is a new client. Please create the <strong>client code in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below.</p>`) +
+          ? `<p>Kindly create the project code and estimation code for the order below, under the existing Client ID <strong>${escapeHtml(zohoNo ?? '-')}</strong>.</p>`
+          : `<p>This is a new client. Kindly create the <strong>client ID in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below. The GST certificate and the client's details are included for the client ID.</p>`) +
         `<p><strong>Client details</strong><br>${[
           row('Client', client?.name ?? '-'),
           // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
@@ -187,10 +200,9 @@ export async function getRecce(id: string, actor: Actor) {
           row('Email', client?.email ?? '-'),
           row('Phone', client?.phone ?? '-'),
           row('GST Number', client?.gstin ?? '-'),
-          row('Order No', o.orderNo),
-          row('Handover Type', typeLabel),
-          row('Shops', shops),
+          ...custom.map((f) => row(f.label!, f.value!)),
         ].join('<br>')}</p>` +
+        `<p><strong>Project details</strong><br>${[row('Order No', o.orderNo), row('Handover Type', typeLabel), row('Shops', shops)].join('<br>')}</p>` +
         `<p><strong>Contact persons</strong><br>${
           contacts.length
             ? contacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.designation, k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')
@@ -199,8 +211,8 @@ export async function getRecce(id: string, actor: Actor) {
         (o.handoverType === 'ASO' && o.soContacts?.length
           ? `<p><strong>SO contacts</strong><br>${o.soContacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')}</p>`
           : '') +
-        (shopRows || docs.length
-          ? `<p>Attached: ${[shopRows ? `shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, docs.length ? `${docs.length} document${docs.length === 1 ? '' : 's'} from the handover` : null].filter(Boolean).join(' and ')}.</p>`
+        (shopRows || docs.length || certs.length
+          ? `<p><strong>Attachments</strong><br>${[shopRows ? `Shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, certs.length ? `GST certificate${certs.length === 1 ? '' : 's'}` : null, docs.length ? `${docs.length} document${docs.length === 1 ? '' : 's'} from the handover` : null].filter(Boolean).join('<br>')}</p>`
           : '') +
         `<p>Regards,<br>${escapeHtml(bd?.name ?? 'BD Team')}</p>`,
     },
@@ -217,7 +229,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     if (again) return again;
   }
   // Steps in order: the handover details come first (the email carries them).
-  const client = await Client.findById(o.client).select('name contacts').lean();
+  const client = await Client.findById(o.client).select('name contacts gstCertificates').lean();
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Handover Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
   if (!o.recce?.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Handover Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Handover Type & Details first' }]);
@@ -234,7 +246,8 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     }
     for (const f of files) stored.push(await store(f));
     // Documents shared in the handover Communication go as they are (no copy).
-    const attachments = [...stored, ...chatDocuments(o.toObject())];
+    // + New Client only: the client's GST certificates (as they are, no copy). One copy of each file.
+    const attachments = uniqueFiles([...stored, ...chatDocuments(o.toObject()), ...newClientCertificates(o.clientType, client)]);
     const sent = await deliver({ order: o._id, client: o.client, kind: 'PROJECT_CODE_REQUEST', to: input.to, cc: input.cc, subject: input.subject, body: sanitizeHtml(input.body), attachments, requestKey: input.requestKey, actor });
     const status = (sent as { status?: string }).status ?? 'SENT';
     await SalesOrder.updateOne(
