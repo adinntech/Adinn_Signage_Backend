@@ -40,6 +40,7 @@ salesRouter.get('/zoho-clients/:zohoId', write, c.zohoClient);
 salesRouter.get('/orders', read, c.list);
 salesRouter.post('/orders', write, c.createOrder);
 salesRouter.get('/orders/board', read, c.board);
+salesRouter.get('/orders/cs-summary', read, c.csSummary);
 salesRouter.get('/orders/:id', read, c.get);
 salesRouter.post('/orders/:id/stage', write, c.move);
 salesRouter.patch('/orders/:id/owner', write, c.reassign);

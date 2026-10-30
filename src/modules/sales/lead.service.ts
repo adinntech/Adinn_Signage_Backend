@@ -214,6 +214,10 @@ export async function getLead(id: string) {
   const current = won ? flow.length : flow.indexOf(lead.stage as LeadStage);
   const logs = [...(o.leadLogsArray ?? [])].sort((a, b) => (b.at?.getTime() ?? 0) - (a.at?.getTime() ?? 0));
   const byName = (u: unknown) => (u as { name?: string } | null)?.name ?? '';
+  const firstChange = logs.filter((l) => l.action === 'CLIENT_CHANGE' && l.oldValue).at(-1);
+  const originalClient: unknown = firstChange
+    ? { clientType: (firstChange.oldValue as { clientType?: string }).clientType ?? null, name: (firstChange.oldValue as { name?: string }).name ?? null }
+    : { clientType: o.clientType ?? null, name: (order.client as unknown as { name?: string } | null)?.name ?? null };
 
   const stages = flow.map((key) => {
     const i = flow.indexOf(key);
@@ -301,19 +305,30 @@ export async function getLead(id: string) {
       negotiationRounds: revisions.filter((r) => r.phase === 'NEGOTIATION').length,
       approvalDocuments: (o.approvalDocumentsArray ?? []).filter((d) => !d.supersededAt).length,
     },
-    history: logs.slice(0, 100).map((l) => ({
-      id: String(l._id),
-      action: l.action,
-      fromStage: l.fromStage ?? null,
-      toStage: l.toStage ?? null,
-      note: l.note ?? null,
-      step: l.step ?? null,
-      oldValue: l.oldValue ?? null,
-      newValue: l.newValue ?? null,
-      by: byName(l.by),
-      role: l.role ?? '',
-      at: l.at,
-    })),
+    history: logs.slice(0, 100).map((l) => {
+      const entry = {
+        id: String(l._id),
+        action: l.action,
+        fromStage: l.fromStage ?? null,
+        toStage: l.toStage ?? null,
+        note: l.note ?? null,
+        step: l.step ?? null,
+        oldValue: l.oldValue ?? null,
+        newValue: l.newValue ?? null,
+        by: byName(l.by),
+        role: l.role ?? '',
+        at: l.at,
+      };
+      // Client selection of entries from before it was saved on them: the client before the first Change Client
+      // (its saved old side), else the order's own client and branch (unchanged since). Actor / time stay the entry's.
+      if (l.action === 'START' && !l.newValue) entry.newValue = originalClient;
+      // Create Project done = the order created: its own creator and creation time.
+      if (l.action === 'COMPLETE' && l.fromStage === 'NEW_LEAD' && order.createdAt) {
+        entry.at = order.createdAt;
+        entry.by = byName(order.createdBy) || entry.by;
+      }
+      return entry;
+    }),
   };
 }
 

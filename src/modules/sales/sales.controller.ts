@@ -86,6 +86,8 @@ export const zohoClient = asyncHandler(async (req, res) => {
   // clientNo / code: the local client's (null until it is added); zohoId = Zoho contact id; zohoCustomerNo = Zoho's customer number.
   ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null, code: linked?.code ?? null }, { mode: zohoMode() });
 });
+/** My Orders cards (Client Servicing): counts by workflow status over all their orders. */
+export const csSummary = asyncHandler(async (req, res) => ok(res, await orders.csOrderSummary(actorOf(req))));
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await orders.listOrders(orderListQuery.parse(req.query), actorOf(req));
   ok(res, items, meta);

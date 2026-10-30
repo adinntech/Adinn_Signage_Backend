@@ -11,6 +11,7 @@ import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, 
 import type { StoredFile } from '../files/storedFile.schema';
 import { EmailTemplate } from '../templates/template.model';
 import { User } from '../users/user.model';
+import { Project } from '../projects/project.model';
 import { ORDER_STAGES, SalesOrder, WITHOUT_ARRAYS, type OrderStage } from './sales.model';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import type { boardQuery, createOrderBody, orderListQuery, registerBody } from './sales.validators';
@@ -68,12 +69,16 @@ export const leadLog = (
  * Every order is a lead from the start: New Lead (choosing the client and creating the order) is done here, so the
  * lead opens at Project Assign.
  */
-async function createOrder(client: { _id: Types.ObjectId }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string) {
+async function createOrder(client: { _id: Types.ObjectId; name?: string | null }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string) {
   const note = `Order created (${clientType === 'NEW' ? 'new' : 'existing'} client)`;
   const now = new Date();
   const order = await SalesOrder.create({
     lead: { stage: 'PROJECT_ASSIGN', stageChangedAt: now, startedAt: now, startedBy: actor.id, status: 'OPEN', initialNotes },
-    leadLogsArray: [leadLog(actor, 'START', null, 'NEW_LEAD', 'Lead created with the order'), leadLog(actor, 'COMPLETE', 'NEW_LEAD', 'PROJECT_ASSIGN')],
+    leadLogsArray: [
+      // The client branch the user selected (New / Existing) and the company, as chosen at Create Project.
+      leadLog(actor, 'START', null, 'NEW_LEAD', 'Lead created with the order', { step: 'client', newValue: { clientType, name: client.name ?? null } }),
+      leadLog(actor, 'COMPLETE', 'NEW_LEAD', 'PROJECT_ASSIGN'),
+    ],
     orderNo: await nextOrderNo(),
     client: client._id,
     clientType,
@@ -168,9 +173,70 @@ export async function resolveOrderClient(input: { clientId?: string | undefined;
  * Order Management list: newest first, searchable by order no / client name / Client ID, with the rate card and
  * handover status. A Client Servicing person sees only the orders handed to them ("My Orders").
  */
+/* ---------------------- Client Servicing: My Orders workflow status ---------------------- */
+
+export type CsStatus = 'PROJECT_ASSIGN' | 'RECCE_ASSIGNED' | 'COMPLETED' | 'CLOSED';
+const PROJECT_DONE = ['COMPLETED'];
+const PROJECT_CLOSED = ['CANCELLED', 'LOSS'];
+
+/** Operations projects of this person's orders by end state (the order's `recce.project`). */
+async function csProjectIds(actorId: string) {
+  const orders = await SalesOrder.find({ deletedAt: null, csAssignee: actorId, 'recce.project': { $ne: null } }).select('recce.project').lean();
+  const ids = orders.map((o) => o.recce!.project!);
+  const ended = ids.length ? await Project.find({ _id: { $in: ids }, status: { $in: [...PROJECT_DONE, ...PROJECT_CLOSED] } }).select('status').lean() : [];
+  return {
+    done: ended.filter((p) => PROJECT_DONE.includes(p.status as string)).map((p) => p._id),
+    closed: ended.filter((p) => PROJECT_CLOSED.includes(p.status as string)).map((p) => p._id),
+  };
+}
+
+/**
+ * My Orders status from the Client Servicing workflow (not the BD's completed handover):
+ * CLOSED: lead closed, or its operations project cancelled / lost. COMPLETED: operations project completed.
+ * RECCE_ASSIGNED: the Recce / Operations person is assigned (project running). PROJECT_ASSIGN: Assign to Recce Team in progress.
+ */
+function csStatusFilter(status: CsStatus, p: { done: Types.ObjectId[]; closed: Types.ObjectId[] }): Record<string, unknown> {
+  const closed = { $or: [{ 'lead.status': 'CLOSED' }, { 'recce.project': { $in: p.closed } }] };
+  if (status === 'CLOSED') return closed;
+  const notClosed = { 'lead.status': { $ne: 'CLOSED' }, 'recce.project': { $nin: p.closed } };
+  if (status === 'COMPLETED') return { ...notClosed, 'recce.project': { $in: p.done, $nin: p.closed } };
+  if (status === 'RECCE_ASSIGNED') return { ...notClosed, 'recce.assignee': { $ne: null }, 'recce.project': { $nin: [...p.done, ...p.closed] } };
+  return { ...notClosed, 'recce.assignee': null };
+}
+
+/** Counts for the My Orders cards: every order assigned to this person (not just one page). */
+export async function csOrderSummary(actor: Actor) {
+  if (actor.role !== 'CLIENT_SERVICING') throw AppError.forbidden();
+  const base = { deletedAt: null, csAssignee: new Types.ObjectId(actor.id) };
+  const p = await csProjectIds(actor.id);
+  const count = (s?: CsStatus) => SalesOrder.countDocuments(s ? { ...base, ...csStatusFilter(s, p) } : base);
+  const [total, projectAssign, recceAssigned, completed, closed] = await Promise.all([count(), count('PROJECT_ASSIGN'), count('RECCE_ASSIGNED'), count('COMPLETED'), count('CLOSED')]);
+  return { total, projectAssign, recceAssigned, completed, closed };
+}
+
+const EMAIL_SENT = ['SENT', 'SKIPPED'];
+/** Current step of the Client Servicing workflow, with the labels of its mind map (assign-steps / lead-mind-map). */
+function csStageOf(o: { lead?: { status?: string | null } | null; handoverFull?: boolean | null; recce?: { handoverDoneAt?: Date | null; projectCode?: string | null; clientId?: string | null; assignee?: unknown } | null; clientType?: string | null; salesprofile?: { kind?: string | null; status?: string | null }[] | null }, projectStatus: string | null): { status: CsStatus; stage: string } {
+  if (o.lead?.status === 'CLOSED' || (projectStatus && PROJECT_CLOSED.includes(projectStatus))) return { status: 'CLOSED', stage: 'Closed' };
+  if (o.recce?.assignee) return { status: projectStatus && PROJECT_DONE.includes(projectStatus) ? 'COMPLETED' : 'RECCE_ASSIGNED', stage: 'Lead Completed' };
+  const sent = (o.salesprofile ?? []).some((e) => e.kind === 'PROJECT_CODE_REQUEST' && EMAIL_SENT.includes(e.status ?? ''));
+  const stage =
+    o.handoverFull === false && !o.recce?.handoverDoneAt && !sent
+      ? 'Handover Type & Details'
+      : !sent
+        ? 'Project Code Request Email'
+        : !o.recce?.projectCode || (o.clientType !== 'EXISTING' && !o.recce.clientId)
+          ? 'Project Code & Estimation Code'
+          : 'Assign to Recce / Operations';
+  return { status: 'PROJECT_ASSIGN', stage };
+}
+
 export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor) {
   const filter: Record<string, unknown> = { deletedAt: null };
-  if (actor.role === 'CLIENT_SERVICING') filter.csAssignee = new Types.ObjectId(actor.id);
+  const cs = actor.role === 'CLIENT_SERVICING';
+  if (cs) filter.csAssignee = new Types.ObjectId(actor.id);
+  const csProjects = cs ? await csProjectIds(actor.id) : null;
+  if (cs && q.csStatus) Object.assign(filter, csStatusFilter(q.csStatus, csProjects!));
   else if (q.handover === 'ASSIGNED') filter.csAssignee = { $ne: null };
   else if (q.handover === 'PENDING') filter.csAssignee = null;
   if (q.ownerId) filter.owner = new Types.ObjectId(q.ownerId);
@@ -179,21 +245,57 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
     const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientName: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
-    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+    const search = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+    // The CLOSED status filter has its own $or: both must hold.
+    if (filter.$or) filter.$and = [{ $or: filter.$or }, { $or: search }];
+    else filter.$or = search;
+    if (filter.$and) delete filter.$or;
   }
   const [rows, total] = await Promise.all([
     SalesOrder.find(filter)
-      .select('orderNo client clientType owner currentRevision rateCardPdf csAssignee handover shopList createdBy createdAt updatedAt')
+      .select(`orderNo client clientType owner currentRevision rateCardPdf csAssignee handover shopList createdBy createdAt updatedAt${cs ? ' lead.status handoverFull recce.handoverDoneAt recce.projectCode recce.clientId recce.assignee recce.assignedAt recce.assignedBy recce.project salesprofile.kind salesprofile.status' : ''}`)
       .sort(parseSort(q.sort, ['createdAt', 'orderNo', 'updatedAt', 'handover.assignedAt'], '-createdAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
       .populate('client', 'name clientName clientNo zohoCustomerNo city')
       .populate('owner', 'name')
       .populate('csAssignee', 'name')
+      // Only selected for Client Servicing; a path that is not selected populates nothing.
+      .populate('recce.assignee', 'name')
+      .populate('recce.assignedBy', 'name')
+      .populate('recce.project', 'status')
       .lean(),
     SalesOrder.countDocuments(filter),
   ]);
-  const items = rows.map((o) => ({ ...o, rateCardLabel: o.currentRevision ? revisionLabel(o.currentRevision) : null }));
+  // Recce assigned without a saved actor (older records): the person from the assignment entry in the lead history.
+  const noActor = cs ? rows.filter((o) => o.recce?.assignee && !o.recce.assignedBy).map((o) => o._id) : [];
+  const actorFromLog = new Map<string, string>();
+  if (noActor.length) {
+    const logs = await SalesOrder.find({ _id: { $in: noActor } }).select('leadLogsArray.step leadLogsArray.by leadLogsArray.at').lean();
+    const byOrder = logs.map((l) => [String(l._id), (l.leadLogsArray ?? []).filter((x) => x.step === 'cs-recce-assign' && x.by).sort((a, b) => (b.at?.getTime() ?? 0) - (a.at?.getTime() ?? 0))[0]?.by] as const);
+    const users = await User.find({ _id: { $in: byOrder.map(([, by]) => by).filter(Boolean) } }).select('name').lean();
+    const names = new Map(users.map((u) => [String(u._id), u.name]));
+    for (const [oid, by] of byOrder) if (by && names.has(String(by))) actorFromLog.set(oid, names.get(String(by))!);
+  }
+  const items = rows.map((o) => {
+    const base = { ...o, rateCardLabel: o.currentRevision ? revisionLabel(o.currentRevision) : null };
+    if (!cs) return base;
+    // My Orders: the workflow stage and the Recce assignment (separate from the BD -> CS handover.assignedAt).
+    const { salesprofile: _mail, ...rest } = base as typeof base & { salesprofile?: unknown };
+    const project = (o.recce?.project ?? null) as unknown as { status?: string } | null;
+    const { status, stage } = csStageOf(o, project?.status ?? null);
+    return {
+      ...rest,
+      csStatus: status,
+      csStage: stage,
+      // assignee: the Recce / Operations recipient; assignedBy: who assigned them (the Client Servicing person), with when.
+      recce: {
+        assignee: (o.recce?.assignee ?? null) as unknown as { name?: string } | null,
+        assignedBy: o.recce?.assignedBy ? { name: (o.recce.assignedBy as unknown as { name?: string }).name ?? null } : actorFromLog.has(String(o._id)) ? { name: actorFromLog.get(String(o._id))! } : null,
+        assignedAt: o.recce?.assignedAt ?? null,
+      },
+    };
+  });
   return { items, meta: pageMeta(q.page, q.limit, total) };
 }
 

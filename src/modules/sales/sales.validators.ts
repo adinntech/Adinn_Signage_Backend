@@ -64,6 +64,8 @@ export const orderListQuery = listQuery.extend({
   clientType: z.enum(CLIENT_TYPES).optional().or(z.literal('').transform(() => undefined)),
   /** BD view: handed over to Client Servicing or not yet. */
   handover: z.enum(['ASSIGNED', 'PENDING']).optional().or(z.literal('').transform(() => undefined)),
+  /** Client Servicing (My Orders): their workflow status (see order.service csStatusFilter). */
+  csStatus: z.enum(['PROJECT_ASSIGN', 'RECCE_ASSIGNED', 'COMPLETED', 'CLOSED']).optional().or(z.literal('').transform(() => undefined)),
 });
 
 export const handoverTypeBody = z.object({ type: z.enum(HANDOVER_TYPES, { message: 'Choose ASO, Shop Details Only or Shop + Measurement' }) });
