@@ -13,19 +13,27 @@ const write = requirePermission('sales:write');
 const chat = (req: Request, res: Response, next: NextFunction) =>
   req.auth?.role === 'CLIENT_SERVICING' ? next() : write(req, res, next);
 
+/**
+ * Client Servicing workflow (Assign to Recce Team on an order handed to them): the BD team (sales:write) or a Client
+ * Servicing person. :id scoping limits Client Servicing to their own orders; the services allow only the assigned
+ * person and only the workflow steps (handover details only when they were not sent).
+ */
+const csFlow = (req: Request, res: Response, next: NextFunction) =>
+  req.auth?.role === 'CLIENT_SERVICING' ? next() : write(req, res, next);
+
 /** BD sales pipeline: client registration -> orders -> Company Profile -> Rate Card -> Client Approval Proof. */
 export const salesRouter = Router();
 salesRouter.use(authenticate);
 salesRouter.param('id', c.scopeOrder);
 salesRouter.post('/orders/new-client', write, requirePermission('clients:write'), c.registerClient);
 salesRouter.get('/client-servicing-users', write, c.csUsers);
-salesRouter.get('/recce-users', write, c.recceUsers);
+salesRouter.get('/recce-users', csFlow, c.recceUsers);
 // Project Assign > Assign to Recce Team
-salesRouter.get('/orders/:id/recce', write, c.getRecce);
-salesRouter.post('/orders/:id/recce/handover-done', write, c.confirmRecceHandover);
-salesRouter.post('/orders/:id/recce/code-request', write, receive, c.sendCodeRequest);
-salesRouter.put('/orders/:id/recce/codes', write, c.saveRecceCodes);
-salesRouter.post('/orders/:id/recce/assign', write, c.assignRecce);
+salesRouter.get('/orders/:id/recce', csFlow, c.getRecce);
+salesRouter.post('/orders/:id/recce/handover-done', csFlow, c.confirmRecceHandover);
+salesRouter.post('/orders/:id/recce/code-request', csFlow, receive, c.sendCodeRequest);
+salesRouter.put('/orders/:id/recce/codes', csFlow, c.saveRecceCodes);
+salesRouter.post('/orders/:id/recce/assign', csFlow, c.assignRecce);
 salesRouter.get('/shop-list-template', read, c.shopTemplate);
 salesRouter.get('/zoho-clients', write, c.zohoClients);
 salesRouter.get('/zoho-clients/:zohoId', write, c.zohoClient);
@@ -39,22 +47,22 @@ salesRouter.get('/orders/:id/history', read, c.history);
 // BD -> Client Servicing handover (shop list and documents are optional; documents can still be added after handover)
 salesRouter.get('/orders/:id/handover', read, c.getHandover);
 salesRouter.get('/orders/:id/handover/shops', read, c.shops);
-salesRouter.post('/orders/:id/handover/shops', write, receive, c.uploadShops);
-salesRouter.delete('/orders/:id/handover/shops', write, c.removeShops);
+salesRouter.post('/orders/:id/handover/shops', csFlow, receive, c.uploadShops);
+salesRouter.delete('/orders/:id/handover/shops', csFlow, c.removeShops);
 salesRouter.get('/orders/:id/handover/shops/export', read, c.exportShops);
-salesRouter.post('/orders/:id/handover/shop-rows', write, c.addShopRow);
-salesRouter.put('/orders/:id/handover/shop-rows/:rowId', write, c.updateShopRow);
-salesRouter.delete('/orders/:id/handover/shop-rows/:rowId', write, c.deleteShopRow);
+salesRouter.post('/orders/:id/handover/shop-rows', csFlow, c.addShopRow);
+salesRouter.put('/orders/:id/handover/shop-rows/:rowId', csFlow, c.updateShopRow);
+salesRouter.delete('/orders/:id/handover/shop-rows/:rowId', csFlow, c.deleteShopRow);
 salesRouter.get('/orders/:id/handover/shop-history', read, c.shopHistory);
-salesRouter.post('/orders/:id/handover/shop-rows/:rowId/files', write, receive, c.addShopFiles);
-salesRouter.delete('/orders/:id/handover/shop-rows/:rowId/files/:fileId', write, c.removeShopFile);
+salesRouter.post('/orders/:id/handover/shop-rows/:rowId/files', csFlow, receive, c.addShopFiles);
+salesRouter.delete('/orders/:id/handover/shop-rows/:rowId/files/:fileId', csFlow, c.removeShopFile);
 // Communication & attachments (chat): text, files and voice notes
 salesRouter.post('/orders/:id/handover/messages', read, chat, receive, c.addMessage);
 salesRouter.delete('/orders/:id/handover/messages/:messageId', write, c.removeMessage);
 salesRouter.patch('/orders/:id/handover/scope', write, c.handoverScope);
-salesRouter.patch('/orders/:id/handover/type', write, c.handoverType);
+salesRouter.patch('/orders/:id/handover/type', csFlow, c.handoverType);
 // ASO: the client's SO contacts (saved as one list)
-salesRouter.put('/orders/:id/handover/so-contacts', write, c.soContacts);
+salesRouter.put('/orders/:id/handover/so-contacts', csFlow, c.soContacts);
 salesRouter.post('/orders/:id/handover/assign', write, c.assignCs);
 salesRouter.get('/orders/:id/comments', read, c.comments);
 salesRouter.post('/orders/:id/comments', write, receive, c.addComment);

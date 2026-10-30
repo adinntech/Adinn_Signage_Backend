@@ -301,6 +301,11 @@ export interface EmbeddedFileInput {
   actor: Actor;
   /** The record the file belongs to (audit trail). */
   owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client'; id: Types.ObjectId | string };
+  /**
+   * The caller has already checked that this actor may store this file for a narrower workflow reason than the
+   * category permission (the assigned Client Servicing person completing their own order). Never set from request data.
+   */
+  workflowAuthorized?: boolean;
 }
 
 /**
@@ -309,7 +314,7 @@ export interface EmbeddedFileInput {
  * in its own record, and calls discardStoredFiles() if that save fails.
  */
 export async function storeEmbeddedFile(i: EmbeddedFileInput): Promise<StoredFile> {
-  assertCanWrite(i.actor.role, i.category);
+  if (!i.workflowAuthorized) assertCanWrite(i.actor.role, i.category);
   if (!CATEGORY_RULES[i.category].standalone) throw AppError.badRequest(`${i.category} is a project file category`);
   validateFiles(i.category, [i.file]);
   const storage = getStorage();

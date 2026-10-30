@@ -15,7 +15,7 @@ import { assignProject, createProject } from '../projects/project.service';
 import { projectCreate } from '../projects/project.validators';
 import { User } from '../users/user.model';
 import { getZohoClient } from '../zoho/zoho.customers';
-import { claimRoute, clientSnapshot, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, routeOf } from './handover.service';
+import { claimRoute, clientSnapshot, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, routeOf } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -29,8 +29,33 @@ const ownerOf = (id: Types.ObjectId) => ({ entity: 'SalesOrder' as const, id });
 
 type OrderDoc = Awaited<ReturnType<typeof liveOrder>>;
 
+/**
+ * Client Servicing workflow: the Client Servicing person an order was handed to continues it with the same Recce steps
+ * (request email, codes, Recce / Operations person). Their own progress lives in `recce`; the BD's handover, its
+ * route and the completed lead stay as they are.
+ */
+const csMine = (o: { csAssignee?: unknown }, actor: Actor) => isCs(actor) && !!o.csAssignee && String(o.csAssignee) === actor.id;
+/** "Send handover details" was on at assignment: the BD's handover details are used as they are (no step 1). */
+const handoverReceived = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
+/** Update filter: the branch is still open for this actor. */
+const branchFilter = (o: OrderDoc, actor: Actor): Record<string, unknown> =>
+  isCs(actor) ? { _id: o._id, csAssignee: o.csAssignee, 'recce.assignee': null } : { _id: o._id, csAssignee: null, 'recce.assignee': null };
+/** The BD's first save takes the Recce route; Client Servicing works after the BD's (Client Servicing) route. */
+const claimRecce = (o: OrderDoc, actor: Actor) => (isCs(actor) ? Promise.resolve() : claimRoute(o, 'RECCE'));
+
+/** Client Servicing may list Recce / Operations people only while one of their orders is still to be assigned. */
+export async function assertCsHasOpenFlow(actor: Actor) {
+  if (!(await SalesOrder.exists({ csAssignee: actor.id, 'recce.assignee': null, deletedAt: null }))) throw AppError.forbidden();
+}
+
 /** The Recce branch can be worked on only while the lead is open at Project Assign and nobody has the project yet. */
-function assertBranchOpen(o: OrderDoc) {
+function assertBranchOpen(o: OrderDoc, actor: Actor) {
+  if (isCs(actor)) {
+    // Only the assigned Client Servicing person (404, as for orders that are not theirs).
+    if (!csMine(o, actor)) throw AppError.notFound('Order not found');
+    if (o.recce?.assignee) throw AppError.conflict('This project is already assigned to the Recce team.');
+    return;
+  }
   if (o.csAssignee) throw AppError.conflict('This project is already assigned to Client Servicing.');
   if (o.recce?.assignee) throw AppError.conflict('This project is already assigned to the Recce team.');
   if (!(o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN')) throw AppError.conflict('Assign the Recce team from the Project Assign stage in Lead Management.');
@@ -62,13 +87,14 @@ async function zohoClientIdOf(c: { _id: unknown; zohoCustomerNo?: string | null;
 }
 
 /** Documents shared in the handover's Communication (not voice notes): they go with the project code request email. */
-const chatDocuments = (o: { handoverMessagesArray?: { attachments?: unknown[] }[] | null }) => (o.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[]);
+const chatDocuments = (o: { handoverMessagesArray?: { attachments?: unknown[] }[] | null }) =>
+  ((o.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[])).filter((f, i, all) => all.findIndex((x) => String(x.fileId) === String(f.fileId)) === i);
 const shopTypesList: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
 
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientType lead recce csAssignee assignRoute handoverType soContacts shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientType lead recce csAssignee assignRoute handoverFull handoverType soContacts shopList declaredShopTotal handoverMessagesArray.attachments salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -88,7 +114,9 @@ export async function getRecce(id: string, actor: Actor) {
   const handoverMissing = handoverGaps({ ...o, handoverFull: true });
   const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
   // Step 1 is done when the BD confirmed it ("Continue"); orders from before the confirmation count once an email went.
-  const handoverDone = !!r?.handoverDoneAt || sentOk;
+  const cs = csMine(o, actor);
+  // Client Servicing with the handover details received from the BD: there is no step 1 to confirm.
+  const handoverDone = !!r?.handoverDoneAt || sentOk || (cs && handoverReceived(o));
   // Steps in order: handover details, the request email, the codes (+ Client ID for a New client), then the assignment.
   const missing = r?.assignee
     ? []
@@ -109,7 +137,12 @@ export async function getRecce(id: string, actor: Actor) {
   return {
     orderId: String(o._id),
     orderNo: o.orderNo,
-    unlocked: o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN' && !o.csAssignee,
+    unlocked: cs ? !r?.assignee : o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN' && !o.csAssignee,
+    /** Client Servicing workflow on an order handed to this person: `handoverSent` = the BD sent the handover details (no step 1). */
+    csFlow: cs ? { handoverSent: handoverReceived(o) } : null,
+    handoverType: (o.handoverType ?? null) as HandoverType | null,
+    /** Gaps of the full handover (step 1). */
+    handoverMissing,
     codes,
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
     /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
@@ -177,7 +210,7 @@ export async function getRecce(id: string, actor: Actor) {
 /** Project code request email: To / CC / subject / message with optional attachments, recorded in the email history. */
 export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmailBody>, files: UploadedFile[], actor: Actor) {
   const o = await liveOrder(id);
-  assertBranchOpen(o);
+  assertBranchOpen(o, actor);
   // Same request sent twice (double click / retry): hand back the first one without storing the files again.
   if (input.requestKey) {
     const again = (await listEmails(id, 'PROJECT_CODE_REQUEST')).find((e) => e.requestKey === input.requestKey);
@@ -187,11 +220,12 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   const client = await Client.findById(o.client).select('name contacts').lean();
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Handover Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
-  if (!o.recce?.handoverDoneAt && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Handover Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Handover Type & Details first' }]);
+  if (!o.recce?.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Handover Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Handover Type & Details first' }]);
   // The first email takes the Recce route (the Client Servicing route is then disabled).
-  await claimRoute(o, 'RECCE');
+  await claimRecce(o, actor);
   const stored: StoredFile[] = [];
-  const store = (f: UploadedFile) => storeEmbeddedFile({ category: 'SALES_HANDOVER_DOCUMENT', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: ownerOf(o._id) });
+  // Assigned Client Servicing (checked by assertBranchOpen): the shop Excel and their added files are stored for the email.
+  const store = (f: UploadedFile) => storeEmbeddedFile({ category: 'SALES_HANDOVER_DOCUMENT', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: ownerOf(o._id), workflowAuthorized: csMine(o, actor) });
   try {
     // Shop types: the shop table as it is now, as Excel (with sizes for Shop + Measurement).
     if (o.handoverType && shopTypesList.includes(o.handoverType) && o.shopList?.total) {
@@ -227,14 +261,14 @@ async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, est
 /** Step 1 of the Recce route: the BD confirms Handover Type & Details ("Continue"), which unlocks the request email. */
 export async function confirmHandover(id: string, actor: Actor) {
   const o = await liveOrder(id);
-  assertBranchOpen(o);
+  assertBranchOpen(o, actor);
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
-  await claimRoute(o, 'RECCE');
+  await claimRecce(o, actor);
   if (!o.recce?.handoverDoneAt) {
     const now = new Date();
     const r = await SalesOrder.updateOne(
-      { _id: o._id, csAssignee: null, 'recce.assignee': null },
+      branchFilter(o, actor),
       {
         $set: o.recce ? { 'recce.handoverDoneAt': now, 'recce.handoverDoneBy': actor.id } : { recce: { handoverDoneAt: now, handoverDoneBy: actor.id } },
         $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, 'Handover Type & Details completed (Recce route)', { step: 'handover' }) },
@@ -247,8 +281,8 @@ export async function confirmHandover(id: string, actor: Actor) {
 
 export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody>, actor: Actor) {
   const o = await liveOrder(id);
-  assertBranchOpen(o);
-  await claimRoute(o, 'RECCE');
+  assertBranchOpen(o, actor);
+  await claimRecce(o, actor);
   if (!(await emailDone(o._id))) throw invalid('projectCode', 'Send the project code request email first');
   await assertCodesFree(o._id, input.projectCode, input.estimationCode);
   // Client ID in Zoho: an Existing client's comes from Zoho; a New client's is typed (created in Zoho after the email).
@@ -263,7 +297,7 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
   const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
   try {
     const r = await SalesOrder.updateOne(
-      { _id: o._id, csAssignee: null, 'recce.assignee': null },
+      branchFilter(o, actor),
       {
         $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
         $push: {
@@ -303,8 +337,8 @@ async function dropProject(projectId: Types.ObjectId | string) {
  */
 export async function assignRecce(id: string, input: z.infer<typeof recceAssignBody>, actor: Actor) {
   const o = await liveOrder(id);
-  assertBranchOpen(o);
-  await claimRoute(o, 'RECCE');
+  assertBranchOpen(o, actor);
+  await claimRecce(o, actor);
   const codes = o.recce?.projectCode && o.recce.estimationCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode } : null;
   if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
   if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
@@ -363,30 +397,38 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
 
   const now = new Date();
   const note = `Assigned to ${person.name} (Recce team) · project ${codes.projectCode}`;
-  const snapshot = await clientSnapshot(o);
-  const r = await SalesOrder.updateOne(
-    { _id: o._id, csAssignee: null, 'recce.assignee': null, 'recce.projectCode': codes.projectCode, 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' },
-    {
-      $set: {
-        'recce.assignee': person._id,
-        'recce.assignedAt': now,
-        'recce.assignedBy': actor.id,
-        'recce.note': input.note,
-        'recce.project': projectId,
-        handoverClient: snapshot,
-        assignRoute: 'RECCE',
-        'lead.status': 'COMPLETED',
-        'lead.completedAt': now,
-        'lead.completedBy': actor.id,
-        'lead.stageChangedAt': now,
-        updatedBy: actor.id,
-      },
-      $push: {
-        salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, note),
-        leadLogsArray: leadLog(actor, 'COMPLETE', 'PROJECT_ASSIGN', null, `Assigned to the Recce team (${person.name}): lead completed`),
-      },
-    },
-  );
+  const cs = isCs(actor);
+  const assignment = { 'recce.assignee': person._id, 'recce.assignedAt': now, 'recce.assignedBy': actor.id, 'recce.note': input.note, 'recce.project': projectId, updatedBy: actor.id };
+  // Client Servicing: their own completion, appended; the BD's handover, snapshot, route and completed lead are kept.
+  const r = cs
+    ? await SalesOrder.updateOne(
+        { ...branchFilter(o, actor), 'recce.projectCode': codes.projectCode },
+        {
+          $set: assignment,
+          $push: {
+            salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, `${note} (by Client Servicing)`),
+            leadLogsArray: leadLog(actor, 'STEP', null, null, `Client Servicing assigned the Recce team (${person.name}) · project ${codes.projectCode}`, { step: 'cs-recce-assign' }),
+          },
+        },
+      )
+    : await SalesOrder.updateOne(
+        { _id: o._id, csAssignee: null, 'recce.assignee': null, 'recce.projectCode': codes.projectCode, 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' },
+        {
+          $set: {
+            ...assignment,
+            handoverClient: await clientSnapshot(o),
+            assignRoute: 'RECCE',
+            'lead.status': 'COMPLETED',
+            'lead.completedAt': now,
+            'lead.completedBy': actor.id,
+            'lead.stageChangedAt': now,
+          },
+          $push: {
+            salespipelineLogs: pipelineLog(actor, 'HANDOVER', o.stage, o.stage, note),
+            leadLogsArray: leadLog(actor, 'COMPLETE', 'PROJECT_ASSIGN', null, `Assigned to the Recce team (${person.name}): lead completed`),
+          },
+        },
+      );
   if (!r.modifiedCount) {
     await dropProject(projectId);
     throw AppError.conflict('This project was assigned meanwhile. Reload the page.');

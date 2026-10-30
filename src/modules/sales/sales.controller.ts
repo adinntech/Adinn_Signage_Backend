@@ -186,6 +186,8 @@ const bd = (req: Request) => {
   leads.assertLeadAccess(actor);
   return actor;
 };
+/** Recce steps: the BD (lead access) or a Client Servicing person (the services allow only the assigned one). */
+const flowActor = (req: Request) => (handover.isCs(actorOf(req)) ? actorOf(req) : bd(req));
 export const leadList = asyncHandler(async (req, res) => {
   bd(req);
   const { items, meta } = await leads.listLeads(leadListQuery.parse(req.query));
@@ -228,8 +230,12 @@ export const saveOnboarding = asyncHandler(async (req, res) => ok(res, await onb
 export const sendOnboarding = asyncHandler(async (req, res) => ok(res, await onboard.sendOnboarding(id(req), sendEmailBody.parse(req.body), bd(req)), undefined, 201));
 /* ------------------------------ Project Assign > Recce team ------------------------------ */
 
-export const recceUsers = asyncHandler(async (_req, res) => ok(res, await recce.recceUsers()));
-export const getRecce = asyncHandler(async (req, res) => ok(res, await recce.getRecce(id(req), bd(req))));
+export const recceUsers = asyncHandler(async (req, res) => {
+  // Client Servicing: only to pick the Recce / Operations person on an order of theirs.
+  if (handover.isCs(actorOf(req))) await recce.assertCsHasOpenFlow(actorOf(req));
+  ok(res, await recce.recceUsers());
+});
+export const getRecce = asyncHandler(async (req, res) => ok(res, await recce.getRecce(id(req), flowActor(req))));
 /** Multipart: the email fields arrive as JSON in `payload`, the attachments as `files`. */
 export const sendCodeRequest = asyncHandler(async (req, res) => {
   let raw: unknown = req.body;
@@ -240,10 +246,10 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
       throw AppError.badRequest('Invalid email details');
     }
   }
-  ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), bd(req)), undefined, 201);
+  ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), flowActor(req)), undefined, 201);
 });
-export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), bd(req))));
-export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), bd(req))));
-export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), bd(req))));
+export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
+export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
+export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 
 export const deleteRequirementNote =asyncHandler(async (req, res) => ok(res, await leads.deleteRequirementNote(id(req), objectId.parse(req.params.noteId), bd(req))));
