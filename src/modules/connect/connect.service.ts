@@ -308,6 +308,7 @@ function present(m: MsgDoc, authors: Map<string, { name?: string; role?: string 
     lastReplyAt: m.lastReplyAt ?? null,
     edited: !!m.editedAt,
     deleted: gone,
+    deletedAt: gone ? m.deletedAt : null,
     pinned: pinned.has(String(m._id)),
     createdAt: m.createdAt,
   };
@@ -424,14 +425,14 @@ const emitUpdate = async (ch: Chan, m: { toObject: () => unknown }, a: Actor) =>
 export async function editMessage(channelId: string, messageId: string, input: z.infer<typeof editBody>, a: Actor) {
   const { ch, m } = await loadMessage(channelId, messageId, a);
   if (m.deletedAt) throw AppError.conflict('This message was deleted.');
-  if (String(m.author) !== a.id) throw AppError.forbidden();
+  if (String(m.author) !== a.id && a.role !== 'SUPER_ADMIN') throw AppError.forbidden();
   m.body = input.body;
   m.editedAt = new Date();
   await m.save();
   return emitUpdate(ch, m, a);
 }
 
-/** The author, the channel owner and Super Admin may delete. The message is hidden for good and its files are erased from storage. */
+/** Edit: the author or Super Admin. Delete: the author, the channel owner and Super Admin. The message is hidden for good and its files are erased from storage. */
 export async function deleteMessage(channelId: string, messageId: string, a: Actor) {
   const { ch, m } = await loadMessage(channelId, messageId, a);
   if (m.deletedAt) return emitUpdate(ch, m, a);

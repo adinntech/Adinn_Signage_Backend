@@ -9,6 +9,7 @@ import { notifyProjectParty } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
 import { Client } from '../clients/client.model';
+import { CodeRequest } from '../codeRequests/codeRequest.model';
 import { SalesOrder } from '../sales/sales.model';
 import { EmailTemplate } from '../templates/template.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
@@ -421,6 +422,9 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
   const client = await Client.findOne({ deletedAt: null, 'gstCertificates.key': key }).select('gstCertificates').lean();
   const inClient = client && findStored(client, key);
   if (inClient) return inClient.name ?? 'file';
+  const code = await CodeRequest.findOne({ 'evidence.key': key }).select('evidence').lean();
+  const inCode = code && findStored(code, key);
+  if (inCode) return inCode.name ?? 'file';
   const tpl = await EmailTemplate.findOne({ 'pdf.key': key }).lean();
   const inTpl = tpl && findStored(tpl, key);
   return inTpl ? (inTpl.name ?? 'file') : null;

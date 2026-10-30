@@ -21,6 +21,7 @@ export const FILE_CATEGORIES = [
   'SALES_RATE_CARD_PDF',
   'SALES_HANDOVER_DOCUMENT',
   'CODE_REQUEST_ATTACHMENT',
+  'CODE_CONFIRMATION_EVIDENCE',
   'CONNECT_ATTACHMENT',
   'WORKSPACE_ATTACHMENT',
   'SALES_HANDOVER_VOICE_NOTE',
@@ -72,6 +73,8 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   SALES_HANDOVER_DOCUMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Handover`, write: 'sales:write', read: ['sales:read'], kinds: DOCS, evidence: false, standalone: true },
   // Client Servicing code request emails (client code / project code). Kept with the order's email record.
   CODE_REQUEST_ATTACHMENT: { folder: (c, p) => `BD/Sales/${c}/${p}/Code_Requests`, write: 'sales:read', read: ['sales:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
+  // Proof kept with a confirmed client / project code (reply mail, screenshot). Stored on the code request.
+  CODE_CONFIRMATION_EVIDENCE: { folder: (c, p) => `BD/Sales/${c}/${p}/Code_Evidence`, write: 'sales:read', read: ['sales:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
   // Adinn Connect messages: documents, images and voice notes. Kept inside the message; deleting the message or its project erases them.
   CONNECT_ATTACHMENT: { folder: (c, p) => `Connect/${c}/${p}`, write: 'connect:use', read: ['connect:use'], kinds: ['document', 'image', 'sheet', 'audio'], evidence: false, standalone: true },
   // Project workspace: files on notes and recorded voice notes. Deleting the note, the voice note or the project erases them.
@@ -100,6 +103,7 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   SALES_RATE_CARD_PDF: 'Sales - Rate Card PDF',
   SALES_HANDOVER_DOCUMENT: 'Sales - Handover Documents',
   CODE_REQUEST_ATTACHMENT: 'Sales - Code Request Attachments',
+  CODE_CONFIRMATION_EVIDENCE: 'Sales - Code Confirmation Evidence',
   CONNECT_ATTACHMENT: 'Adinn Connect - Attachments',
   WORKSPACE_ATTACHMENT: 'Project Workspace - Notes and Voice Notes',
   SALES_HANDOVER_VOICE_NOTE: 'Sales - Handover Voice Notes',

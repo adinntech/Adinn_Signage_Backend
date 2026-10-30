@@ -8,7 +8,7 @@ import { escapeRegex, pageMeta, type Actor } from '../../common/query';
 import { AuditLog, type AuditInput } from '../audit/auditLog.model';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { discardStoredFiles, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
+import { discardStoredFiles, readStoredFile, storedFileUrl, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { mailAvailable } from '../notifications/mail.service';
 import { Project } from '../projects/project.model';
@@ -26,6 +26,7 @@ export const assertCodeActor = (a: Actor) => {
 };
 
 const LABEL: Record<CodeKind, string> = { CLIENT_CODE: 'Client code', PROJECT_CODE: 'Project code' };
+const MAX_EVIDENCE = 5;
 const invalid = (path: string, message: string) => new AppError(422, 'VALIDATION_ERROR', message, [{ path, message }]);
 const already = (message: string) => new AppError(409, 'ALREADY_REQUESTED', message);
 const day = (d?: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
@@ -97,9 +98,10 @@ async function present(rows: Awaited<ReturnType<typeof CodeRequest.find>>) {
   const name = (id?: Types.ObjectId | null) => users.find((u) => String(u._id) === String(id))?.name ?? null;
   return rows.map((r) => {
     const m = r.mailRef ? emails.get(String(r.mailRef)) : undefined;
-    const { bcc: _bcc, ...rest } = r.toObject();
+    const { bcc: _bcc, evidence, ...rest } = r.toObject();
     return {
       ...rest,
+      evidence: (evidence ?? []).map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType })),
       sentByName: name(r.sentBy),
       confirmedByName: name(r.confirmedBy),
       rejectedByName: name(r.rejectedBy),
@@ -169,6 +171,8 @@ export async function saveDraft(orderId: string, input: z.infer<typeof draftBody
   const o = await liveOrder(orderId);
   for (const m of input.mails) {
     for (const kind of m.kinds) {
+      // An autosave that lands after the send must not bring a draft back for a request that is already out.
+      if (await CodeRequest.exists({ order: o._id, kind, $or: [{ active: true }, { status: 'CONFIRMED' }] })) continue;
       const draft = { to: m.to ?? [], cc: m.cc ?? [], bcc: m.bcc ?? [], from: m.from, subject: m.subject ?? '', body: sanitizeHtml(m.body ?? '') };
       try {
         await CodeRequest.updateOne({ order: o._id, kind, status: 'DRAFT' }, { $set: { draft, client: o.client, createdBy: actor.id }, $setOnInsert: { status: 'DRAFT', active: false } }, { upsert: true });
@@ -349,9 +353,10 @@ async function liveRequest(o: Doc, kind: CodeKind, actor: Actor) {
   }
 }
 
-export async function confirmCode(orderId: string, input: z.infer<typeof confirmBody>, actor: Actor) {
+export async function confirmCode(orderId: string, input: z.infer<typeof confirmBody>, uploads: UploadedFile[], actor: Actor) {
   assertCodeActor(actor);
   const { kind, code } = input;
+  if (uploads.length > MAX_EVIDENCE) throw invalid('files', `Attach at most ${MAX_EVIDENCE} evidence files`);
   const rule = CODE_RULES[kind];
   if (!rule.regex.test(code)) throw invalid('code', rule.message);
   const o = await liveOrder(orderId);
@@ -372,10 +377,17 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
   if (await CodeRequest.exists({ kind, confirmedCode: code, order: { $ne: o._id } })) throw invalid('code', `${LABEL[kind]} ${code} is already confirmed on another order`);
 
   const req = await liveRequest(o, kind, actor);
+  const stored: StoredFile[] = [];
+  try {
+    for (const f of uploads) stored.push(await storeEmbeddedFile({ category: 'CODE_CONFIRMATION_EVIDENCE', clientName: client.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: { entity: 'SalesOrder', id: o._id } }));
+  } catch (e) {
+    await discardStoredFiles(stored);
+    throw e;
+  }
   try {
     const r = await CodeRequest.updateOne(
       { _id: req._id, status: 'PENDING_CONFIRMATION' },
-      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote } },
+      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote, evidence: stored } },
     );
     if (!r.matchedCount) throw AppError.conflict('This request was already handled. Reload the page.');
     if (kind === 'CLIENT_CODE') {
@@ -383,11 +395,22 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
       if (!c.matchedCount) throw AppError.conflict('This client was given a different code meanwhile. Reload the page.');
     }
   } catch (e) {
+    await discardStoredFiles(stored);
     if ((e as { code?: number }).code === 11000) throw invalid('code', `${LABEL[kind]} ${code} was just used elsewhere`);
     throw e;
   }
-  await audit(actor, req._id, o, 'CODE_CONFIRMED', `${LABEL[kind]} confirmed: ${code}${input.evidenceNote ? ` (${input.evidenceNote})` : ''}`, [{ field: 'confirmedCode', oldValue: null, newValue: code }]);
+  await audit(actor, req._id, o, 'CODE_CONFIRMED', `${LABEL[kind]} confirmed: ${code}${input.evidenceNote ? ` (${input.evidenceNote})` : ''}${stored.length ? ` with ${stored.length} evidence file${stored.length > 1 ? 's' : ''}` : ''}`, [{ field: 'confirmedCode', oldValue: null, newValue: code }]);
   return overview(orderId, actor);
+}
+
+/** Short-lived link to one evidence file of this order's code requests. */
+export async function evidenceUrl(orderId: string, fileId: string, actor: Actor) {
+  assertCodeActor(actor);
+  const o = await liveOrder(orderId);
+  const req = await CodeRequest.findOne({ order: o._id, 'evidence.fileId': fileId }).select('evidence').lean();
+  const file = req?.evidence?.find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('File not found');
+  return storedFileUrl(file as StoredFile);
 }
 
 export async function rejectRequest(orderId: string, input: z.infer<typeof rejectBody>, actor: Actor) {

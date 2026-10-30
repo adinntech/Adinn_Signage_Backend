@@ -1,4 +1,5 @@
 import { Schema, model } from 'mongoose';
+import { storedFileSchema } from '../files/storedFile.schema';
 
 export const CODE_KINDS = ['CLIENT_CODE', 'PROJECT_CODE'] as const;
 export type CodeKind = (typeof CODE_KINDS)[number];
@@ -48,6 +49,8 @@ const codeRequestSchema = new Schema(
     confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     /** Where the code came from (reply mail, reference number...). */
     evidenceNote: String,
+    /** Proof files uploaded at confirmation (reply mail, screenshot). Erased with the order's client. */
+    evidence: { type: [storedFileSchema], default: [] },
     rejectedReason: String,
     rejectedAt: Date,
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },

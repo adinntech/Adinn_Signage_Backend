@@ -246,6 +246,39 @@ describe('cleanup', () => {
   });
 });
 
+describe('confirmation evidence', () => {
+  const confirmWith = (order: string, code: string, files: [Buffer, string][]) => {
+    const r = api().post(`/api/v1/sales/orders/${order}/codes/confirm`).set(as('CS')).field('payload', JSON.stringify({ kind: 'PROJECT_CODE', code, evidenceNote: 'reply mail' }));
+    for (const [buf, name] of files) r.attach('files', buf, name);
+    return r;
+  };
+  it('keeps uploaded proof with the confirmed code, opens it, and erases it with the client', async () => {
+    const { purgeClientData } = await import('../src/modules/clients/client.cascade');
+    const c = await makeClient();
+    const order = await makeOrder('CS', c);
+    await send(order, [mail(['PROJECT_CODE'])], 'proof-key-00001');
+    const res = await confirmWith(order, '33445566', [[PDF, 'proof.pdf']]);
+    expect(res.status).toBe(200);
+    const row = res.body.data.requests.find((r: { status: string }) => r.status === 'CONFIRMED');
+    expect(row.evidence).toHaveLength(1);
+    expect(row.evidence[0].name).toBe('proof.pdf');
+    const link = await api().get(`/api/v1/sales/orders/${order}/codes/files/${row.evidence[0].fileId}/url`).set(as('CS'));
+    expect(link.status).toBe(200);
+    expect((await api().get(`/api/v1/sales/orders/${order}/codes/files/${'a'.repeat(24)}/url`).set(as('CS'))).status).toBe(404);
+    const files = () => fs.readdirSync(root, { recursive: true }).filter((f) => String(f).endsWith('proof.pdf')).length;
+    expect(files()).toBe(1);
+    expect((await purgeClientData(c)).purged).toBe(true);
+    expect(files()).toBe(0);
+  });
+  it('rejects a bad code without leaving the uploaded file behind, and a wrong file type', async () => {
+    const order = await makeOrder();
+    await send(order, [mail(['PROJECT_CODE'])], 'proof-key-00002');
+    expect((await confirmWith(order, '12', [[PDF, 'stray.pdf']])).status).toBe(422);
+    expect(fs.readdirSync(root, { recursive: true }).filter((f) => String(f).endsWith('stray.pdf')).length).toBe(0);
+    expect((await confirmWith(order, '33445577', [[Buffer.from('MZ'), 'bad.exe']])).status).toBe(400);
+  });
+});
+
 describe('already sent', () => {
   it('records a request sent outside the CRM without emailing, and it can then be confirmed', async () => {
     const order = await makeOrder();
