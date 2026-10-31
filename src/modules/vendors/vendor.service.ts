@@ -1,9 +1,12 @@
 import ExcelJS from 'exceljs';
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
+import { exportFormat } from '../../common/tabular';
 import { nextSeq } from '../../common/counter.model';
 import { escapeRegex, listQuery, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, recordAudit } from '../audit/audit.service';
+import { discardStoredFiles, eraseStoredFile, removeStoredFiles, storedFileUrl, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
+import type { StoredFile } from '../files/storedFile.schema';
 import { parseWorkbook } from '../sites/excel.service';
 import { GST_RE, normKey, normalisePhone } from '../sites/site.fields';
 import { Site } from '../sites/site.model';
@@ -30,8 +33,13 @@ export const vendorBody = z.object({
   ratePerShop: rate,
   farRatePerShop: rate,
   notes: opt(1000),
+  /** Set when the form was filled from a Zoho Books vendor (see GET /vendors/zoho/:vendorNo). */
+  zohoContactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id').optional(),
+  zohoVendorNo: z.string().regex(/^\d{2,8}$/, 'Invalid Zoho vendor number').optional(),
 });
 export const vendorPatch = vendorBody.partial();
+export const zohoVendorNoParam = z.object({ vendorNo: z.string().trim().regex(/^\d{2,8}$/, 'Enter the Zoho vendor number (2 to 8 digits)') });
+export const kycFileBody = z.object({ docType: z.enum(KYC_ITEMS) });
 export const vendorListQuery = listQuery.extend({
   status: z.enum(VENDOR_STATUSES).optional(),
   type: z.enum(VENDOR_TYPES).optional(),
@@ -79,11 +87,16 @@ export async function duplicateOf(v: { mobile?: string | undefined; name?: strin
 
 const strip = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined)) as T;
 
-export async function createVendor(body: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' = 'MANUAL') {
+export async function createVendor(body: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' | 'ZOHO' = 'MANUAL') {
   const { value, errors } = checkVendor(body);
   if (errors.length) fail(errors);
   const dup = await duplicateOf(value as never);
   if (dup) throw AppError.conflict(dup);
+  if (body.zohoContactId) {
+    const z = await Vendor.findOne({ zohoContactId: body.zohoContactId, deletedAt: null }).select('name code').lean();
+    if (z) throw AppError.conflict(`This Zoho vendor is already registered as ${z.name} (${z.code})`);
+    source = 'ZOHO';
+  }
   const code = `VND-${String(await nextSeq('vendor')).padStart(4, '0')}`;
   const v = await Vendor.create({ ...strip(value), code, nameKey: normKey(body.name), source, status: 'PENDING_KYC', createdBy: actor.id, updatedBy: actor.id });
   await recordAudit({ actor, action: 'CREATE', entity: 'Vendor', entityId: v._id, reason: `${code} ${v.name}` });
@@ -141,9 +154,53 @@ export async function deleteVendor(id: string, actor: Actor) {
   if (!v) throw AppError.notFound('Vendor not found');
   const used = await Site.countDocuments({ vendor: id, deletedAt: null });
   if (used) throw AppError.conflict(`${used} shop(s) are allocated to this vendor. Move them first, or mark the vendor inactive`);
+  // KYC scans are erased with the vendor (files first: if one cannot be erased nothing changes and the person can retry).
+  const { failed } = await removeStoredFiles((v.kycFiles ?? []) as unknown as StoredFile[]);
+  if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the vendor was not deleted: ${failed.join(', ')}. Try again.`);
+  v.kycFiles.splice(0);
   v.deletedAt = new Date();
   await v.save();
   await recordAudit({ actor, action: 'DELETE', entity: 'Vendor', entityId: v._id });
+}
+
+const MAX_KYC_FILES_PER_ITEM = 3;
+const vendorOwner = (id: unknown) => ({ entity: 'Vendor' as const, id: String(id) });
+
+/** KYC scans for one checklist item (up to three per item). They do not tick the checklist: Operations ticks it after viewing them. */
+export async function addKycFiles(id: string, docType: (typeof KYC_ITEMS)[number], files: UploadedFile[], actor: Actor) {
+  if (!files.length) throw AppError.badRequest('Choose the document to upload');
+  const v = await Vendor.findOne({ _id: id, deletedAt: null });
+  if (!v) throw AppError.notFound('Vendor not found');
+  if (v.status === 'BLACKLISTED') throw AppError.conflict('This vendor is blacklisted');
+  const have = (v.kycFiles as unknown as { docType?: string }[]).filter((f) => f.docType === docType).length;
+  if (have + files.length > MAX_KYC_FILES_PER_ITEM) throw AppError.badRequest(`Up to ${MAX_KYC_FILES_PER_ITEM} files per document type`);
+  const stored: StoredFile[] = [];
+  try {
+    for (const f of files) stored.push(await storeEmbeddedFile({ category: 'VENDOR_KYC_DOCUMENT', clientName: v.name, folderKey: v.code, file: f, actor, owner: vendorOwner(v._id) }));
+    await Vendor.updateOne({ _id: v._id }, { $push: { kycFiles: { $each: stored.map((s) => ({ ...s, docType })) } }, $set: { updatedBy: actor.id } });
+  } catch (e) {
+    await discardStoredFiles(stored);
+    throw e;
+  }
+  return getVendor(id);
+}
+
+export async function removeKycFile(id: string, fileId: string, actor: Actor) {
+  const v = await Vendor.findOne({ _id: id, deletedAt: null });
+  if (!v) throw AppError.notFound('Vendor not found');
+  const file = v.kycFiles.find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('File not found');
+  await Vendor.updateOne({ _id: v._id }, { $pull: { kycFiles: { fileId: file.fileId } }, $set: { updatedBy: actor.id } });
+  await eraseStoredFile(file as unknown as StoredFile, actor, vendorOwner(v._id));
+  return getVendor(id);
+}
+
+/** Short-lived link to view or download one KYC scan. */
+export async function kycFileUrl(id: string, fileId: string) {
+  const v = await Vendor.findOne({ _id: id, deletedAt: null }).select('kycFiles').lean();
+  const file = v?.kycFiles?.find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('File not found');
+  return storedFileUrl(file as unknown as StoredFile);
 }
 
 export async function getVendor(id: string) {
@@ -152,12 +209,19 @@ export async function getVendor(id: string) {
   return { ...v, allocatedShops: await Site.countDocuments({ vendor: id, deletedAt: null }) };
 }
 
-export async function listVendors(q: z.infer<typeof vendorListQuery>) {
+/** The list screen and the export use the same filter, so an export holds exactly the rows the filters show. */
+export function vendorFilter(q: Pick<z.infer<typeof vendorListQuery>, 'status' | 'type' | 'district' | 'q'>) {
   const f: Record<string, unknown> = { deletedAt: null };
   if (q.status) f.status = q.status;
   if (q.type) f.type = q.type;
   if (q.district) f.district = new RegExp(`^${escapeRegex(q.district)}$`, 'i');
   if (q.q) { const re = new RegExp(escapeRegex(q.q), 'i'); f.$or = [{ name: re }, { code: re }, { mobile: re }, { contactPerson: re }, { district: re }, { serviceAreas: re }]; }
+  return f;
+}
+export const vendorExportQuery = z.object({ format: exportFormat, status: z.enum(VENDOR_STATUSES).optional(), type: z.enum(VENDOR_TYPES).optional(), district: z.string().trim().max(120).optional(), q: z.string().trim().max(100).optional() });
+
+export async function listVendors(q: z.infer<typeof vendorListQuery>) {
+  const f = vendorFilter(q);
   const [items, total, counts] = await Promise.all([
     Vendor.find(f).sort(parseSort(q.sort, ['name', 'code', 'district', 'status', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
     Vendor.countDocuments(f),

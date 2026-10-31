@@ -5,7 +5,9 @@ import { recordAudit } from '../audit/audit.service';
 import { parseWorkbook } from '../sites/excel.service';
 import { normKey, normalisePhone } from '../sites/site.fields';
 import { Vendor } from './vendor.model';
-import { checkVendor, createVendor, duplicateOf, kycComplete, vendorBody, type Issue, type VendorInput } from './vendor.service';
+import type { z } from 'zod';
+import { tabularFile, type ExportColumn } from '../../common/tabular';
+import { checkVendor, createVendor, duplicateOf, kycComplete, vendorBody, vendorExportQuery, vendorFilter, type Issue, type VendorInput } from './vendor.service';
 
 type ColKey = keyof VendorInput | 'bankAccount' | 'ifsc';
 const COLUMNS: { header: string; key: ColKey; aliases: string[]; width: number; sample: string }[] = [
@@ -98,23 +100,42 @@ export async function importVendors(file: { buffer: Buffer; originalname: string
 // Typed text must never become a spreadsheet formula.
 const safe = (v: unknown) => (typeof v === 'string' && /^[=+\-@]/.test(v) ? `'${v}` : v);
 
-export async function exportVendors() {
-  const items = await Vendor.find({ deletedAt: null }).sort({ code: 1 }).limit(20000).lean();
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Vendors');
-  const cols: [string, string, number][] = [
-    ['Code', 'code', 12], ['Vendor Name', 'name', 28], ['Type', 'type', 14], ['Status', 'status', 14], ['Contact Person', 'contactPerson', 20], ['Mobile', 'mobile', 14],
-    ['Email', 'email', 24], ['GST No', 'gstin', 18], ['PAN', 'pan', 12], ['District', 'district', 16], ['Service Areas', 'areas', 28], ['Rate per Shop', 'ratePerShop', 12],
-    ['Far Rate', 'farRatePerShop', 10], ['KYC complete', 'kyc', 12],
-  ];
-  ws.columns = cols.map(([header, key, width]) => ({ header, key, width }));
-  ws.getRow(1).font = { bold: true };
-  for (const v of items) {
-    ws.addRow({
-      code: v.code, name: safe(v.name), type: v.type === 'ONE_MAN' ? 'One-man' : 'Organization', status: v.status, contactPerson: safe(v.contactPerson), mobile: v.mobile,
-      email: v.email, gstin: v.gstin, pan: v.pan, district: safe(v.district), areas: safe((v.serviceAreas ?? []).join(', ')),
-      ratePerShop: v.ratePerShop, farRatePerShop: v.farRatePerShop, kyc: kycComplete(v as never) ? 'Yes' : 'No',
-    });
-  }
-  return Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+const yesNo = (b: unknown) => (b ? 'Yes' : 'No');
+const VENDOR_EXPORT: ExportColumn<Record<string, any>>[] = [
+  { header: 'Vendor Code', value: (v) => v.code, width: 12 },
+  { header: 'Vendor Name', value: (v) => v.name, width: 30 },
+  { header: 'Type', value: (v) => (v.type === 'ONE_MAN' ? 'One-man' : 'Organization'), width: 14 },
+  { header: 'Status', value: (v) => v.status, width: 14 },
+  { header: 'Status Reason', value: (v) => v.statusReason, width: 24 },
+  { header: 'Contact Person', value: (v) => v.contactPerson, width: 22 },
+  { header: 'Mobile', value: (v) => v.mobile, width: 14 },
+  { header: 'Alternate Mobile', value: (v) => v.mobileAlt, width: 16 },
+  { header: 'Email', value: (v) => v.email, width: 28 },
+  { header: 'GST No', value: (v) => v.gstin, width: 18 },
+  { header: 'PAN', value: (v) => v.pan, width: 12 },
+  { header: 'Address', value: (v) => v.address, width: 36 },
+  { header: 'District', value: (v) => v.district, width: 16 },
+  { header: 'Service Areas', value: (v) => (v.serviceAreas ?? []).join(', '), width: 28 },
+  { header: 'Bank Account Holder', value: (v) => v.bank?.accountName, width: 24 },
+  { header: 'Bank Account No', value: (v) => v.bank?.accountNo, width: 20 },
+  { header: 'IFSC', value: (v) => v.bank?.ifsc, width: 14 },
+  { header: 'Rate per Shop', value: (v) => v.ratePerShop, width: 12 },
+  { header: 'Far Rate per Shop', value: (v) => v.farRatePerShop, width: 14 },
+  { header: 'KYC PAN', value: (v) => yesNo(v.kyc?.pan), width: 9 },
+  { header: 'KYC GST', value: (v) => yesNo(v.kyc?.gst), width: 9 },
+  { header: 'KYC Bank', value: (v) => yesNo(v.kyc?.bank), width: 9 },
+  { header: 'KYC Address', value: (v) => yesNo(v.kyc?.address), width: 11 },
+  { header: 'KYC Complete', value: (v) => yesNo(kycComplete(v as never)), width: 12 },
+  { header: 'KYC Verified On', value: (v) => v.kyc?.verifiedAt, width: 14 },
+  { header: 'KYC Documents Uploaded', value: (v) => (v.kycFiles ?? []).length, width: 12 },
+  { header: 'Source', value: (v) => v.source, width: 10 },
+  { header: 'Zoho Vendor No', value: (v) => v.zohoVendorNo, width: 14 },
+  { header: 'Notes', value: (v) => v.notes, width: 30 },
+  { header: 'Registered On', value: (v) => v.createdAt, width: 14 },
+];
+
+/** Every registered vendor matching the screen's filters (all pages), as Excel or CSV. */
+export async function exportVendors(q: z.infer<typeof vendorExportQuery>) {
+  const items = await Vendor.find(vendorFilter(q)).sort({ code: 1 }).limit(20000).lean();
+  return tabularFile(q.format, 'Vendors', VENDOR_EXPORT, items as Record<string, any>[]);
 }

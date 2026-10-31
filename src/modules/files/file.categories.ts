@@ -28,6 +28,7 @@ export const FILE_CATEGORIES = [
   'LEAD_REQUIREMENT_DOCUMENT',
   'LEAD_ONBOARDING_FORM',
   'CLIENT_GST_CERTIFICATE',
+  'VENDOR_KYC_DOCUMENT',
   'TEMPLATE_COMPANY_PROFILE',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
@@ -87,6 +88,8 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   LEAD_ONBOARDING_FORM: { folder: (c, p) => `BD/Sales/${c}/${p}/Onboarding_Form`, write: 'sales:write', read: ['sales:read'], kinds: ['document'], evidence: false, standalone: true },
   // Client Management: GST certificate scans / PDFs, stored per client (`p` is the Client ID). Removing one erases it.
   CLIENT_GST_CERTIFICATE: { folder: (c, p) => `BD/Clients/${c}/${p}/GST_Certificate`, write: 'clients:write', read: ['clients:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
+  // Vendor Management: KYC scans (PAN, GST, bank proof, address proof), stored per vendor (`p` is the vendor code). Removing one, or deleting the vendor, erases it.
+  VENDOR_KYC_DOCUMENT: { folder: (c, p) => `Vendors/${c}/${p}/KYC`, write: 'vendors:manage', read: ['vendors:manage', 'finance:manage'], kinds: ['document', 'image'], evidence: false, standalone: true },
   TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
@@ -110,6 +113,7 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   LEAD_REQUIREMENT_DOCUMENT: 'Lead - Requirement Documents',
   LEAD_ONBOARDING_FORM: 'Lead - Customer Onboarding Form',
   CLIENT_GST_CERTIFICATE: 'Client - GST Certificate',
+  VENDOR_KYC_DOCUMENT: 'Vendor - KYC Documents',
   TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
 };
 

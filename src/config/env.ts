@@ -108,6 +108,8 @@ const schema = z
     /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
     ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
     ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),
+    /** Which Zoho vendors the Zoho vendors list keeps: those whose custom field "Contact Code" (cf_contact_code) equals this. */
+    ZOHO_VENDOR_CONTACT_CODE: z.string().trim().min(1).default('Creditors - Signage'),
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,

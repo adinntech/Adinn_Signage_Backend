@@ -1,9 +1,13 @@
 import { Schema, model } from 'mongoose';
+import { storedFileSchema } from '../files/storedFile.schema';
 
 export const VENDOR_TYPES = ['ONE_MAN', 'ORGANIZATION'] as const;
 export const VENDOR_STATUSES = ['PENDING_KYC', 'ACTIVE', 'INACTIVE', 'BLACKLISTED'] as const;
 export type VendorStatus = (typeof VENDOR_STATUSES)[number];
 export const KYC_ITEMS = ['pan', 'gst', 'bank', 'address'] as const;
+
+/** A KYC scan: the stored-file details plus the checklist item it proves. */
+const kycFileSchema = storedFileSchema.clone().add({ docType: { type: String, enum: KYC_ITEMS, required: true } });
 
 /**
  * Vendor master. A vendor is registered as PENDING_KYC, becomes ACTIVE once the KYC checklist is complete and an
@@ -37,8 +41,13 @@ const vendorSchema = new Schema(
       verifiedAt: Date,
       verifiedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     },
+    /** Zoho Books vendor this record was filled from; the number is the digits before " - " in the Zoho contact name. */
+    zohoContactId: { type: String, index: true, sparse: true },
+    zohoVendorNo: String,
+    /** KYC scans (category VENDOR_KYC_DOCUMENT). Operations views them, then ticks the checklist. */
+    kycFiles: { type: [kycFileSchema], default: [] },
     notes: String,
-    source: { type: String, enum: ['MANUAL', 'IMPORT'], default: 'MANUAL' },
+    source: { type: String, enum: ['MANUAL', 'IMPORT', 'ZOHO'], default: 'MANUAL' },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     deletedAt: Date,
