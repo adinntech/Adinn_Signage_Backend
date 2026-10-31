@@ -58,7 +58,10 @@ type GapInput = {
   handoverFull?: boolean | null;
   handoverType?: string | null;
   shopList?: { total?: number | null; error?: number | null } | null;
+  soContacts?: { name?: string | null; phone?: string | null }[] | null;
 };
+/** ASO needs at least one SO contact with a name and a phone number (email optional). */
+export const SO_CONTACT_GAP = 'Add at least one SO Contact with name and phone number';
 /** Toggle off = client details and contact persons only. Orders from before the toggle count as full. */
 const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
 
@@ -69,8 +72,9 @@ const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== fals
 export function handoverGaps(o: GapInput): string[] {
   if (!isFull(o)) return [];
   if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
-  // ASO goes without a shop list (rows of the shop types stay in their own datasets and are not handed over).
-  if (o.handoverType === 'ASO') return [];
+  // ASO goes without a shop list (rows of the shop types stay in their own datasets and are not handed over), but
+  // with at least one SO contact. Toggle OFF (client details only) returns above, so it never needs one.
+  if (o.handoverType === 'ASO') return (o.soContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim()) ? [] : [SO_CONTACT_GAP];
   if (!o.shopList?.total) return ['Add the shop list: upload the Excel or add the shops'];
   const bad = o.shopList.error ?? 0;
   if (bad) return [`${bad} shop row${bad === 1 ? ' has' : 's have'} errors: edit or delete ${bad === 1 ? 'it' : 'them'}`];
