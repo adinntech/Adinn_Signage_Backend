@@ -80,7 +80,8 @@ function checkDates(v: { startDate?: Date | undefined; targetDate?: Date | undef
 
 export const projectCreate = z
   .object({
-    clientId: objectId,
+    /** Required, except for a project from a Client Servicing order (its client comes as clientDetails, see createProject). */
+    clientId: objectId.optional(),
     ...projectFields,
     status: BD_START_STATUS.default('NEW'),
     requirement: requirementBody.default(DEFAULT_REQUIREMENT),

@@ -4,7 +4,7 @@ import { AppError } from '../../common/errors';
 import { assertNotCancelled } from '../../common/project-access';
 import { objectId, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { notify } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
@@ -23,7 +23,7 @@ export const reviewBody = z
   .refine((v) => v.status !== 'REJECTED' || !!v.remark, { path: ['remark'], message: 'Say why the claim is rejected' });
 
 async function requireProject(projectId: string) {
-  const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client').lean();
+  const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client clientDetails').lean();
   if (!p) throw AppError.notFound('Project not found');
   return p;
 }
@@ -34,8 +34,8 @@ export async function approverIds() {
   return users.map((u) => u._id);
 }
 
-export async function notifyApprovers(project: { _id: Types.ObjectId; code: string; client: unknown }, title: string, body: string, key: string, actor: Actor) {
-  const client = await Client.findById(project.client).select('name').lean();
+export async function notifyApprovers(project: { _id: Types.ObjectId; code: string; client: unknown; clientDetails?: unknown }, title: string, body: string, key: string, actor: Actor) {
+  const client = { name: await clientNameOf(project) };
   await notify({ kind: 'COST_APPROVAL', recipients: await approverIds(), title, body, project: { _id: project._id, code: project.code, clientName: client?.name }, actorId: actor.id, dedupe: (r) => `${key}:${r}` });
 }
 

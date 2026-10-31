@@ -62,7 +62,7 @@ async function main() {
   };
   const load = async (ids: Types.ObjectId[]) => new Map((await assets.find({ _id: { $in: ids } }).toArray()).map((a) => [String(a._id), a as Doc]));
 
-  const orders = db.collection('salesorders');
+  const orders = db.collection('orders');
   let touchedOrders = 0;
   for await (const o of orders.find({}, { projection: { orderNo: 1, salescommentsArray: 1, salesprofile: 1, rateCardArray: 1, rateCardPdf: 1, approvalDocumentsArray: 1 } })) {
     const pending = refsOf(o).filter(needsCopy);

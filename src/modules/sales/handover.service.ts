@@ -5,7 +5,8 @@ import { AppError } from '../../common/errors';
 import { type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
+import { clientNameOf, clientOf } from '../clients/clientDetails';
+import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
 import { buildTemplate, MAX_ROWS, readGrids, type SheetGrid } from '../sites/excel.service';
@@ -14,14 +15,18 @@ import { User } from '../users/user.model';
 import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type AssignRoute, type HandoverType } from './sales.model';
+import { renderShopListPdf } from './shop-list.pdf';
 
 /** Client Servicing only sees orders handed to them; everyone else with sales access sees all. */
 export const isCs = (actor: Actor) => actor.role === 'CLIENT_SERVICING';
 
+/** Orders a Client Servicing person may open: the ones handed to them and the leads they created themselves. */
+export const csScope = (actor: Actor) => ({ $or: [{ csAssignee: new Types.ObjectId(actor.id) }, { createdBy: new Types.ObjectId(actor.id) }] });
+
 /** 404 (not 403) for an order that is not this Client Servicing person's, so other orders are not disclosed. */
 export async function assertOrderAccess(id: string, actor: Actor) {
   if (!isCs(actor)) return;
-  if (!(await SalesOrder.exists({ _id: id, deletedAt: null, csAssignee: actor.id }))) throw AppError.notFound('Order not found');
+  if (!(await SalesOrder.exists({ _id: id, deletedAt: null, ...csScope(actor) }))) throw AppError.notFound('Order not found');
 }
 
 /** Before handover the BD may change everything; afterwards (to Client Servicing or the Recce team) only add documents. */
@@ -32,7 +37,12 @@ const assertNotHandedOver = (o: { csAssignee?: unknown; recce?: { assignee?: unk
 
 const ownerOf = (id: Types.ObjectId) => ({ entity: 'SalesOrder' as const, id });
 
-type CsInput = { csAssignee?: unknown; handoverFull?: boolean | null; recce?: { assignee?: unknown } | null };
+type CsInput = { csAssignee?: unknown; createdBy?: unknown; handoverFull?: boolean | null; recce?: { assignee?: unknown } | null };
+/**
+ * Active flow: a lead the Client Servicing person created (not handed to anyone): they work on it as the BD does on
+ * theirs (handover details, chat, Recce steps), with the same "before handover" rules.
+ */
+export const csOwns = (o: CsInput, actor?: Actor) => !!actor && isCs(actor) && !o.csAssignee && !!o.createdBy && String(o.createdBy) === actor.id;
 /**
  * "Send handover details" was off when the BD assigned the order: the assigned Client Servicing person completes the
  * handover details (type, SO contacts, shop list, shop images) themselves, until the Recce team is assigned.
@@ -40,7 +50,7 @@ type CsInput = { csAssignee?: unknown; handoverFull?: boolean | null; recce?: { 
 export const csCompletes = (o: CsInput, actor?: Actor) => !!actor && isCs(actor) && !!o.csAssignee && String(o.csAssignee) === actor.id && o.handoverFull === false && !o.recce?.assignee;
 /** BD: before handover only. Client Servicing: only the assigned person, in the case above (server-side, any client). */
 const assertEditable = (o: CsInput, actor: Actor) => {
-  if (!isCs(actor)) return assertNotHandedOver(o);
+  if (!isCs(actor) || csOwns(o, actor)) return assertNotHandedOver(o);
   if (!csCompletes(o, actor)) throw AppError.forbidden('Only the assigned Client Servicing person can complete these handover details (handover sent without details), before the Recce team is assigned.');
 };
 /** Update filter: still open for the BD, or still the assigned Client Servicing person's to complete. */
@@ -50,7 +60,8 @@ const openFilter = (o: CsInput & { _id: Types.ObjectId }, actor: Actor): Record<
 /** Active Client Servicing people the BD can hand an order to. */
 export const csUsers = () => User.find({ role: 'CLIENT_SERVICING', isActive: true, deletedAt: null }).select('name email phone').sort({ name: 1 }).lean();
 
-export const HANDOVER_TYPE_LABELS: Record<HandoverType, string> = { ASO: 'ASO', SHOP_DETAILS: 'Shop Details Only', SHOP_MEASUREMENT: 'Shop + Measurement' };
+/** Display labels ("Assign Type"); the stored values stay ASO / SHOP_DETAILS / SHOP_MEASUREMENT. */
+export const HANDOVER_TYPE_LABELS: Record<HandoverType, string> = { ASO: 'SO', SHOP_DETAILS: 'Only Shop Details', SHOP_MEASUREMENT: 'Shop + Measurement' };
 const shopTypes: readonly string[] = ['SHOP_DETAILS', 'SHOP_MEASUREMENT'];
 const isShopType = (t: string | null | undefined) => !!t && shopTypes.includes(t);
 
@@ -71,7 +82,7 @@ const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== fals
  */
 export function handoverGaps(o: GapInput): string[] {
   if (!isFull(o)) return [];
-  if (!o.handoverType) return ['Choose the handover type: ASO, Shop Details Only or Shop + Measurement'];
+  if (!o.handoverType) return ['Choose the assign type: SO, Only Shop Details or Shop + Measurement'];
   // ASO goes without a shop list (rows of the shop types stay in their own datasets and are not handed over), but
   // with at least one SO contact. Toggle OFF (client details only) returns above, so it never needs one.
   if (o.handoverType === 'ASO') return (o.soContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim()) ? [] : [SO_CONTACT_GAP];
@@ -112,6 +123,8 @@ export async function getHandover(id: string) {
     messages: o.handoverMessagesArray ?? [],
     /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
     soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** SO: Additional Documents (kept apart from chat files; kept when the type changes, shown for SO only), oldest first. */
+    soDocuments: o.handoverType === 'ASO' ? soDocumentsOf(o) : [],
     updatedAt: o.handoverUpdatedAt ?? null,
     /** Imported columns of the shop table (null for tables from before them). */
     columns: shop ? columnsOf(o) : null,
@@ -196,7 +209,7 @@ export async function setHandoverType(id: string, type: HandoverType, actor: Act
   const swap = await swapShopSet(o._id, o.handoverType ?? null, type, openFilter(o, actor));
   const r = await SalesOrder.updateOne(swap.where, {
     $set: { ...swap.set, handoverType: type, updatedBy: actor.id },
-    $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Handover type set to ${HANDOVER_TYPE_LABELS[type]}`, { step: 'handover-type', oldValue: o.handoverType ?? null, newValue: type }) },
+    $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Assign type set to ${HANDOVER_TYPE_LABELS[type]}`, { step: 'handover-type', oldValue: o.handoverType ?? null, newValue: type }) },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   return getHandover(id);
@@ -550,7 +563,7 @@ export async function addShopFiles(id: string, rowId: string, files: UploadedFil
   const bad = files.find((f) => !IMAGE_RE.test(f.originalname));
   if (bad) throw AppError.badRequest(`${bad.originalname}: shop images must be JPG, PNG or WEBP`);
   const o = await liveOrder(id);
-  if (isCs(actor) && !csCompletes(o, actor)) throw AppError.forbidden('Only the assigned Client Servicing person can add shop images while completing the handover details.');
+  if (isCs(actor) && !csCompletes(o, actor) && !csOwns(o, actor)) throw AppError.forbidden('Only the assigned Client Servicing person can add shop images while completing the handover details.');
   if (o.handoverType !== 'SHOP_MEASUREMENT') throw AppError.conflict('Shop images are for Shop + Measurement handovers');
   await handoverRoute(o);
   const row = await findRow(o._id, rowId);
@@ -617,11 +630,12 @@ export async function listShops(id: string, q: { page: number; limit: number; st
 export const shopTemplate = (type: 'SHOP_DETAILS' | 'SHOP_MEASUREMENT' = 'SHOP_MEASUREMENT') =>
   buildTemplate('CLIENT_PROVIDED', type === 'SHOP_DETAILS' ? ['size'] : []);
 
-async function storeHandoverFile(o: CsInput & { _id: Types.ObjectId; orderNo: string; client: unknown }, file: UploadedFile, actor: Actor, category: 'SALES_HANDOVER_DOCUMENT' | 'SALES_HANDOVER_VOICE_NOTE' = 'SALES_HANDOVER_DOCUMENT', shopList = false) {
-  const client = await Client.findById(o.client).select('name').lean();
+async function storeHandoverFile(o: CsInput & { _id: Types.ObjectId; orderNo: string; client: unknown; clientDetails?: unknown }, file: UploadedFile, actor: Actor, category: 'SALES_HANDOVER_DOCUMENT' | 'SALES_HANDOVER_VOICE_NOTE' = 'SALES_HANDOVER_DOCUMENT', shopList = false) {
+  const client = { name: await clientNameOf(o) };
   // Shop list files (Excel, shop images) of the assigned Client Servicing person completing a handover sent without
   // details are stored without sales:write; everything else (chat files included) keeps the category permission.
-  const workflowAuthorized = shopList && csCompletes(o, actor);
+  // Their own leads (active flow): every handover file (shop list, images, chat files), as the BD stores them.
+  const workflowAuthorized = (shopList && csCompletes(o, actor)) || csOwns(o, actor);
   return storeEmbeddedFile({ category, clientName: client?.name ?? 'Client', folderKey: o.orderNo, file, actor, owner: ownerOf(o._id), workflowAuthorized });
 }
 
@@ -754,7 +768,8 @@ function legacyCells(r: Record<string, unknown>, columns: ShopColumn[]): Cells {
  */
 export async function uploadShopList(id: string, file: UploadedFile | undefined, actor: Actor, opts: UploadOptions = {}) {
   if (!file) throw new AppError(422, 'VALIDATION_ERROR', 'Choose the shop list file', [{ path: 'file', message: 'Choose the shop list file' }]);
-  if (!/\.(xlsx|xls|csv)$/i.test(file.originalname)) throw AppError.badRequest('Upload the shop list as an Excel (.xlsx / .xls) or .csv file');
+  // Shop list: Excel only (the uploader takes the same two types).
+  if (!/\.(xlsx|xls)$/i.test(file.originalname)) throw new AppError(422, 'VALIDATION_ERROR', 'Upload an Excel file (.xlsx or .xls)', [{ path: 'file', message: 'Upload an Excel file (.xlsx or .xls)' }]);
   const o = await liveOrder(id);
   assertEditable(o, actor);
   assertShopType(o);
@@ -923,7 +938,7 @@ export async function exportShops(id: string) {
   await ensureRowIds(id);
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo handoverType handoverShopsArray shopColumns').lean();
   if (!o) throw AppError.notFound('Order not found');
-  if (!isShopType(o.handoverType)) throw AppError.conflict('This handover has no shop list (ASO).');
+  if (!isShopType(o.handoverType)) throw AppError.conflict('This handover has no shop list (SO).');
   const sized = o.handoverType === 'SHOP_MEASUREMENT';
   const columns = columnsOf(o);
   if (columns) return exportColumns(o, columns, sized);
@@ -983,7 +998,141 @@ async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[
     const cells = (r.cells ?? {}) as Record<string, string>;
     ws.addRow([r.rowId, ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? ''))]);
   }
-  return { name: `${o.orderNo.replace(/[^w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
+  return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
+}
+
+const STATE_TEXT: Record<string, string> = { VALID: 'Valid', WARNING: 'Check', ERROR: 'Error' };
+const MAX_PDF_IMAGES = 300;
+const PDF_IMAGES_PER_ROW = 4;
+
+/** A few JPEG / PNG images per row for the PDF (pdfkit reads only those), with each row's total image count. */
+async function rowThumbs(rows: Record<string, any>[]) {
+  let budget = MAX_PDF_IMAGES;
+  const out: { files: Buffer[]; count: number }[] = [];
+  for (const r of rows) {
+    const all = (r.attachments ?? []) as StoredFile[];
+    const files: Buffer[] = [];
+    for (const f of all.filter((x) => /\.(jpe?g|png)$/i.test(x.name ?? '') || /^image\/(jpeg|png)$/i.test(x.mimeType ?? '')).slice(0, PDF_IMAGES_PER_ROW)) {
+      if (budget <= 0) break;
+      try {
+        files.push((await readStoredFile(f)).content);
+        budget--;
+      } catch {
+        // A missing file still counts in the row's total.
+      }
+    }
+    out.push({ files, count: all.length });
+  }
+  return out;
+}
+
+/**
+ * The shop table as it is now, as PDF: the same columns as Download Excel (imported columns in sheet order, or the
+ * shop fields of older tables, with extra columns), all rows with their edits, status and issues. Shop + Measurement
+ * keeps the sizes and adds the row images (a few thumbnails per row, the total count always shown).
+ */
+export async function exportShopsPdf(id: string) {
+  await ensureRowIds(id);
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('orderNo client clientDetails handoverType handoverShopsArray shopColumns').lean();
+  if (!o) throw AppError.notFound('Order not found');
+  if (!isShopType(o.handoverType)) throw AppError.conflict('This handover has no shop list (SO).');
+  const sized = o.handoverType === 'SHOP_MEASUREMENT';
+  const columns = columnsOf(o);
+  const rows = (o.handoverShopsArray ?? []) as Record<string, any>[];
+  const size = (r: Record<string, any>) => (r.width && r.height ? `${r.width} x ${r.height}${r.unit ? ` ${r.unit}` : ''}` : '');
+  type Col = [string, (r: Record<string, any>) => unknown];
+  const app: Col[] = [['Status', (r) => STATE_TEXT[r.state] ?? r.state], ['Issues', (r) => (r.issues ?? []).join('; ')]];
+  const cols: Col[] = columns
+    ? [...columns.map((c, i): Col => [c.header.trim() || `Column ${i + 1}`, (r) => r.cells?.[c.id]]), ...(sized && !hasSizeColumn(columns) ? [['Size (W x H)', size] as Col] : []), ...app]
+    : [
+        ['Shop Name', (r) => r.shopName],
+        ['Dealer Name', (r) => r.dealerName],
+        ['Location', (r) => r.location],
+        ['District', (r) => r.district],
+        ['Address', (r) => [r.address1, r.address2, r.address3].filter(Boolean).join(', ')],
+        ['Pincode', (r) => r.pincode],
+        ['Mobile', (r) => r.mobile],
+        ['GST No', (r) => r.gstin],
+        ['Contact Person', (r) => r.contactPerson],
+        ...(sized ? [['Size (W x H)', size] as Col] : []),
+        ['Board Type', (r) => r.boardType],
+        ['Qty', (r) => r.quantity],
+        ['Remarks', (r) => r.remarks],
+        ['Client Site Code', (r) => r.clientSiteCode],
+        ...[...new Set(rows.flatMap((r) => Object.keys(r.extra ?? {})))].map((k): Col => [k, (r) => r.extra?.[k]]),
+        ...app,
+      ];
+  const client = { name: await clientNameOf(o) };
+  const buffer = await renderShopListPdf({
+    title: `${o.orderNo} · Shop List`,
+    subtitle: `${client?.name ?? 'Client'} · ${HANDOVER_TYPE_LABELS[o.handoverType as HandoverType]} · ${rows.length} shop${rows.length === 1 ? '' : 's'} · ${istStamp(new Date())}`,
+    headers: cols.map(([h]) => h),
+    rows: rows.map((r) => cols.map(([, get]) => { const v = get(r); return v == null ? '' : String(v); })),
+    images: sized ? await rowThumbs(rows) : undefined,
+  });
+  return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.pdf`, buffer };
+}
+
+/* ------------------------- SO: Additional Documents ------------------------- */
+
+const MAX_SO_DOCUMENTS = 30;
+const soDocumentsOf = (o: { handoverDocumentsArray?: { kind?: string | null; file?: unknown; createdAt?: Date | null }[] | null }) =>
+  (o.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SO_DOCUMENT').map((d) => ({ ...(d.file as StoredFile), addedAt: d.createdAt ?? null }));
+
+/**
+ * SO: Additional Documents (optional; images, PDF, Excel, Word and the other document types the file service takes),
+ * stored apart from the chat files. A file already added (same content) is skipped, so a repeated upload adds nothing.
+ */
+export async function addSoDocuments(id: string, files: UploadedFile[], actor: Actor) {
+  if (!files.length) throw new AppError(422, 'VALIDATION_ERROR', 'Choose the documents to add', [{ path: 'files', message: 'Choose the documents to add' }]);
+  const o = await liveOrder(id);
+  assertEditable(o, actor);
+  if (o.handoverType !== 'ASO') throw AppError.conflict('Additional Documents are for the SO assign type. Choose SO first.');
+  await handoverRoute(o);
+  const doc = await SalesOrder.findById(o._id).select('handoverDocumentsArray').lean();
+  const have = soDocumentsOf(doc ?? {});
+  const seen = new Set(have.map((f) => f.sha256).filter(Boolean));
+  const fresh = files.filter((f) => {
+    const h = createHash('sha256').update(f.buffer).digest('hex');
+    if (seen.has(h)) return false;
+    seen.add(h);
+    return true;
+  });
+  if (!fresh.length) throw new AppError(409, 'DUPLICATE_FILE', files.length === 1 ? 'This document is already added.' : 'These documents are already added.');
+  if (have.length + fresh.length > MAX_SO_DOCUMENTS) throw AppError.conflict(`Up to ${MAX_SO_DOCUMENTS} additional documents (${have.length} added).`);
+  const stored: StoredFile[] = [];
+  const now = new Date();
+  try {
+    for (const f of fresh) stored.push(await storeHandoverFile(o, f, actor, 'SALES_HANDOVER_DOCUMENT', true));
+    const r = await SalesOrder.updateOne(openFilter(o, actor), {
+      $push: { handoverDocumentsArray: { $each: stored.map((file) => ({ kind: 'SO_DOCUMENT', file, uploadedBy: actor.id, role: actor.role, createdAt: now })) } },
+      $set: { handoverUpdatedAt: now, updatedBy: actor.id },
+    });
+    if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  } catch (e) {
+    await discardStoredFiles(stored);
+    throw e;
+  }
+  await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `SO additional documents added: ${stored.map((f) => f.name).join(', ')}` });
+  return { ...(await getHandover(id)), skipped: files.length - fresh.length };
+}
+
+/** Removes one SO additional document (before handover). A copy that already went out with a request email stays. */
+export async function removeSoDocument(id: string, fileId: string, actor: Actor) {
+  const o = await liveOrder(id);
+  assertEditable(o, actor);
+  await handoverRoute(o);
+  const doc = await SalesOrder.findById(o._id).select('handoverDocumentsArray salesprofile.attachments.fileId').lean();
+  const file = soDocumentsOf(doc ?? {}).find((f) => String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('Document not found');
+  const r = await SalesOrder.updateOne(openFilter(o, actor), {
+    $pull: { handoverDocumentsArray: { kind: 'SO_DOCUMENT', 'file.fileId': file.fileId } },
+    $set: { handoverUpdatedAt: new Date(), updatedBy: actor.id },
+  });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  const mailed = new Set((doc?.salesprofile ?? []).flatMap((e) => (e.attachments ?? []).map((a) => String(a.fileId))));
+  if (!mailed.has(fileId)) await eraseStoredFile(file, actor, ownerOf(o._id));
+  return getHandover(id);
 }
 
 /* --------------------------- communication (chat) --------------------------- */
@@ -1051,6 +1200,8 @@ export async function addMessage(id: string, input: { text?: string | undefined;
 /** The author (or a Super Admin) deletes a message before handover; its files are erased. */
 export async function removeMessage(id: string, messageId: string, actor: Actor) {
   const o = await liveOrder(id);
+  // Client Servicing: only on their own leads (orders handed to them keep their messages).
+  if (isCs(actor) && !csOwns(o, actor)) throw AppError.forbidden('Messages on a handed-over order cannot be deleted.');
   assertNotHandedOver(o);
   const doc = await SalesOrder.findOne({ _id: o._id, 'handoverMessagesArray._id': messageId }, { 'handoverMessagesArray.$': 1 }).lean();
   const m = doc?.handoverMessagesArray?.[0];
@@ -1070,8 +1221,9 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
-export async function clientSnapshot(o: { client: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null }) {
-  const c = await Client.findById(o.client).select('name clientName clientNo zohoCustomerNo email phone gstin gstCertificates customFields contacts').lean();
+export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null }) {
+  // The Client record, or the client kept on the order (Client Servicing).
+  const c = await clientOf(o);
   if (!c) return null;
   const crm = o.clientType !== 'EXISTING';
   return {

@@ -9,6 +9,7 @@ import { notifyProjectParty } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
 import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { SalesOrder } from '../sales/sales.model';
 import { EmailTemplate } from '../templates/template.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
@@ -112,11 +113,13 @@ async function projectFiles(projectId: string | Types.ObjectId): Promise<FileEnt
   return ((p?.files ?? []) as unknown as FileEntry[]).filter(isLive);
 }
 
+/** The project and its client's name (its Client record, or the client array of a project from a Client Servicing order). */
 async function projectWithClient(projectId: string) {
-  const project = await Project.findOne({ _id: projectId, deletedAt: null }).populate<{ client: { _id: Types.ObjectId; name: string } }>('client', 'name');
+  const project = await Project.findOne({ _id: projectId, deletedAt: null });
   if (!project) throw AppError.notFound('Project not found');
-  if (!project.client) throw AppError.conflict('The client of this project no longer exists. Ask an admin to restore the client or re-create the project.');
-  return project;
+  const clientName = await clientNameOf(project);
+  if (!clientName) throw AppError.conflict('The client of this project no longer exists. Ask an admin to restore the client or re-create the project.');
+  return { project, clientName };
 }
 
 export async function uploadFiles(projectId: string, category: FileCategory, files: UploadedFile[], actor: Actor) {
@@ -125,7 +128,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
   await assertProjectAccess(actor, projectId);
   await assertNotCancelled(projectId);
   validateFiles(category, files);
-  const project = await projectWithClient(projectId);
+  const { project, clientName } = await projectWithClient(projectId);
   const storage = getStorage();
 
   // The same file (by content) cannot be uploaded twice into the same project + category, within one request or across requests.
@@ -143,7 +146,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
     const out = [];
     for (const f of files) {
       const kind = kindOfFile(f.originalname)!;
-      const key = buildFileKey({ category, clientName: project.client.name, projectCode: project.code, originalName: f.originalname });
+      const key = buildFileKey({ category, clientName, projectCode: project.code, originalName: f.originalname });
       await storage.put(key, f.buffer, f.mimetype);
       stored.push(key);
       const entry: FileEntry = {
@@ -174,7 +177,7 @@ export async function uploadFiles(projectId: string, category: FileCategory, fil
         {
           kind: 'DOCUMENTS_ADDED',
           title: 'Client documents added',
-          body: `${out.length} new file${out.length > 1 ? 's' : ''} added to project ${project.code} (${project.client.name}).`,
+          body: `${out.length} new file${out.length > 1 ? 's' : ''} added to project ${project.code} (${clientName}).`,
           dedupe: (r) => `docs:${project._id}:${r}:${batch}`,
         },
         actor.id,

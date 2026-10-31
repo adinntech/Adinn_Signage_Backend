@@ -26,7 +26,7 @@ async function main() {
   const all = async (name: string, filter: Doc = {}) => (existing.has(name) ? db.collection(name).find(filter).toArray() : []);
   const strip = ({ order: _o, client: _c, __v: _v, ...rest }: Doc) => rest;
 
-  const orders = db.collection('salesorders');
+  const orders = db.collection('orders');
   const pending = await orders.find({ arraysMigratedAt: { $exists: false } }).toArray();
   console.log(`${pending.length} order(s) to migrate`);
 

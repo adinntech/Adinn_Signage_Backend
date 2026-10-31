@@ -9,6 +9,7 @@ import { removeProjectFiles } from '../files/file.service';
 import { purgeProjectData } from './project.cascade';
 import { notify, type NotifySpec } from '../notifications/notification.service';
 import { Client } from '../clients/client.model';
+import { clientNameOf, type ClientDetails } from '../clients/clientDetails';
 import { CommunicationMessage } from '../communications/communication.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
@@ -39,14 +40,16 @@ export async function systemMessage(project: Types.ObjectId | string, body: stri
 }
 
 /** One client cannot have two live projects with the same campaign name, and codes are globally unique. Drafts are unfinished and never count as a clash. */
-async function assertUniqueProject(input: { code?: string | undefined; clientId?: unknown; campaign?: string | undefined }, exceptId?: string) {
+async function assertUniqueProject(input: { code?: string | undefined; clientId?: unknown; clientZohoId?: string | undefined; campaign?: string | undefined }, exceptId?: string) {
   const notSelf = exceptId ? { _id: { $ne: exceptId } } : {};
   if (input.code) {
     const clash = await Project.findOne({ code: input.code, ...notSelf }).select('code').lean();
     if (clash) throw AppError.conflict(`Project code ${input.code} already exists`);
   }
-  if (input.clientId && input.campaign) {
-    const rows = await Project.find({ client: input.clientId, deletedAt: null, status: { $nin: ['CANCELLED', 'DRAFT'] }, ...notSelf }).select('code campaign').lean();
+  if ((input.clientId || input.clientZohoId) && input.campaign) {
+    // A client array (Client Servicing orders) is the same client by its Zoho id.
+    const same = input.clientId ? { client: input.clientId } : { 'clientDetails.zohoId': input.clientZohoId };
+    const rows = await Project.find({ ...same, deletedAt: null, status: { $nin: ['CANCELLED', 'DRAFT'] }, ...notSelf }).select('code campaign').lean();
     const clash = rows.find((r) => norm(r.campaign ?? '') === norm(input.campaign!));
     if (clash) throw AppError.conflict(`This client already has a project for campaign "${clash.campaign}" (${clash.code}). Use a different campaign name.`);
   }
@@ -55,15 +58,16 @@ async function assertUniqueProject(input: { code?: string | undefined; clientId?
 const STAGE_TEXT: Record<string, string> = { PLANNING: 'in planning', IN_PROGRESS: 'in progress', CLIENT_APPROVAL: 'awaiting client approval', COMPLETED: 'completed' };
 
 type NotifyArgs = Omit<NotifySpec, 'project' | 'actorId'> & { actor: Actor };
-async function notifyProject(p: { _id: Types.ObjectId; code: string; client: unknown }, a: NotifyArgs) {
-  const client = await Client.findById(p.client).select('name').lean();
+async function notifyProject(p: { _id: Types.ObjectId; code: string; client: unknown; clientDetails?: unknown }, a: NotifyArgs) {
+  const client = { name: await clientNameOf(p) };
   const { actor, ...spec } = a;
   await notify({ ...spec, project: { _id: p._id, code: p.code, clientName: client?.name }, actorId: actor.id });
 }
 
 /** Tells the new owner (and the previous one, if the project moved) about an assignment. Email + in-app, stored per person. */
 async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS') {
-  const [client, by] = await Promise.all([Client.findById(p.client).select('name').lean(), User.findById(actor.id).select('name').lean()]);
+  const [clientName, by] = await Promise.all([clientNameOf(p), User.findById(actor.id).select('name').lean()]);
+  const client = { name: clientName };
   const when = p.assignedAt!.getTime();
   const shops = p.requirementType === 'ASO' ? 'Shop count unknown (ASO survey)' : p.expectedShops ? `${p.expectedShops} shops` : '';
   const due = p.targetDate ? `Due ${p.targetDate.toISOString().slice(0, 10)}` : '';
@@ -89,10 +93,16 @@ async function notifyAssignment(p: InstanceType<typeof Project>, previous: strin
   }
 }
 
-export async function createProject(input: z.infer<typeof projectCreate>, actor: Actor) {
-  const client = await Client.findOne({ _id: input.clientId, deletedAt: null });
-  if (!client) throw AppError.badRequest('Client not found');
-  if (client.status !== 'ACTIVE') throw AppError.badRequest('Client is inactive');
+/**
+ * `clientDetails`: a project from a Client Servicing order, whose client is kept on the order (not in the clients
+ * collection): the order's latest client entry is copied onto the project instead of a client reference.
+ */
+export async function createProject(input: z.infer<typeof projectCreate>, actor: Actor, opts: { clientDetails?: ClientDetails | null } = {}) {
+  const details = opts.clientDetails ?? null;
+  const record = details ? null : await Client.findOne({ _id: input.clientId, deletedAt: null });
+  if (!details && !record) throw AppError.badRequest('Client not found');
+  if (record && record.status !== 'ACTIVE') throw AppError.badRequest('Client is inactive');
+  const client = { name: record?.name ?? details!.name, code: record?.code ?? details?.zohoCustomerNo ?? 'CLIENT' };
 
   let sourceMessage: Types.ObjectId | undefined;
   if (input.sourceMessageId) {
@@ -101,7 +111,7 @@ export async function createProject(input: z.infer<typeof projectCreate>, actor:
     sourceMessage = m._id;
   }
 
-  await assertUniqueProject({ code: input.code, clientId: input.clientId, campaign: input.campaign });
+  await assertUniqueProject({ code: input.code, clientId: input.clientId, clientZohoId: details?.zohoId, campaign: input.campaign });
 
   let code = input.code;
   if (!code) {
@@ -118,7 +128,7 @@ export async function createProject(input: z.infer<typeof projectCreate>, actor:
     status,
     expectedShops: input.requirementType === 'ASO' ? null : expectedShops,
     name: rest.name ?? `${client.name} - ${rest.campaign}`,
-    client: clientId,
+    ...(details ? { clientDetails: [details] } : { client: clientId }),
     owner: ownerId ?? (actor.role === 'BD' ? actor.id : undefined),
     coordinator: coordinatorId,
     sourceMessage,
@@ -172,7 +182,7 @@ export async function listProjects(q: z.infer<typeof projectListQuery>, actor: A
   if (Object.keys(scope).length) filter.$and = [scope];
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    filter.$or = [{ code: re }, { name: re }, { campaign: re }, { district: re }];
+    filter.$or = [{ code: re }, { name: re }, { campaign: re }, { district: re }, { 'clientDetails.name': re }];
   }
   const [items, total] = await Promise.all([
     Project.find(filter)
@@ -292,7 +302,7 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   if (!p) throw AppError.notFound('Project not found');
   if (['CANCELLED', 'COMPLETED', 'CLIENT_APPROVAL', 'IN_PROGRESS'].includes(p.status)) throw AppError.conflict(`A ${p.status.toLowerCase().replace('_', ' ')} project cannot be (re)assigned`);
   // Drafts never block a new project, so the campaign clash is checked here, when the draft becomes live.
-  if (UNASSIGNED.includes(p.status)) await assertUniqueProject({ clientId: p.client, campaign: p.campaign ?? undefined }, id);
+  if (UNASSIGNED.includes(p.status)) await assertUniqueProject({ clientId: p.client, clientZohoId: p.client ? undefined : (p.clientDetails?.at(-1)?.zohoId ?? undefined), campaign: p.campaign ?? undefined }, id);
   const missing = missingForAssignment(p);
   if (missing.length) throw new AppError(422, 'VALIDATION_ERROR', `Complete the project before assigning: ${missing.join(', ')}`, missing.map((m) => ({ path: m, message: `Missing ${m}` })));
   // An ASO survey has no shop list, so it can go straight to a recce executive on the mobile app.
@@ -374,7 +384,7 @@ export const projectHistory = (id: string) => listAudit({ project: new Types.Obj
 export async function recentActivity(actor: Actor, limit = 8) {
   const logs = await listAudit({ entity: { $in: ['Project', 'FileAsset', 'ImportBatch'] } }, 40);
   const ids = [...new Set(logs.map((l) => (l.project ? String(l.project) : '')).filter(Boolean))];
-  const projects = await Project.find({ _id: { $in: ids }, deletedAt: null, ...(await projectScope(actor)) }).populate<{ client: { name: string } }>('client', 'name').select('code client').lean();
+  const projects = await Project.find({ _id: { $in: ids }, deletedAt: null, ...(await projectScope(actor)) }).populate<{ client: { name: string } }>('client', 'name').select('code client clientDetails').lean();
   const byId = new Map(projects.map((p) => [String(p._id), p]));
   const text = (l: (typeof logs)[number]) =>
     l.action === 'CREATE' ? 'Project created'

@@ -125,8 +125,10 @@ export const shops = asyncHandler(async (req, res) => {
 export const uploadShops = asyncHandler(async (req, res) => ok(res, await handover.uploadShopList(id(req), uploaded(req)[0], actorOf(req), shopUploadBody.parse(req.body ?? {})), undefined, 201));
 export const removeShops = asyncHandler(async (req, res) => ok(res, await handover.removeShopList(id(req), actorOf(req))));
 export const exportShops = asyncHandler(async (req, res) => {
-  const f = await handover.exportShops(id(req));
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  // ?format=pdf: the same table as a PDF (Download PDF).
+  const pdf = req.query.format === 'pdf';
+  const f = pdf ? await handover.exportShopsPdf(id(req)) : await handover.exportShops(id(req));
+  res.setHeader('Content-Type', pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
   res.setHeader('Cache-Control', 'no-store');
   res.send(f.buffer);
@@ -144,6 +146,8 @@ export const removeMessage = asyncHandler(async (req, res) => ok(res, await hand
 export const handoverScope = asyncHandler(async (req, res) => ok(res, await handover.setHandoverScope(id(req), handoverScopeBody.parse(req.body).full, actorOf(req))));
 export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
 export const soContacts = asyncHandler(async (req, res) => ok(res, await handover.setSoContacts(id(req), soContactsBody.parse(req.body).contacts, actorOf(req))));
+export const addSoDocuments = asyncHandler(async (req, res) => ok(res, await handover.addSoDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
+export const removeSoDocument = asyncHandler(async (req, res) => ok(res, await handover.removeSoDocument(id(req), objectId.parse(req.params.fileId), actorOf(req))));
 export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowId(req), uploaded(req), actorOf(req)), undefined, 201));
 export const removeShopFile = asyncHandler(async (req, res) => ok(res, await handover.removeShopFile(id(req), rowId(req), objectId.parse(req.params.fileId), actorOf(req))));
 export const assignCs =asyncHandler(async (req, res) => ok(res, await handover.assignClientServicing(id(req), assignCsBody.parse(req.body), actorOf(req))));
@@ -191,13 +195,12 @@ const bd = (req: Request) => {
 /** Recce steps: the BD (lead access) or a Client Servicing person (the services allow only the assigned one). */
 const flowActor = (req: Request) => (handover.isCs(actorOf(req)) ? actorOf(req) : bd(req));
 export const leadList = asyncHandler(async (req, res) => {
-  bd(req);
-  const { items, meta } = await leads.listLeads(leadListQuery.parse(req.query));
+  // BD: every lead. Client Servicing: their own leads and orders handed to them (scoped in the service).
+  const { items, meta } = await leads.listLeads(leadListQuery.parse(req.query), flowActor(req));
   ok(res, items, meta);
 });
 export const leadSummary = asyncHandler(async (req, res) => {
-  bd(req);
-  ok(res, await leads.leadSummary());
+  ok(res, await leads.leadSummary(flowActor(req)));
 });
 export const leadCandidates = asyncHandler(async (req, res) => {
   bd(req);

@@ -9,7 +9,7 @@ import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, type UploadedFi
 import type { StoredFile } from '../files/storedFile.schema';
 import { revisionLabel } from '../ratecards/ratecard.model';
 import { approvalGaps } from './approval.service';
-import { handoverGaps, releaseHandoverRoutes, routeOf } from './handover.service';
+import { csScope, handoverGaps, isCs, releaseHandoverRoutes, routeOf } from './handover.service';
 import { getOrder, resolveOrderClient } from './order.service';
 import { phpMailAvailable } from './phpMail';
 import { LEAD_FLOW, LEAD_STAGES, SalesOrder, type LeadStage } from './sales.model';
@@ -137,23 +137,35 @@ export async function leadCandidates(q: { q?: string | undefined }) {
 }
 
 /** Lead list: newest movement first, filterable by stage, status and client flag. */
-export async function listLeads(q: z.infer<typeof leadListQuery>) {
+export async function listLeads(q: z.infer<typeof leadListQuery>, actor?: Actor) {
   await moveLegacyLeads();
   await releaseHandoverRoutes();
   const filter: Record<string, unknown> = { deletedAt: null, lead: { $ne: null } };
+  // Client Servicing: the leads they created and the orders handed to them (never other people's).
+  const and: Record<string, unknown>[] = actor && isCs(actor) ? [csScope(actor)] : [];
   if (q.stage) filter['lead.stage'] = q.stage;
   if (q.status === 'CLOSED') filter['lead.status'] = 'CLOSED';
   if (q.status === 'COMPLETED') filter['lead.status'] = 'COMPLETED';
-  if (q.status === 'OPEN') filter['lead.status'] = { $nin: ['CLOSED', 'COMPLETED'] };
+  if (q.status === 'OPEN') {
+    // Open for Client Servicing also means an order handed to them that still waits for the Recce team.
+    if (actor && isCs(actor)) and.push({ $or: [{ 'lead.status': { $nin: ['CLOSED', 'COMPLETED'] } }, { csAssignee: new Types.ObjectId(actor.id), 'recce.assignee': null, 'lead.status': { $ne: 'CLOSED' } }] });
+    else filter['lead.status'] = { $nin: ['CLOSED', 'COMPLETED'] };
+  }
   if (q.clientType) filter.clientType = q.clientType;
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
-    const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientName: re }, { clientNo: re }] }).select('_id').limit(500).lean();
-    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+    // Client Servicing: their orders keep the client on the order (clientDetails), so only the orders are searched.
+    const own = [{ orderNo: re }, { 'clientDetails.name': re }, { 'clientDetails.zohoCustomerNo': re }, { 'clientDetails.gstin': re }];
+    if (actor && isCs(actor)) and.push({ $or: own });
+    else {
+      const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientName: re }, { clientNo: re }] }).select('_id').limit(500).lean();
+      and.push({ $or: [...own, { client: { $in: clients.map((c) => c._id) } }] });
+    }
   }
+  if (and.length) filter.$and = and;
   const [rows, total] = await Promise.all([
     SalesOrder.find(filter)
-      .select('orderNo client clientType owner lead csAssignee handover.assignedAt currentRevision createdAt')
+      .select('orderNo client clientDetails clientType owner lead csAssignee handover.assignedAt currentRevision createdAt')
       .sort(parseSort(q.sort, ['lead.stageChangedAt', 'lead.startedAt', 'orderNo', 'createdAt'], '-lead.stageChangedAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
@@ -174,17 +186,19 @@ export async function listLeads(q: z.infer<typeof leadListQuery>) {
 }
 
 /** KPI cards: open leads per stage, completed (won) and closed leads, and orders still waiting to become a lead. */
-export async function leadSummary() {
+export async function leadSummary(actor?: Actor) {
   await moveLegacyLeads();
   await releaseHandoverRoutes();
+  // Client Servicing: counts over their own leads and the orders handed to them only.
+  const scope = actor && isCs(actor) ? csScope(actor) : {};
   const [byStage, closed, completed, waiting] = await Promise.all([
     SalesOrder.aggregate<{ _id: LeadStage; n: number }>([
-      { $match: { deletedAt: null, lead: { $ne: null }, 'lead.status': { $nin: ['CLOSED', 'COMPLETED'] } } },
+      { $match: { deletedAt: null, lead: { $ne: null }, 'lead.status': { $nin: ['CLOSED', 'COMPLETED'] }, ...scope } },
       { $group: { _id: '$lead.stage', n: { $sum: 1 } } },
     ]),
-    SalesOrder.countDocuments({ deletedAt: null, 'lead.status': 'CLOSED' }),
-    SalesOrder.countDocuments({ deletedAt: null, 'lead.status': 'COMPLETED' }),
-    SalesOrder.countDocuments({ deletedAt: null, lead: null }),
+    SalesOrder.countDocuments({ deletedAt: null, 'lead.status': 'CLOSED', ...scope }),
+    SalesOrder.countDocuments({ deletedAt: null, 'lead.status': 'COMPLETED', ...scope }),
+    actor && isCs(actor) ? Promise.resolve(0) : SalesOrder.countDocuments({ deletedAt: null, lead: null }),
   ]);
   const stages = Object.fromEntries(LEAD_FLOW.map((s) => [s, byStage.find((b) => b._id === s)?.n ?? 0])) as Record<LeadStage, number>;
   return { open: byStage.reduce((n, b) => n + b.n, 0), closed, completed, waiting, stages };
@@ -249,7 +263,7 @@ export async function getLead(id: string) {
     stages,
     /** Still to do before the current stage can be completed. */
     missing: open
-      ? await missingFor(lead.stage as LeadStage, { _id: o._id, client: order.client._id, clientType: o.clientType, currentRevision: o.currentRevision, requirementNotesArray: notes, onboardingPdf: order.onboardingPdf, csAssignee: order.csAssignee, recceAssignee: order.recce?.assignee })
+      ? await missingFor(lead.stage as LeadStage, { _id: o._id, client: (order.client as { _id?: unknown } | null | undefined)?._id ?? null, clientType: o.clientType, currentRevision: o.currentRevision, requirementNotesArray: notes, onboardingPdf: order.onboardingPdf, csAssignee: order.csAssignee, recceAssignee: order.recce?.assignee })
       : [],
     onboarding: { pdf: order.onboardingPdf ?? null, mailEnabled: phpMailAvailable() },
     nextStage: won ? null : (flow[current + 1] ?? null),

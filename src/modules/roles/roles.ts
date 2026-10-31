@@ -68,7 +68,8 @@ export const permissionsFor = (role: Role): readonly Permission[] => ROLE_PERMIS
 export const ROLE_HOME: Record<Role, string> = {
   SUPER_ADMIN: '/admin/dashboard',
   BD: '/bd/dashboard',
-  CLIENT_SERVICING: '/client-servicing/dashboard',
+  // Active flow: Client Servicing creates leads and assigns the Recce team (My Orders kept, not in the menu).
+  CLIENT_SERVICING: '/create-project',
   RECCE_COORDINATOR: '/operations/dashboard',
   RECCE_EXECUTIVE: '/dashboard', // mobile-only; the Flutter app routes it to /recce
   VENDOR: '/dashboard', // mobile-only; the Flutter app routes it to /vendor

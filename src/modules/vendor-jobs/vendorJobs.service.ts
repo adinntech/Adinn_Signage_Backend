@@ -31,7 +31,7 @@ export async function listJobs(actor: Actor) {
     { $group: { _id: '$project', shops: { $sum: 1 }, districts: { $addToSet: '$district' } } },
   ]);
   const projects = await Project.find({ _id: { $in: groups.map((g) => g._id) }, deletedAt: null, status: { $nin: ['CANCELLED', 'LOSS'] } })
-    .select('code name client requirementType targetDate status')
+    .select('code name client clientDetails requirementType targetDate status')
     .sort({ createdAt: -1 })
     .lean();
   const clients = await Client.find({ _id: { $in: projects.map((p) => p.client) } }).select('name').lean();
@@ -41,7 +41,8 @@ export async function listJobs(actor: Actor) {
     projectId: p._id,
     code: p.code,
     name: p.name,
-    client: clientName.get(String(p.client)) ?? null,
+    // Older projects: the Client record; projects from a Client Servicing order: their client array.
+    client: (p.client ? clientName.get(String(p.client)) : p.clientDetails?.at(-1)?.name) ?? null,
     requirementType: p.requirementType ?? null,
     targetDate: p.targetDate ?? null,
     status: p.status,

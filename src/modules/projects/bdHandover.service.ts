@@ -1,6 +1,6 @@
 import { AppError } from '../../common/errors';
 import { Client } from '../clients/client.model';
-import { exportShops, getHandover, listShops } from '../sales/handover.service';
+import { exportShops, exportShopsPdf, getHandover, listShops } from '../sales/handover.service';
 import { orderFileUrl } from '../sales/order.service';
 import { SalesOrder } from '../sales/sales.model';
 import { Project } from './project.model';
@@ -41,6 +41,8 @@ export async function projectHandover(projectId: string) {
     type: h.type,
     /** ASO: the SO contacts as handed over (or as they are now, for projects from before the snapshot kept them). */
     soContacts: h.type === 'ASO' ? (o.handoverClient?.soContacts ?? h.soContacts) : [],
+    /** SO: the Additional Documents (empty for the other types). */
+    soDocuments: h.soDocuments,
     /** Communication & attachments (chat) from the BD. */
     messages: h.messages,
     documents: h.documents,
@@ -56,11 +58,11 @@ export async function projectHandoverShops(projectId: string, q: Parameters<type
   return listShops(orderId, q);
 }
 
-/** The BD's shop table as it is now, as Excel (same file as the BD's Download Excel). */
-export async function projectHandoverShopsExport(projectId: string) {
+/** The BD's shop table as it is now, as Excel (same file as the BD's Download Excel), or as PDF. */
+export async function projectHandoverShopsExport(projectId: string, pdf = false) {
   const orderId = await sourceOrderId(projectId);
   if (!orderId) throw AppError.notFound('This project has no BD handover');
-  return exportShops(orderId);
+  return pdf ? exportShopsPdf(orderId) : exportShops(orderId);
 }
 
 export async function projectHandoverFileUrl(projectId: string, fileId: string) {

@@ -6,6 +6,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { linkZohoCustomer, registerCompany } from '../clients/client.service';
+import { clientDetailsFromZoho, clientOf, clientView, type ClientDetails } from '../clients/clientDetails';
 import { findZohoByGstin, getZohoClient } from '../zoho/zoho.customers';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
@@ -69,7 +70,7 @@ export const leadLog = (
  * Every order is a lead from the start: New Lead (choosing the client and creating the order) is done here, so the
  * lead opens at Project Assign.
  */
-async function createOrder(client: { _id: Types.ObjectId; name?: string | null }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string) {
+async function createOrder(client: { _id: Types.ObjectId | null; name?: string | null }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string, clientDetails?: ClientDetails) {
   const note = `Order created (${clientType === 'NEW' ? 'new' : 'existing'} client)`;
   const now = new Date();
   const order = await SalesOrder.create({
@@ -80,7 +81,9 @@ async function createOrder(client: { _id: Types.ObjectId; name?: string | null }
       leadLog(actor, 'COMPLETE', 'NEW_LEAD', 'PROJECT_ASSIGN'),
     ],
     orderNo: await nextOrderNo(),
-    client: client._id,
+    // A Client Management client (BD), or the Zoho customer kept on the order itself (Client Servicing).
+    ...(client._id ? { client: client._id } : {}),
+    ...(clientDetails ? { clientDetails: [clientDetails] } : {}),
     clientType,
     stage: 'NEW_ORDER',
     stageChangedAt: new Date(),
@@ -97,8 +100,8 @@ async function createOrder(client: { _id: Types.ObjectId; name?: string | null }
 /** Repeat submission of the same form: hand back what the first submission created. */
 async function replay(requestKey: string | undefined) {
   if (!requestKey) return null;
-  const order = await SalesOrder.findOne({ requestKey }).select('_id client').lean();
-  return order ? { order: await getOrder(String(order._id)), client: await Client.findById(order.client).lean(), replayed: true } : null;
+  const order = await SalesOrder.findOne({ requestKey }).select('_id client clientDetails').lean();
+  return order ? { order: await getOrder(String(order._id)), client: await clientOf(order), replayed: true } : null;
 }
 
 /** New Client: company + contacts + its first order (New Order column), all or nothing. */
@@ -121,10 +124,37 @@ export async function registerNewClient(input: z.infer<typeof registerBody>, act
 }
 
 /**
+ * Client Servicing (Create Project): the Zoho customer is read fresh and kept on the order as its client array; nothing
+ * is written to the clients collection. The order is an Existing client order with no BD owner.
+ */
+async function createCsOrder(zohoId: string, requestKey: string | undefined, actor: Actor, initialNotes?: string) {
+  const again = await replay(requestKey);
+  if (again) return again;
+  const z = await getZohoClient(zohoId);
+  if (!z) throw AppError.notFound('This customer is no longer in Zoho. Refresh the list and choose again.');
+  const details = clientDetailsFromZoho(z, actor.id);
+  try {
+    const order = await createOrder({ _id: null, name: details.name }, 'EXISTING', requestKey, actor, initialNotes, details);
+    return { client: clientView(details), order: await getOrder(String(order._id)), replayed: false };
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000 && requestKey) {
+      const raced = await replay(requestKey);
+      if (raced) return raced;
+    }
+    throw e;
+  }
+}
+
+/**
  * Order Management / Lead Management: a new order (and its lead). New Client = a client from Client Management;
  * Existing Client = a Zoho customer, linked to (or added as) a local client first. A client can have many orders.
  */
 export async function createOrderForClient(input: z.infer<typeof createOrderBody>, actor: Actor) {
+  // Active flow: Client Servicing creates projects for Zoho customers only (never a New client); no BD owner is set.
+  if (actor.role === 'CLIENT_SERVICING') {
+    if (!input.zohoId) throw new AppError(422, 'VALIDATION_ERROR', 'Select the client company from Zoho', [{ path: 'zohoId', message: 'Select the client company from Zoho' }]);
+    return createCsOrder(input.zohoId, input.requestKey, actor, input.initialNotes);
+  }
   const again = await replay(input.requestKey);
   if (again) return again;
   const { client, flag } = await resolveOrderClient(input, actor);
@@ -222,7 +252,7 @@ function csStageOf(o: { lead?: { status?: string | null } | null; handoverFull?:
   const sent = (o.salesprofile ?? []).some((e) => e.kind === 'PROJECT_CODE_REQUEST' && EMAIL_SENT.includes(e.status ?? ''));
   const stage =
     o.handoverFull === false && !o.recce?.handoverDoneAt && !sent
-      ? 'Handover Type & Details'
+      ? 'Assign Type & Details'
       : !sent
         ? 'Project Code Request Email'
         : !o.recce?.projectCode || (o.clientType !== 'EXISTING' && !o.recce.clientId)
@@ -245,7 +275,7 @@ export async function listOrders(q: z.infer<typeof orderListQuery>, actor: Actor
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
     const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientName: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
-    const search = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+    const search = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }, { 'clientDetails.name': re }, { 'clientDetails.zohoCustomerNo': re }];
     // The CLOSED status filter has its own $or: both must hold.
     if (filter.$or) filter.$and = [{ $or: filter.$or }, { $or: search }];
     else filter.$or = search;
@@ -314,7 +344,7 @@ export async function orderBoard(q: z.infer<typeof boardQuery>) {
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
     const clients = await Client.find({ deletedAt: null, $or: [{ name: re }, { clientNo: re }, { code: re }] }).select('_id').limit(500).lean();
-    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }];
+    filter.$or = [{ orderNo: re }, { client: { $in: clients.map((c) => c._id) } }, { 'clientDetails.name': re }, { 'clientDetails.zohoCustomerNo': re }];
   }
   const columns = await Promise.all(
     ORDER_STAGES.map(async (stage) => {
@@ -423,7 +453,7 @@ export async function listComments(id: string) {
 export async function addComment(id: string, body: string, files: UploadedFile[], actor: Actor) {
   const o = await liveOrder(id);
   if (!body && !files.length) throw new AppError(422, 'VALIDATION_ERROR', 'Write a comment or attach a file', [{ path: 'body', message: 'Write a comment or attach a file' }]);
-  const client = await Client.findById(o.client).select('name').lean();
+  const client = await clientOf(o);
   const attachments: StoredFile[] = [];
   const commentId = new Types.ObjectId();
   try {

@@ -33,7 +33,7 @@ const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+
  */
 export async function deliver(rec: {
   order: Types.ObjectId;
-  client: Types.ObjectId;
+  client?: Types.ObjectId | null;
   kind: Kind;
   to: string[];
   cc: string[];

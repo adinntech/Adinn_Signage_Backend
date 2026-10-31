@@ -68,7 +68,7 @@ export const orderListQuery = listQuery.extend({
   csStatus: z.enum(['PROJECT_ASSIGN', 'RECCE_ASSIGNED', 'COMPLETED', 'CLOSED']).optional().or(z.literal('').transform(() => undefined)),
 });
 
-export const handoverTypeBody = z.object({ type: z.enum(HANDOVER_TYPES, { message: 'Choose ASO, Shop Details Only or Shop + Measurement' }) });
+export const handoverTypeBody = z.object({ type: z.enum(HANDOVER_TYPES, { message: 'Choose SO, Only Shop Details or Shop + Measurement' }) });
 export const handoverScopeBody = z.object({ full: z.boolean({ message: 'Choose whether to send the full handover' }) });
 /** Handover chat message (multipart): text, and `voice` = the one attached file is a voice note of `durationSec`. */
 export const handoverMessageBody = z.object({

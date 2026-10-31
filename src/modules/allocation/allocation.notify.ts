@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { notify } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { Site } from '../sites/site.model';
@@ -20,7 +20,7 @@ export type ShopTarget =
 export async function notifyNewShops(projectId: string, target: ShopTarget, added: number, actor: Actor): Promise<void> {
   try {
     if (added < 1) return;
-    const project = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client').lean();
+    const project = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client clientDetails').lean();
     if (!project) return;
     const base = { project: new Types.ObjectId(projectId), deletedAt: null };
     let recipients: unknown[];
@@ -37,7 +37,7 @@ export async function notifyNewShops(projectId: string, target: ShopTarget, adde
       total = await Site.countDocuments({ ...base, channel: 'IN_HOUSE' });
     }
     if (!recipients.length) return;
-    const client = await Client.findById(project.client).select('name').lean();
+    const client = { name: await clientNameOf(project) };
     const s = (n: number) => `${n} shop${n === 1 ? '' : 's'}`;
     const first = total <= added;
     const when = Date.now();

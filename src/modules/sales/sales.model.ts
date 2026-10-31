@@ -1,5 +1,6 @@
 import { Schema, model } from 'mongoose';
 import { CLIENT_TYPES } from '../clients/client.model';
+import { clientDetailsSchema, fillClientFromDetails } from '../clients/clientDetails';
 import { storedFileSchema } from '../files/storedFile.schema';
 import { rateCardRevisionSchema } from '../ratecards/ratecard.model';
 
@@ -17,7 +18,8 @@ export const ASSIGN_ROUTES = ['HANDOVER', 'RECCE'] as const;
 export type AssignRoute = (typeof ASSIGN_ROUTES)[number];
 export const APPROVAL_DOC_TYPES = ['PURCHASE_ORDER', 'EMAIL_APPROVAL', 'WHATSAPP_APPROVAL', 'OTHER_WRITTEN', 'PHOTO', 'SUPPORTING_DOCUMENT'] as const;
 export const PIPELINE_ACTIONS = ['CREATE', 'STAGE_CHANGE', 'ASSIGN', 'APPROVAL_COMPLETE', 'HANDOVER'] as const;
-export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST'] as const;
+/** SO_DOCUMENT: SO Additional Documents (kept apart from the chat files). */
+export const HANDOVER_DOC_KINDS = ['DOCUMENT', 'SHOP_LIST', 'SO_DOCUMENT'] as const;
 /**
  * What the BD hands to Client Servicing: ASO (client and contacts only; CS collects the shops by phone), the shop list
  * only, or the shop list with measurements and per-shop photos / documents.
@@ -233,7 +235,13 @@ const handoverShopSchema = new Schema(
 const orderSchema = new Schema(
   {
     orderNo: { type: String, required: true, unique: true }, // 20261025ORD#1 (older orders: ORD-2026-0001)
-    client: { type: Schema.Types.ObjectId, ref: 'Client', required: true, index: true },
+    /** Client Management record (BD orders). Client Servicing orders have none: their client is in clientDetails. */
+    client: { type: Schema.Types.ObjectId, ref: 'Client', index: true },
+    /**
+     * Client Servicing (Create Project): the Zoho customer as read when the order was created, kept on the order (not in
+     * the clients collection). The last entry is the current client.
+     */
+    clientDetails: { type: [clientDetailsSchema], default: undefined },
     /** Snapshot at creation: NEW for the order created with a new client registration, EXISTING for repeat orders. */
     clientType: { type: String, enum: CLIENT_TYPES, required: true, index: true },
     stage: { type: String, enum: ORDER_STAGES, default: 'NEW_ORDER', index: true },
@@ -434,7 +442,12 @@ orderSchema.index({ 'salesprofile._id': 1 });
 orderSchema.index({ 'approvalDocumentsArray._id': 1 });
 // "Was this file emailed?" check before a template PDF is erased.
 orderSchema.index({ 'salesprofile.attachments.fileId': 1 });
-export const SalesOrder = model('SalesOrder', orderSchema);
+// Create Project list search by the client kept on the order.
+orderSchema.index({ 'clientDetails.name': 1 });
+orderSchema.index({ 'clientDetails.zohoCustomerNo': 1 });
+fillClientFromDetails(orderSchema);
+/** Collection "orders" (was "salesorders"); the model name stays SalesOrder, so refs and audit entities are unchanged. */
+export const SalesOrder = model('SalesOrder', orderSchema, 'orders');
 
 /** Projection that leaves out the activity arrays (Kanban, overview, checks). */
 export const WITHOUT_ARRAYS = '-salescommentsArray -salesprofile -rateCardArray -approvalDocumentsArray -salespipelineLogs -handoverDocumentsArray -handoverShopsArray -handoverVoiceNotesArray -leadLogsArray -requirementNotesArray -handoverShopLogs -shopSets';

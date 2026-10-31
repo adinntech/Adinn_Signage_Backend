@@ -16,8 +16,10 @@ export const bdHandoverShops = asyncHandler(async (req, res) => {
   ok(res, items, meta);
 });
 export const bdHandoverShopsExport = asyncHandler(async (req, res) => {
-  const f = await bd.projectHandoverShopsExport(id(req));
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  // ?format=pdf: the same table as a PDF.
+  const pdf = req.query.format === 'pdf';
+  const f = await bd.projectHandoverShopsExport(id(req), pdf);
+  res.setHeader('Content-Type', pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
   res.setHeader('Cache-Control', 'no-store');
   res.send(f.buffer);

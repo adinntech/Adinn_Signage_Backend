@@ -1,4 +1,5 @@
 import { Schema, model } from 'mongoose';
+import { clientDetailsSchema, fillClientFromDetails } from '../clients/clientDetails';
 
 /**
  * NEW/ACTIVE are the original statuses. The BD -> Operations pipeline adds
@@ -67,7 +68,10 @@ const projectSchema = new Schema(
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     assignedAt: Date,
     name: { type: String, required: true, trim: true },
-    client: { type: Schema.Types.ObjectId, ref: 'Client', required: true, index: true },
+    /** Client Management record (older projects). Projects from a Client Servicing order carry clientDetails instead. */
+    client: { type: Schema.Types.ObjectId, ref: 'Client', index: true },
+    /** The order's client (latest entry of its client array), copied when the Recce team is assigned. */
+    clientDetails: { type: [clientDetailsSchema], default: undefined },
     campaign: { type: String, trim: true },
     status: { type: String, enum: PROJECT_STATUSES, default: 'NEW', index: true },
     statusReason: String,
@@ -91,6 +95,8 @@ const projectSchema = new Schema(
 );
 projectSchema.index({ createdAt: -1 });
 projectSchema.index({ name: 'text', code: 'text', campaign: 'text' });
+projectSchema.index({ 'clientDetails.name': 1 });
+fillClientFromDetails(projectSchema);
 export const Project = model('Project', projectSchema);
 
 export const REQUIREMENT_SOURCES = ['EMAIL', 'PHONE', 'WHATSAPP', 'REFERRAL', 'MEETING', 'OTHER'] as const;

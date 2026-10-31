@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
-import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
 import { publish } from './notification.hub';
@@ -91,11 +91,11 @@ export async function notifyProjectParty(
   actorId?: string,
 ): Promise<void> {
   try {
-    const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client owner createdBy assignedTo').lean();
+    const p = await Project.findOne({ _id: projectId, deletedAt: null }).select('code client clientDetails owner createdBy assignedTo').lean();
     if (!p) return;
     const recipient = to === 'assignee' ? p.assignedTo : (p.owner ?? p.createdBy);
     if (!recipient) return;
-    const client = await Client.findById(p.client).select('name').lean();
+    const client = { name: await clientNameOf(p) };
     await notify({ ...spec, recipients: [recipient], project: { _id: p._id, code: p.code, clientName: client?.name }, actorId });
   } catch (e) {
     console.error('notification failed', e);

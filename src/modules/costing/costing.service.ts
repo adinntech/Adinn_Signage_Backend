@@ -8,7 +8,7 @@ import { hasCoords, roadKm, type LatLng } from '../allocation/allocation.geo';
 import { googleMapsAddressUrl } from '../allocation/allocation.maps';
 import { notifyNewShops } from '../allocation/allocation.notify';
 import { addressOf, planRoute, type RouteSite } from '../allocation/allocation.route';
-import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { listExpenses, notifyApprovers } from '../expenses/expense.service';
 import { notify } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
@@ -77,7 +77,7 @@ export async function updatePolicy(body: z.infer<typeof policyBody>, actor: Acto
   return ratesOf(d);
 }
 
-const PROJECT_FIELDS = 'code client siteCount status targetDate owner createdBy assignedTo originName originLat originLng';
+const PROJECT_FIELDS = 'code client clientDetails siteCount status targetDate owner createdBy assignedTo originName originLat originLng';
 async function requireProject(projectId: string) {
   const p = await Project.findOne({ _id: projectId, deletedAt: null }).select(PROJECT_FIELDS).lean();
   if (!p) throw AppError.notFound('Project not found');
@@ -289,7 +289,7 @@ export async function decideApproval(projectId: string, body: z.infer<typeof dec
   plan.set({ status: body.approve ? 'APPROVED' : 'REJECTED', reviewRemark: body.remark, reviewedBy: actor.id, reviewedAt: new Date(), updatedBy: actor.id });
   await plan.save();
   await recordAudit({ actor, action: 'COST_APPROVAL', entity: 'CostPlan', entityId: plan._id, project: projectId, changes: [{ field: 'status', oldValue: 'APPROVAL_PENDING', newValue: plan.status }], reason: body.remark });
-  const client = await Client.findById(project.client).select('name').lean();
+  const client = { name: await clientNameOf(project) };
   await notify({
     kind: 'COST_APPROVAL', recipients: [plan.requestedBy, project.assignedTo], actorId: actor.id,
     title: `Special approval ${body.approve ? 'granted' : 'rejected'}: ${project.code}`,

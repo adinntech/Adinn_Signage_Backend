@@ -1,5 +1,5 @@
 import { Types } from 'mongoose';
-import { Client } from '../clients/client.model';
+import { clientNameOf } from '../clients/clientDetails';
 import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
 import { notify } from './notification.service';
@@ -46,18 +46,18 @@ function alreadyAnnounced(i: AuditInput) {
 export async function announceActivity(i: AuditInput, auditId: Types.ObjectId | string): Promise<void> {
   try {
     if (!i.project) return;
-    const p = await Project.findOne({ _id: i.project, deletedAt: null }).select('code client owner createdBy assignedTo').lean();
+    const p = await Project.findOne({ _id: i.project, deletedAt: null }).select('code client clientDetails owner createdBy assignedTo').lean();
     if (!p) return;
-    const [who, client, admins] = await Promise.all([
+    const [who, clientName, admins] = await Promise.all([
       User.findById(i.actor.id).select('name').lean(),
-      Client.findById(p.client).select('name').lean(),
+      clientNameOf(p),
       User.find({ role: 'SUPER_ADMIN', isActive: true, deletedAt: null }).select('_id').lean(),
     ]);
     const fields = i.entity === 'Project' && i.action === 'UPDATE' && i.changes?.length ? ` (${i.changes.map((c) => c.field).join(', ')})` : '';
     const verb = VERB[i.action] ?? i.action.toLowerCase().replace(/_/g, ' ');
     const noun = NOUN[i.entity] ?? i.entity;
     const title = `${TITLE_NOUN[i.entity] ?? i.entity} ${PAST[i.action] ?? verb}`;
-    const body = `${who?.name ?? 'Someone'} (${ROLE[i.actor.role] ?? i.actor.role}) ${verb} ${noun}${fields} in ${p.code}${client?.name ? ` · ${client.name}` : ''}${i.reason ? `: ${i.reason}` : ''}.`;
+    const body = `${who?.name ?? 'Someone'} (${ROLE[i.actor.role] ?? i.actor.role}) ${verb} ${noun}${fields} in ${p.code}${clientName ? ` · ${clientName}` : ''}${i.reason ? `: ${i.reason}` : ''}.`;
     const project = { _id: p._id, code: p.code, clientName: client?.name };
     const base = { title: `${p.code}: ${title}`, body, project, actorId: i.actor.id };
     if (!alreadyAnnounced(i)) {

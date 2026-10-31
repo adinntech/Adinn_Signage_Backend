@@ -35,10 +35,10 @@ salesRouter.post('/orders/:id/recce/code-request', csFlow, receive, c.sendCodeRe
 salesRouter.put('/orders/:id/recce/codes', csFlow, c.saveRecceCodes);
 salesRouter.post('/orders/:id/recce/assign', csFlow, c.assignRecce);
 salesRouter.get('/shop-list-template', read, c.shopTemplate);
-salesRouter.get('/zoho-clients', write, c.zohoClients);
-salesRouter.get('/zoho-clients/:zohoId', write, c.zohoClient);
+salesRouter.get('/zoho-clients', csFlow, c.zohoClients);
+salesRouter.get('/zoho-clients/:zohoId', csFlow, c.zohoClient);
 salesRouter.get('/orders', read, c.list);
-salesRouter.post('/orders', write, c.createOrder);
+salesRouter.post('/orders', csFlow, c.createOrder);
 salesRouter.get('/orders/board', read, c.board);
 salesRouter.get('/orders/cs-summary', read, c.csSummary);
 salesRouter.get('/orders/:id', read, c.get);
@@ -59,11 +59,14 @@ salesRouter.post('/orders/:id/handover/shop-rows/:rowId/files', csFlow, receive,
 salesRouter.delete('/orders/:id/handover/shop-rows/:rowId/files/:fileId', csFlow, c.removeShopFile);
 // Communication & attachments (chat): text, files and voice notes
 salesRouter.post('/orders/:id/handover/messages', read, chat, receive, c.addMessage);
-salesRouter.delete('/orders/:id/handover/messages/:messageId', write, c.removeMessage);
+salesRouter.delete('/orders/:id/handover/messages/:messageId', csFlow, c.removeMessage);
 salesRouter.patch('/orders/:id/handover/scope', write, c.handoverScope);
 salesRouter.patch('/orders/:id/handover/type', csFlow, c.handoverType);
-// ASO: the client's SO contacts (saved as one list)
+// SO (stored as ASO): the client's SO contacts (saved as one list)
 salesRouter.put('/orders/:id/handover/so-contacts', csFlow, c.soContacts);
+// SO: Additional Documents (optional, apart from the chat files)
+salesRouter.post('/orders/:id/handover/so-documents', csFlow, receive, c.addSoDocuments);
+salesRouter.delete('/orders/:id/handover/so-documents/:fileId', csFlow, c.removeSoDocument);
 salesRouter.post('/orders/:id/handover/assign', write, c.assignCs);
 salesRouter.get('/orders/:id/comments', read, c.comments);
 salesRouter.post('/orders/:id/comments', write, receive, c.addComment);
