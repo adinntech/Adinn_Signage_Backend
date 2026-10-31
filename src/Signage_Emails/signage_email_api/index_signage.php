@@ -27,10 +27,16 @@ try{
  $data=json_decode(file_get_contents('php://input'),true,64,JSON_THROW_ON_ERROR);
  if(!is_array($data))throw new InvalidArgumentException('JSON object required');
  $type=clean($data['mailtype']??'');
- $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php'];
+ $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
  if(!isset($templates[$type]))throw new InvalidArgumentException('Invalid mailtype');
+ $isAuth=in_array($type,['forgot_mpin','forgot_password'],true);
  $to=emails($data['toEmail']??[]);$cc=emails($data['ccEmail']??[]);$bcc=emails($data['bccEmail']??[]);
  if(!$to)throw new InvalidArgumentException('toEmail is required');
+ if($isAuth){
+  if(count($to)!==1||$cc||$bcc)throw new InvalidArgumentException('Exactly one recipient is allowed for this mail type');
+  if(!preg_match('/^\d{6}$/',clean($data['code']??'')))throw new InvalidArgumentException('code must be 6 digits');
+  $data['expiresInMinutes']=max(1,min(60,(int)($data['expiresInMinutes']??10)));
+ }
  $requestId=clean($data['requestId']??'');
  if($requestId===''||strlen($requestId)>100)throw new InvalidArgumentException('Valid requestId required');
  $client=is_array($data['client']??null)?$data['client']:[];
@@ -39,21 +45,21 @@ try{
  if(in_array($type,['combined','project'],true)&&clean($project['projectName']??'')==='')throw new InvalidArgumentException('project.projectName required');
  if($type==='project'&&clean($client['clientName']??'')==='')throw new InvalidArgumentException('client.clientName required');
  $subject=clean($data['subject']??'');
- if($subject==='')$subject=ucfirst($type).' Signage Code Request - '.$requestId;
+ if($subject==='')$subject=$isAuth?'Reset your Signage '.($type==='forgot_mpin'?'MPIN':'password'):ucfirst($type).' Signage Code Request - '.$requestId;
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
  $attachments=[];
  foreach(($data['attachments']??[]) as $a){
   if(!is_array($a))throw new InvalidArgumentException('Invalid attachment');
   $name=basename(str_replace('\\','/',clean($a['filename']??'')));
   $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
-  $allowed=['pdf'=>'application/pdf','xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xls'=>'application/vnd.ms-excel','docx'=>'application/vnd.openxmlformats-officedocument.wordprocessingml.document','png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','zip'=>'application/zip'];
+  $allowed=['pdf'=>'application/pdf','xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xls'=>'application/vnd.ms-excel','docx'=>'application/vnd.openxmlformats-officedocument.wordprocessingml.document','png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','zip'=>'application/zip','doc'=>'application/msword','ppt'=>'application/vnd.ms-powerpoint','pptx'=>'application/vnd.openxmlformats-officedocument.presentationml.presentation','csv'=>'text/csv','txt'=>'text/plain','gif'=>'image/gif','webp'=>'image/webp'];
   if(!$name||!isset($allowed[$ext])||strlen($name)>160)throw new InvalidArgumentException('Unsupported attachment filename');
   $encoded=clean($a['base64']??'');
   if(str_contains($encoded,'base64,'))$encoded=explode('base64,',$encoded,2)[1];
   $binary=base64_decode($encoded,true);
   if($binary===false||strlen($binary)===0||strlen($binary)>8*1024*1024)throw new InvalidArgumentException('Invalid attachment content or size');
   if($ext==='pdf'&&!str_starts_with($binary,'%PDF'))throw new InvalidArgumentException('Invalid PDF');
-  if(in_array($ext,['xlsx','docx','zip'],true)&&!str_starts_with($binary,'PK'))throw new InvalidArgumentException('Invalid ZIP-based file');
+  if(in_array($ext,['xlsx','docx','pptx','zip'],true)&&!str_starts_with($binary,'PK'))throw new InvalidArgumentException('Invalid ZIP-based file');
   if($ext==='png'&&!str_starts_with($binary,"\x89PNG"))throw new InvalidArgumentException('Invalid PNG');
   if(in_array($ext,['jpg','jpeg'],true)&&!str_starts_with($binary,"\xFF\xD8"))throw new InvalidArgumentException('Invalid JPEG');
   $attachments[]=['filename'=>$name,'binary'=>$binary,'mime'=>$allowed[$ext],'size'=>strlen($binary)];

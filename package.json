@@ -12,6 +12,7 @@
         "seed": "tsx src/scripts/seed.ts",
         "create-user": "tsx src/scripts/create-user.ts",
         "reset-mpin": "tsx src/scripts/reset-mpin.ts",
+        "set-role-emails": "tsx src/scripts/set-role-emails.ts",
         "zoho:token": "tsx src/scripts/zoho-refresh-token.ts",
         "migrate:sales-arrays": "tsx src/scripts/migrate-sales-arrays.ts",
         "migrate:file-assets": "tsx src/scripts/migrate-file-assets.ts",

@@ -34,6 +34,22 @@ export const loginSchema = z
     return { identifier, mpin: v.mpin, password: v.password, loginRole: v.loginRole, platform: v.platform, remember: v.remember, device: v.device };
   });
 
+const identifierRule = z
+  .string()
+  .trim()
+  .min(1, 'Email or Employee ID is required')
+  .max(120)
+  .transform((v) => v.toLowerCase());
+
+export const forgotRequestSchema = z.object({ identifier: identifierRule });
+export const forgotConfirmSchema = z.object({
+  identifier: identifierRule,
+  code: z.string().regex(/^\d{6}$/, 'Code must be 6 digits'),
+  // Checked against the account's own method (MPIN or password) in the service.
+  authMethod: z.enum(['PASSWORD', 'MPIN']).optional(),
+  newSecret: z.string().min(1, 'Enter the new MPIN or password').max(100),
+});
+
 export const refreshSchema = z.object({ refreshToken: z.string().min(1).optional() });
 export const logoutSchema = refreshSchema;
 

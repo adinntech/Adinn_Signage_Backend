@@ -47,6 +47,18 @@ export async function sendSignageCodeMail(m: SignageCodeMail) {
     ...(m.project ? { project: m.project } : {}),
     attachments: (m.attachments ?? []).map((a) => ({ filename: a.filename, base64: a.content.toString('base64') })),
   };
+  return postSignageMail(payload);
+}
+
+/** POSTs one JSON payload to the PHP mail API and throws with its message on failure. Shared by every Signage mail type. */
+export async function postSignageMail(payload: Record<string, unknown>) {
+  // Only NODE_ENV=production really sends. Anywhere else the whole mail (including reset codes) is printed to the console.
+  if (!env.isProd) {
+    const files = Array.isArray(payload.attachments) ? (payload.attachments as { filename?: string; base64?: string }[]).map((a) => `${a.filename} (${Math.round(((a.base64?.length ?? 0) * 3) / 4 / 1024)} KB)`) : [];
+    console.log(`\n[mail:not sent, NODE_ENV=${env.NODE_ENV}] ${String(payload.mailtype)}`, JSON.stringify({ ...payload, attachments: files }, null, 2), '\n');
+    return { status: 'success', message: 'Logged to console (not sent outside production)' };
+  }
+  if (!env.SIGNAGE_MAIL_URL || !env.SIGNAGE_MAIL_KEY) throw new Error('Signage mail API is not configured (SIGNAGE_MAIL_URL / SIGNAGE_MAIL_KEY)');
   let res: Response;
   try {
     res = await fetch(env.SIGNAGE_MAIL_URL, {

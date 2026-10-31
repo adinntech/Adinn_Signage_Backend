@@ -3,7 +3,7 @@ import { env } from '../../config/env';
 import { asyncHandler, ok } from '../../common/http';
 import { AppError } from '../../common/errors';
 import * as service from './auth.service';
-import { loginSchema, logoutSchema, refreshSchema, registerSchema } from './auth.validators';
+import { forgotConfirmSchema, forgotRequestSchema, loginSchema, logoutSchema, refreshSchema, registerSchema } from './auth.validators';
 
 const COOKIE = 'refresh_token';
 const baseCookie = {
@@ -59,6 +59,16 @@ export const register = asyncHandler(async (req, res) => {
   const session = await service.register(body, meta(req, body.device));
   res.cookie(COOKIE, session.refreshToken, cookieOpts(session.remember));
   ok(res, session, undefined, 201);
+});
+
+export const forgotRequest = asyncHandler(async (req, res) => {
+  const body = forgotRequestSchema.parse(req.body);
+  ok(res, await service.requestCredentialReset(body.identifier));
+});
+
+export const forgotConfirm = asyncHandler(async (req, res) => {
+  const body = forgotConfirmSchema.parse(req.body);
+  ok(res, await service.confirmCredentialReset(body.identifier, body.code, body.newSecret, body.authMethod));
 });
 
 /** Public: lets the register screen disable the Admin option once an admin exists. */
