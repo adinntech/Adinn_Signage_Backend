@@ -227,11 +227,14 @@ export async function listVendors(q: z.infer<typeof vendorListQuery>) {
     Vendor.countDocuments(f),
     Vendor.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
   ]);
+  // "New" = registered here through New vendor / upload, not brought in from Zoho: these are the ones that go through KYC.
+  const fresh = await Vendor.aggregate([{ $match: { deletedAt: null, zohoContactId: null } }, { $group: { _id: '$status', n: { $sum: 1 } } }]);
+  const newBy = Object.fromEntries(fresh.map((c) => [c._id as string, c.n as number]));
   const summary: Record<string, number> = { PENDING_KYC: 0, ACTIVE: 0, INACTIVE: 0, BLACKLISTED: 0 };
   for (const c of counts) summary[c._id] = c.n;
   const shopCounts = await Site.aggregate([{ $match: { vendor: { $in: items.map((i) => i._id) }, deletedAt: null } }, { $group: { _id: '$vendor', n: { $sum: 1 } } }]);
   const byVendor = new Map(shopCounts.map((s) => [String(s._id), s.n]));
-  return { items: items.map((i) => ({ ...i, allocatedShops: byVendor.get(String(i._id)) ?? 0 })), meta: pageMeta(q.page, q.limit, total), summary: { ...summary, ALL: Object.values(summary).reduce((a, b) => a + b, 0) } };
+  return { items: items.map((i) => ({ ...i, allocatedShops: byVendor.get(String(i._id)) ?? 0 })), meta: pageMeta(q.page, q.limit, total), summary: { ...summary, ALL: Object.values(summary).reduce((a, b) => a + b, 0), NEW: Object.values(newBy).reduce((a, b) => a + b, 0), NEW_PENDING_KYC: newBy.PENDING_KYC ?? 0, NEW_ACTIVE: newBy.ACTIVE ?? 0 } };
 }
 
 /** Vendors that can be given shops (active only), light fields. */

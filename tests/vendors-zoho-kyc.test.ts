@@ -226,3 +226,15 @@ describe('Export of entered and fetched vendor details', () => {
     expect((inactive.body as string).trim().split('\r\n')).toHaveLength(1);
   });
 });
+
+describe('Dashboard counts', () => {
+  it('counts vendors registered here separately from those linked to Zoho', async () => {
+    const r = await api().get('/api/v1/vendors').set(as('OPS'));
+    const s = r.body.meta.summary;
+    const all = r.body.meta.total;
+    const linked = (await api().get('/api/v1/vendors?limit=200').set(as('OPS'))).body.data.filter((v: { zohoContactId?: string }) => v.zohoContactId).length;
+    expect(s.NEW).toBe(all - linked);
+    expect(s.NEW_PENDING_KYC).toBeLessThanOrEqual(s.NEW);
+    expect(s.NEW + linked).toBe(s.ALL);
+  });
+});
