@@ -35,17 +35,16 @@ afterAll(async () => {
 });
 
 describe('Client Servicing (handed-over orders only)', () => {
-  it('reads sales orders and clients (plus Adinn Connect) only, and lands on its own page', () => {
-    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read', 'connect:use']);
+  it('reads sales orders and clients, creates projects with the BD wizard (plus Adinn Connect), and lands on its own page', () => {
+    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read', 'clients:write', 'projects:read', 'projects:write', 'connect:use']);
     expect(ROLE_HOME.CLIENT_SERVICING).toBe('/client-servicing/dashboard');
   });
 
-  it('cannot reach projects, the BD Kanban, templates or any write', async () => {
+  it('cannot reach the BD Kanban, templates or the sales writes (projects and clients are open for the Create Project wizard)', async () => {
     const as = { Authorization: `Bearer ${token}` };
-    for (const url of ['/api/v1/projects', '/api/v1/projects/summary', '/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
+    for (const url of ['/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
       expect((await api().get(url).set(as)).status, url).toBe(403);
     }
-    expect((await api().post('/api/v1/clients').set(as).send({ name: 'X', code: 'XX' })).status).toBe(403);
     expect((await api().post('/api/v1/sales/orders').set(as).send({})).status).toBe(403);
   });
 
