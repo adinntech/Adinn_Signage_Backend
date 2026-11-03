@@ -36,17 +36,11 @@ const isEditable = (order: Parameters<typeof lockedReason>[0]) => !lockedReason(
 
 /** ADINN's standard rate card terms (one per numbered row in the PDF). */
 export const DEFAULT_TERMS = `<ol>${[
-  'Purchase Order Should Be Issued In The Name Of “ADINN ADVERTISING SERVICES LIMITED”.',
-  'GST At 18% Will Be Applicable On The Quoted Rates.',
-  'Purchase Order Is Required To Initiate The Project.',
-  '100% Advance Payment Is Mandatory Before Project Initiation.',
-  'Branding, Fabrication, And Preparation Require 2 To 3 Working Days From Final Design Confirmation.',
-  'Innovative Or Customized Designs May Require 5 To 7 Working Days, Based On Design Complexity.',
-  'Standard Working Time Is 8 Hours Per Day, Usually Between 10:00 AM And 7:00 PM, Including 1 Hour Lunch Break.',
-  'The Campaign Period Includes Sundays And Government Holidays Unless Agreed Otherwise In Writing.',
-  'The Permitted Distance Is 60 Km/Day Per Vehicle; Extra Kilometers Will Be Charged At ₹ 12 / KM.',
-  'GPS Tracking And WhatsApp Campaign Updates With Geo-Tagged Photos/videos Will Be Shared As Proof Of Execution.',
-  'Confirm The Quotation In Writing Within 7 Days.',
+  'The Design Should Be Provided By The Client.',
+  'Purchase Order (PO) Should Be Issued In The Name Of “ADINN ADVERTISING SERVICES LIMITED”.',
+  'Any Specific Clamp Charges Will Be Charged Extra.',
+  'Scaffolding Charges, If Required, Will Be Charged Extra.',
+  'Rates May Vary Depending On The Quantity And Location.',
 ]
   .map((t) => `<li>${t}</li>`)
   .join('')}</ol>`;

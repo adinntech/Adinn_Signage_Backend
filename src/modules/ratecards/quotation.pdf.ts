@@ -79,13 +79,13 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const W = COLS[4]! - M;
 
     /** Writes text at an exact position without moving onto a new page. */
-    const put = (s: string, x: number, y: number, o: { font?: string; size: number; color?: string; width?: number; align?: 'left' | 'right' | 'center'; spacing?: number }) =>
+    const put = (s: string, x: number, y: number, o: { font?: string; size: number; color?: string; width?: number; align?: 'left' | 'right' | 'center'; spacing?: number; lineGap?: number }) =>
       doc
         .font(o.font ?? REG)
         .fontSize(o.size)
         .fillColor(o.color ?? DARK)
-        .text(t(s), x, y, { width: o.width, align: o.align ?? 'left', characterSpacing: o.spacing ?? 0, lineBreak: !!o.width, lineGap: 1.5 });
-    const height = (s: string, font: string, size: number, width: number) => doc.font(font).fontSize(size).heightOfString(t(s), { width, lineGap: 1.5 });
+        .text(t(s), x, y, { width: o.width, align: o.align ?? 'left', characterSpacing: o.spacing ?? 0, lineBreak: !!o.width, lineGap: o.lineGap ?? 1.5 });
+    const height = (s: string, font: string, size: number, width: number, lineGap = 1.5) => doc.font(font).fontSize(size).heightOfString(t(s), { width, lineGap });
     const card = (x: number, y: number, w: number, h: number, fill = '#FFFFFF', stroke = LINE, r = 10) => doc.roundedRect(x, y, w, h, r).lineWidth(0.8).fillAndStroke(fill, stroke);
 
     // ---- page header (every page) ----
@@ -181,34 +181,37 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     });
 
     // ---- terms & conditions (numbered rows; continues on the next page when long) ----
+    // Spacing (same numbers as the web preview, quotation-preview.tsx): 16pt inside the card, 7pt above / below the
+    // text in a row, 14pt from the number badge to the text, 3pt between wrapped lines, 6pt between rows.
     const terms = termsList(q.terms);
-    const rowX = M + 11;
-    const rowW = W - 22;
-    const textX = rowX + 41;
-    const rowH = (s: string) => Math.max(18, height(s, REG, 7.5, rowW - 50) + 8);
+    const rowX = M + 16;
+    const rowW = W - 32;
+    const textX = rowX + 47; // badge at rowX + 10, 23 wide
+    const termW = rowW - 57;
+    const TERM_GAP = 3;
+    const termH = (s: string) => height(s, REG, 7.5, termW, TERM_GAP);
+    const rowH = (s: string) => Math.max(24, termH(s) + 14);
     let k = 0;
     y += 19;
     while (k < terms.length) {
-      if (y + 44 + rowH(terms[k]!) + 10 > PAGE_BOTTOM) y = newPage() + 4;
+      if (y + 48 + rowH(terms[k]!) + 14 > PAGE_BOTTOM) y = newPage() + 4;
       let fit = k;
-      let h = 44;
-      while (fit < terms.length && y + h + rowH(terms[fit]!) + 10 <= PAGE_BOTTOM) h += rowH(terms[fit++]!) + 5;
-      card(M, y, W, h + 5);
+      let h = 48;
+      while (fit < terms.length && y + h + rowH(terms[fit]!) + 14 <= PAGE_BOTTOM) h += rowH(terms[fit++]!) + 6;
+      if (fit === k) h += rowH(terms[fit++]!) + 6; // a single very long term still goes somewhere
+      card(M, y, W, h + 8);
       put(k === 0 ? 'Terms & Conditions' : 'Terms & Conditions (continued)', M + 15, y + 15, { font: BOLD, size: 11 });
-      const bw = 104;
-      card(M + W - 14 - bw, y + 9, bw, 20, PINK, PINK_LINE, 10);
-      put('Subject To Availability', M + W - 14 - bw, y + 15, { font: BOLD, size: 7.5, color: RED, width: bw, align: 'center' });
       doc.moveTo(M + 14, y + 35).lineTo(M + W - 14, y + 35).lineWidth(0.8).strokeColor(LINE).stroke();
-      let ry = y + 44;
+      let ry = y + 48;
       for (; k < fit; k++) {
         const rh = rowH(terms[k]!);
         doc.roundedRect(rowX, ry, rowW, rh, 4).lineWidth(0.6).fillAndStroke('#F7F7F8', '#ECEDEF');
-        doc.roundedRect(rowX + 8, ry + (rh - 11) / 2, 23, 11, 3).fill(PILL);
-        put(String(k + 1).padStart(2, '0'), rowX + 8, ry + (rh - 11) / 2 + 2.2, { font: BOLD, size: 6.5, color: '#FFFFFF', width: 23, align: 'center' });
-        put(terms[k]!, textX, ry + (rh - height(terms[k]!, REG, 7.5, rowW - 50)) / 2, { size: 7.5, width: rowW - 50 });
-        ry += rh + 5;
+        doc.roundedRect(rowX + 10, ry + (rh - 11) / 2, 23, 11, 3).fill(PILL);
+        put(String(k + 1).padStart(2, '0'), rowX + 10, ry + (rh - 11) / 2 + 2.2, { font: BOLD, size: 6.5, color: '#FFFFFF', width: 23, align: 'center' });
+        put(terms[k]!, textX, ry + (rh - termH(terms[k]!)) / 2, { size: 7.5, width: termW, lineGap: TERM_GAP });
+        ry += rh + 6;
       }
-      y = ry + 10;
+      y = ry + 14;
     }
 
     // ---- footer on every page ----
