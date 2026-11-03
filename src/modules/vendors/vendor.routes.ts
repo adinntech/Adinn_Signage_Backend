@@ -9,7 +9,9 @@ import { z } from 'zod';
 import { lookupZohoVendor, zohoVendorDetails } from '../zoho/zoho.service';
 import { exportZohoVendors, listZohoVendors, startZohoVendorSync, zohoExportQuery, zohoVendorListQuery, zohoVendorStatus } from '../zoho/zoho.vendors';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
+import { registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
+import { addVendorSkill, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
 
@@ -31,6 +33,11 @@ const sheet = (res: import('express').Response, buffer: Buffer, name: string) =>
 
 export const vendorRouter = Router();
 vendorRouter.get('/', ...read, asyncHandler(async (req, res) => { const r = await svc.listVendors(svc.vendorListQuery.parse(req.query)); ok(res, r.items, { ...r.meta, summary: r.summary }); }));
+vendorRouter.get('/gst/:gstin', ...read, asyncHandler(async (req, res) => ok(res, await svc.verifyGstin(String(req.params.gstin)))));
+vendorRouter.get('/types', ...read, asyncHandler(async (_req, res) => ok(res, await svc.listVendorTypes())));
+vendorRouter.post('/types', ...write, asyncHandler(async (req, res) => ok(res, await svc.addVendorType(svc.vendorTypeBody.parse(req.body), actorOf(req)), undefined, 201)));
+vendorRouter.get('/skills', ...read, asyncHandler(async (_req, res) => ok(res, await listVendorSkills())));
+vendorRouter.post('/skills', ...write, asyncHandler(async (req, res) => ok(res, await addVendorSkill(svc.skillBody.parse(req.body), actorOf(req)), undefined, 201)));
 vendorRouter.get('/active', ...read, asyncHandler(async (_req, res) => ok(res, await svc.activeVendors())));
 vendorRouter.get('/template', ...read, asyncHandler(async (_req, res) => sheet(res, await vendorTemplate(), 'vendor-template.xlsx')));
 const download = (res: import('express').Response, f: { buffer: Buffer; contentType: string; ext: string }, name: string) => {
@@ -51,6 +58,9 @@ vendorRouter.get('/zoho-directory', ...read, asyncHandler(async (req, res) => { 
 vendorRouter.get('/zoho-directory/export', ...read, asyncHandler(async (req, res) => download(res, await exportZohoVendors(zohoExportQuery.parse(req.query)), 'zoho-vendors')));
 vendorRouter.get('/zoho-directory/status', ...read, asyncHandler(async (_req, res) => ok(res, await zohoVendorStatus())));
 vendorRouter.post('/zoho-directory/sync', ...write, asyncHandler(async (req, res) => ok(res, await startZohoVendorSync(actorOf(req)), undefined, 202)));
+// Vendor price management: price per shop of one Zoho vendor (typed in the list).
+const zohoContactParam = z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') });
+vendorRouter.put('/zoho-directory/:contactId/price', ...write, asyncHandler(async (req, res) => ok(res, await setZohoVendorPrice(zohoContactParam.parse(req.params).contactId, svc.priceBody.parse(req.body), actorOf(req)))));
 vendorRouter.get('/zoho-directory/:contactId/details', ...write, asyncHandler(async (req, res) => ok(res, await zohoVendorDetails(z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') }).parse(req.params).contactId))));
 // Fill the registration form from a Zoho Books vendor number (e.g. 12543). Must stay above '/:id'.
 vendorRouter.get('/zoho/:vendorNo', ...write, asyncHandler(async (req, res) => ok(res, await lookupZohoVendor(svc.zohoVendorNoParam.parse(req.params).vendorNo))));
@@ -58,7 +68,11 @@ vendorRouter.post('/:id/kyc-files', ...write, receive, asyncHandler(async (req, 
   const files = ((req.files as Express.Multer.File[] | undefined) ?? []).map((f) => ({ originalname: f.originalname, mimetype: f.mimetype, size: f.size, buffer: f.buffer }));
   ok(res, await svc.addKycFiles(objectId.parse(req.params.id), svc.kycFileBody.parse(req.body).docType, files, actorOf(req)), undefined, 201);
 }));
-vendorRouter.delete('/:id/kyc-files/:fileId', ...write, asyncHandler(async (req, res) => ok(res, await svc.removeKycFile(objectId.parse(req.params.id), objectId.parse(req.params.fileId), actorOf(req)))));
+vendorRouter.get('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await registrationMailDraft(objectId.parse(req.params.id)))));
+vendorRouter.post('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await sendRegistrationMail(objectId.parse(req.params.id), registrationMailBody.parse(req.body), actorOf(req)), undefined, 201)));
+vendorRouter.put('/:id/registration-mail/draft', ...write, asyncHandler(async (req, res) => ok(res, await saveRegistrationDraft(objectId.parse(req.params.id), registrationDraftBody.parse(req.body), actorOf(req)))));
+vendorRouter.post('/:id/vendor-id', ...write, asyncHandler(async (req, res) => ok(res, await svc.setVendorId(objectId.parse(req.params.id), svc.vendorIdBody.parse(req.body), actorOf(req)))));
+vendorRouter.delete('/:id/kyc-files/:fileId',...write, asyncHandler(async (req, res) => ok(res, await svc.removeKycFile(objectId.parse(req.params.id), objectId.parse(req.params.fileId), actorOf(req)))));
 vendorRouter.get('/:id/kyc-files/:fileId/url', ...read, asyncHandler(async (req, res) => ok(res, await svc.kycFileUrl(objectId.parse(req.params.id), objectId.parse(req.params.fileId)))));
 vendorRouter.get('/:id', ...read, asyncHandler(async (req, res) => ok(res, await svc.getVendor(objectId.parse(req.params.id)))));
 vendorRouter.patch('/:id', ...write, asyncHandler(async (req, res) => ok(res, await svc.updateVendor(objectId.parse(req.params.id), svc.vendorPatch.parse(req.body), actorOf(req)))));

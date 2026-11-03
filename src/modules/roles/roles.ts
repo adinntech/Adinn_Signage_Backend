@@ -113,3 +113,18 @@ export const LOGIN_ROLE_GROUPS: Record<LoginRoleKey, readonly Role[]> = {
   CLIENT_SERVICING: ['CLIENT_SERVICING'],
   ADMIN: ['SUPER_ADMIN', 'MANAGEMENT'],
 };
+
+// Numeric user type shown to clients, derived from the role (never stored): 0 Admin, 1 Operations / Recce operations,
+// 2 BD, 3 Client Servicing, 4 field staff (Recce executive, Vendor). Finance has no login card, so no type.
+export const USER_TYPE_BY_ROLE: Record<Role, 0 | 1 | 2 | 3 | 4 | null> = {
+  SUPER_ADMIN: 0,
+  MANAGEMENT: 0,
+  OPERATIONS: 1,
+  RECCE_COORDINATOR: 1,
+  BD: 2,
+  CLIENT_SERVICING: 3,
+  RECCE_EXECUTIVE: 4,
+  VENDOR: 4,
+  FINANCE: null,
+};
+export const userTypeOf = (role: Role) => USER_TYPE_BY_ROLE[role];

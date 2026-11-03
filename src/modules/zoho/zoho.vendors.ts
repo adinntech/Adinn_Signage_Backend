@@ -5,6 +5,7 @@ import { exportFormat, tabularFile, type ExportColumn } from '../../common/tabul
 import { escapeRegex, listQuery, pageMeta, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Vendor } from '../vendors/vendor.model';
+import { pricedZohoContactIds, pricesOfZohoVendors } from '../vendors/vendorPrice.service';
 import { zohoGet } from './zoho.client';
 import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from './zoho.mapper';
 import { ZohoVendor } from './zohoVendor.model';
@@ -129,10 +130,12 @@ export const zohoVendorListQuery = listQuery.extend({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: z.enum(['active', 'inactive']).optional(),
   registered: z.enum(['yes', 'no']).optional(),
+  /** Vendor price management: only vendors whose price per shop is set / not set yet. */
+  price: z.enum(['set', 'missing']).optional(),
 });
 
 /** The list screen and the export share this filter. */
-async function zohoFilter(q: Pick<z.infer<typeof zohoVendorListQuery>, 'status' | 'q' | 'registered'>) {
+async function zohoFilter(q: Pick<z.infer<typeof zohoVendorListQuery>, 'status' | 'q' | 'registered'> & { price?: 'set' | 'missing' | undefined }) {
   const f: Record<string, unknown> = {};
   if (q.status) f.zohoStatus = q.status;
   if (q.q) {
@@ -142,6 +145,11 @@ async function zohoFilter(q: Pick<z.infer<typeof zohoVendorListQuery>, 'status' 
   if (q.registered) {
     const ids = (await Vendor.find({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null }).select('zohoContactId').lean()).map((v) => v.zohoContactId);
     f.zohoContactId = q.registered === 'yes' ? { $in: ids } : { $nin: ids };
+  }
+  if (q.price) {
+    const priced = await pricedZohoContactIds();
+    const both = f.zohoContactId ? [{ zohoContactId: f.zohoContactId }, { zohoContactId: q.price === 'set' ? { $in: priced } : { $nin: priced } }] : null;
+    if (both) { delete f.zohoContactId; f.$and = both; } else f.zohoContactId = q.price === 'set' ? { $in: priced } : { $nin: priced };
   }
   return f;
 }
@@ -155,10 +163,11 @@ export async function listZohoVendors(q: z.infer<typeof zohoVendorListQuery>) {
   ]);
   const linked = await Vendor.find({ zohoContactId: { $in: items.map((i) => i.zohoContactId) }, deletedAt: null }).select('zohoContactId code status').lean();
   const byZoho = new Map(linked.map((v) => [v.zohoContactId, { id: String(v._id), code: v.code, status: v.status }]));
-  return { items: items.map((i) => ({ ...i, vendor: byZoho.get(i.zohoContactId) ?? null })), meta: pageMeta(q.page, q.limit, total) };
+  const prices = await pricesOfZohoVendors(items.map((i) => i.zohoContactId));
+  return { items: items.map((i) => ({ ...i, vendor: byZoho.get(i.zohoContactId) ?? null, price: prices.get(i.zohoContactId) ?? { ratePerShop: null, farRatePerShop: null, source: null } })), meta: pageMeta(q.page, q.limit, total) };
 }
 
-export const zohoExportQuery = z.object({ format: exportFormat, status: z.enum(['active', 'inactive']).optional(), q: z.string().trim().max(100).optional() });
+export const zohoExportQuery = z.object({ format: exportFormat, status: z.enum(['active', 'inactive']).optional(), q: z.string().trim().max(100).optional(), price: z.enum(['set', 'missing']).optional() });
 
 const ZOHO_EXPORT: ExportColumn<Record<string, any>>[] = [
   { header: 'Vendor ID', value: (v) => v.vendorNo, width: 12 },
@@ -172,12 +181,15 @@ const ZOHO_EXPORT: ExportColumn<Record<string, any>>[] = [
   { header: 'Address', value: (v) => v.address, width: 40 },
   { header: 'GSTIN', value: (v) => v.gstin, width: 18 },
   { header: 'PAN', value: (v) => v.pan, width: 12 },
+  { header: 'Price per Shop', value: (v) => v.price?.ratePerShop, width: 14 },
+  { header: 'Far Price per Shop', value: (v) => v.price?.farRatePerShop, width: 18 },
   { header: 'Zoho Contact ID', value: (v) => v.zohoContactId, width: 22 },
   { header: 'Last Synced', value: (v) => v.syncedAt, width: 12 },
 ];
 
 /** Every stored Zoho vendor matching the screen's search and status (all pages), as Excel or CSV. */
 export async function exportZohoVendors(q: z.infer<typeof zohoExportQuery>) {
-  const items = await ZohoVendor.find(await zohoFilter({ status: q.status, q: q.q, registered: undefined })).sort({ name: 1 }).limit(20000).lean();
-  return tabularFile(q.format, 'Zoho vendors', ZOHO_EXPORT, items as Record<string, any>[]);
+  const items = await ZohoVendor.find(await zohoFilter({ status: q.status, q: q.q, registered: undefined, price: q.price })).sort({ name: 1 }).limit(20000).lean();
+  const prices = await pricesOfZohoVendors(items.map((i) => i.zohoContactId));
+  return tabularFile(q.format, 'Zoho vendors', ZOHO_EXPORT, items.map((i) => ({ ...i, price: prices.get(i.zohoContactId) })) as Record<string, any>[]);
 }

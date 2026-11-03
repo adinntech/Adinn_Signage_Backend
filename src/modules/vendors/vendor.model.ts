@@ -5,9 +5,11 @@ export const VENDOR_TYPES = ['ONE_MAN', 'ORGANIZATION'] as const;
 export const VENDOR_STATUSES = ['PENDING_KYC', 'ACTIVE', 'INACTIVE', 'BLACKLISTED'] as const;
 export type VendorStatus = (typeof VENDOR_STATUSES)[number];
 export const KYC_ITEMS = ['pan', 'gst', 'bank', 'address'] as const;
+/** Scans can also be filed under "other" (a missed document): they are not part of the checklist. */
+export const KYC_DOC_TYPES = [...KYC_ITEMS, 'other'] as const;
 
 /** A KYC scan: the stored-file details plus the checklist item it proves. */
-const kycFileSchema = storedFileSchema.clone().add({ docType: { type: String, enum: KYC_ITEMS, required: true } });
+const kycFileSchema = storedFileSchema.clone().add({ docType: { type: String, enum: KYC_DOC_TYPES, required: true } });
 
 /**
  * Vendor master. A vendor is registered as PENDING_KYC, becomes ACTIVE once the KYC checklist is complete and an
@@ -18,7 +20,10 @@ const vendorSchema = new Schema(
     code: { type: String, required: true, unique: true }, // VND-0001
     name: { type: String, required: true, trim: true },
     nameKey: { type: String, required: true },
+    /** Rule class: ORGANIZATION needs a contact person and a GST number, ONE_MAN does not. */
     type: { type: String, enum: VENDOR_TYPES, required: true },
+    /** The vendor type the person chose (see VendorTypeOption); its rule class is `type`. */
+    typeName: String,
     contactPerson: String,
     mobile: { type: String, required: true },
     mobileAlt: String,
@@ -28,6 +33,7 @@ const vendorSchema = new Schema(
     address: String,
     district: String,
     serviceAreas: [String],
+    skills: [String],
     bank: { accountName: String, accountNo: String, ifsc: String },
     ratePerShop: Number,
     farRatePerShop: Number,
@@ -46,6 +52,33 @@ const vendorSchema = new Schema(
     zohoVendorNo: String,
     /** KYC scans (category VENDOR_KYC_DOCUMENT). Operations views them, then ticks the checklist. */
     kycFiles: { type: [kycFileSchema], default: [] },
+    /** Registration request mail (to Accounts) and its reply: the vendor ID they send back lets Operations proceed. */
+    registration: {
+      mailSentAt: Date,
+      vendorIdAt: Date,
+      vendorIdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      /** The mail being written (Save as Draft / autosave), kept until it is sent. */
+      draft: { to: [String], cc: [String], bcc: [String], subject: String, body: String, savedAt: Date },
+    },
+    mails: {
+      type: [
+        new Schema({
+          to: [String],
+          cc: [String],
+          bcc: [String],
+          from: String,
+          subject: String,
+          body: String,
+          status: { type: String, enum: ['SENT', 'FAILED', 'SKIPPED'], required: true },
+          error: String,
+          requestKey: String,
+          attachmentNames: [String],
+          sentBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          sentAt: { type: Date, default: Date.now },
+        }),
+      ],
+      default: [],
+    },
     notes: String,
     source: { type: String, enum: ['MANUAL', 'IMPORT', 'ZOHO'], default: 'MANUAL' },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },

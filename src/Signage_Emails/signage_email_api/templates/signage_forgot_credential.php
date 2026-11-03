@@ -18,7 +18,7 @@ echo '<div style="font-size:11px;color:#6a7890;margin-top:8px">Valid for '.esc((
 echo '</td></tr></table>';
 
 echo card('How to reset',
- '<ol style="margin:6px 0 4px 18px;padding:0;font-size:12px;line-height:1.9;color:#394d6b"><li>Open the Signage app and tap <strong>Forgot '.esc($what).'</strong>.</li><li>Enter your email and this code.</li><li>Choose your new '.($isMpin?'4-digit MPIN':'password').' and sign in.</li></ol>',
+ '<ol style="margin:6px 0 4px 18px;padding:0;font-size:12px;line-height:1.9;color:#394d6b"><li>Open the Signage app and tap <strong>Forgot '.esc($what).'</strong>.</li><li>Enter your email and this code.</li><li>Choose your new '.($isMpin?'4-digit MPIN':'password').' (you can switch to '.($isMpin?'a password':'a 4-digit MPIN').' there if you prefer) and sign in.</li></ol>',
  '#eaf2ff','#1d4ed8','#d6e4fa');
 
 noteBar('If you did not ask for this, ignore this email. Your current '.$what.' stays the same. Never share this code with anyone, including the Adinn team.');

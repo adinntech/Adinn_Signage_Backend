@@ -79,7 +79,7 @@ export async function importVendors(file: { buffer: Buffer; originalname: string
       issues.push(...errors);
       if (!errors.length) {
         const m = normalisePhone(parsed.data.mobile).primary;
-        duplicate = (m && seenMobile.has(m) ? `Mobile ${m} appears twice in this file` : undefined) ?? (await duplicateOf({ mobile: m, name: parsed.data.name, district: parsed.data.district })) ?? undefined;
+        duplicate = (m && seenMobile.has(m) ? `Mobile ${m} appears twice in this file` : undefined) ?? (await duplicateOf({ mobile: m })) ?? undefined;
         if (m) seenMobile.add(m);
       }
     }

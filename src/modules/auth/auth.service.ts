@@ -74,10 +74,10 @@ export async function login(input: LoginInput, meta: ClientMeta) {
     throw new AppError(429, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes or ask an admin to reset your MPIN.`);
   }
 
-  // The credential must match how the account was set up (accounts without a stored method use a password).
-  const usesPassword = !!user && user.authMethod !== 'MPIN';
-  const supplied = usesPassword ? input.password : input.mpin;
-  const stored = usesPassword ? user?.passwordHash : user?.mpinHash;
+  // The person signs in with whichever credential the account holds. Registration stores one; a reset can add the other.
+  const useMpin = !!input.mpin;
+  const supplied = useMpin ? input.mpin : input.password;
+  const stored = useMpin ? user?.mpinHash : user?.passwordHash;
   const valid = await bcrypt.compare(supplied ?? '', stored ?? DUMMY_HASH);
 
   if (!user || !valid) {
@@ -257,9 +257,9 @@ export async function requestCredentialReset(identifier: string) {
 }
 
 /** Checks the emailed code and sets the new MPIN (MPIN accounts) or password (password accounts). Signs the user out everywhere. */
-export async function confirmCredentialReset(identifier: string, code: string, newSecret: string, chosen?: 'MPIN' | 'PASSWORD') {
+export async function confirmCredentialReset(identifier: string, code: string, newSecret: string, chosen?: 'MPIN' | 'PASSWORD', confirmReuse = false) {
   const invalid = () => new AppError(400, 'INVALID_RESET_CODE', 'The code is invalid or has expired. Request a new one.');
-  const user = await findByIdentifier(identifier).select('+resetCodeHash +resetCodeExpiresAt +resetCodeAttempts');
+  const user = await findByIdentifier(identifier).select('+resetCodeHash +resetCodeExpiresAt +resetCodeAttempts +mpinHash +passwordHash');
   if (!user || !user.isActive || !user.resetCodeHash || !user.resetCodeExpiresAt || user.resetCodeExpiresAt < new Date()) throw invalid();
   if ((user.resetCodeAttempts ?? 0) >= MAX_RESET_ATTEMPTS) throw invalid();
 
@@ -276,8 +276,17 @@ export async function confirmCredentialReset(identifier: string, code: string, n
   // A weak new value does not burn the code: the person can fix it and resubmit.
   if (!checked.success) throw AppError.badRequest(checked.error.issues[0]?.message ?? `Invalid ${method}`);
 
+  // Same value as the one already stored: ask the person to confirm before keeping it. The code is not used up meanwhile.
+  const current = method === 'MPIN' ? user.mpinHash : user.passwordHash;
+  if (current && !confirmReuse && (await bcrypt.compare(newSecret, current))) {
+    const what = method === 'MPIN' ? 'MPIN' : 'password';
+    throw new AppError(409, 'CREDENTIAL_REUSED', `This is your already used ${what}. Keep it?`);
+  }
+
+  // Set the chosen credential and keep the other one, so after a reset the person can sign in with either.
   user.set({
-    ...(await credentialFields(method === 'MPIN' ? { authMethod: 'MPIN', mpin: newSecret } : { authMethod: 'PASSWORD', password: newSecret })),
+    authMethod: method,
+    ...(method === 'MPIN' ? { mpinHash: await hashMpin(newSecret) } : { passwordHash: await hashPassword(newSecret) }),
     failedLogins: 0,
     lockedUntil: null,
     resetCodeHash: undefined,

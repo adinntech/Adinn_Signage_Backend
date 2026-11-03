@@ -1,5 +1,5 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
-import { ROLES } from '../roles/roles';
+import { ROLES, userTypeOf, type Role } from '../roles/roles';
 
 const userSchema = new Schema(
   {
@@ -37,6 +37,7 @@ export const toPublicUser = (u: UserDoc) => ({
   employeeId: u.employeeId ?? null,
   phone: u.phone ?? null,
   role: u.role,
+  userType: userTypeOf(u.role as Role),
   vendorId: u.vendorId ? String(u.vendorId) : null,
   isActive: u.isActive,
   authMethod: u.authMethod ?? 'PASSWORD',

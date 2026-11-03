@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
+import bcrypt from 'bcryptjs';
 import type { Express } from 'express';
 
 let mongod: MongoMemoryServer;
@@ -108,6 +109,33 @@ describe('registration', () => {
     for (const password of ['short1', 'onlyletters', '12345678']) {
       expect((await post('/register', { ...field, email: 'x@adinn.test', phone: '9000000077', employeeId: 'EMP77', password })).status, password).toBe(422);
     }
+  });
+
+  it('forgot reset: asks before keeping the same MPIN, then lets the account sign in with MPIN and password', async () => {
+    await post('/register', web);
+    const issued = async () => {
+      await post('/forgot', { identifier: web.email });
+      const code = '123456';
+      await User.updateOne({ email: String(web.email) }, { resetCodeHash: await bcrypt.hash(code, 4), resetCodeExpiresAt: new Date(Date.now() + 60_000), resetCodeAttempts: 0 });
+      return code;
+    };
+    // same MPIN as the current one -> 409 until the person agrees; the code is not used up
+    const code = await issued();
+    const same = await post('/forgot/confirm', { identifier: web.email, code, authMethod: 'MPIN', newSecret: web.mpin });
+    expect(same.status).toBe(409);
+    expect(same.body.error.code).toBe('CREDENTIAL_REUSED');
+    expect((await post('/forgot/confirm', { identifier: web.email, code, authMethod: 'MPIN', newSecret: web.mpin, confirmReuse: true })).status).toBe(200);
+
+    // switching to a password keeps the MPIN working too
+    const code2 = await issued();
+    expect((await post('/forgot/confirm', { identifier: web.email, code: code2, authMethod: 'PASSWORD', newSecret: 'Newpass123' })).status).toBe(200);
+    expect((await post('/login', { identifier: web.email, password: 'Newpass123' })).status).toBe(200);
+    expect((await post('/login', { identifier: web.email, mpin: web.mpin })).status).toBe(200);
+  });
+
+  it('returns the numeric userType derived from the role', async () => {
+    const r = await post('/register', web);
+    expect(r.body.data.user.userType).toBe(1); // OPERATIONS
   });
 
   it('an MPIN account cannot sign in with a password and the reverse', async () => {

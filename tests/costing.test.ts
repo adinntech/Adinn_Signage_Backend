@@ -119,7 +119,7 @@ beforeAll(async () => {
   }
   // two active vendors
   for (const [key, name, mobile] of [['A', 'Coimbatore Signs', '9000000011'], ['B', 'Trichy Boards', '9000000012']] as const) {
-    const v = (await api().post('/api/v1/vendors').set(as('OPS')).send({ name, type: 'ORGANIZATION', mobile, district: 'Coimbatore' })).body.data._id;
+    const v = (await api().post('/api/v1/vendors').set(as('OPS')).send({ name, type: 'ORGANIZATION', contactPerson: 'Contact', gstin: '33ABCDE1234F1Z5', mobile, district: 'Coimbatore' })).body.data._id;
     await api().put(`/api/v1/vendors/${v}/kyc`).set(as('OPS')).send({ pan: true, gst: true, bank: true, address: true });
     await api().post(`/api/v1/vendors/${v}/status`).set(as('OPS')).send({ status: 'ACTIVE' });
     vendor[key] = v;

@@ -170,7 +170,7 @@ describe('Zoho vendors directory (stored copy of the Zoho vendor list)', () => {
     expect(await q('q=20001')).toHaveLength(1);
     expect(await q('status=inactive')).toHaveLength(1);
     expect(await q('registered=no')).toHaveLength(3);
-    const created = await api().post('/api/v1/vendors').set(as('OPS')).send({ name: 'Sri Murugan Signs Reg', type: 'ORGANIZATION', mobile: '9876500099', zohoContactId: '800000000000001', zohoVendorNo: '12543' });
+    const created = await api().post('/api/v1/vendors').set(as('OPS')).send({ name: 'Sri Murugan Signs Reg', type: 'ORGANIZATION', contactPerson: 'Murugan', gstin: '33ABCDE1234F1Z5', mobile: '9876500099', zohoContactId: '800000000000001', zohoVendorNo: '12543' });
     expect(created.status).toBe(201);
     expect(await q('registered=no')).toHaveLength(2);
     const yes = await q('registered=yes');
@@ -219,7 +219,7 @@ describe('Export of entered and fetched vendor details', () => {
   it('Zoho vendors: CSV with the fetched details and the active/inactive filter', async () => {
     const all = await csv('/api/v1/vendors/zoho-directory/export?format=csv');
     const lines = (all.body as string).replace(/^﻿/, '').trim().split('\r\n');
-    expect(lines[0]).toBe('Vendor ID,Vendor Name,Phone,Email,Created By,Created On,Status,City,Address,GSTIN,PAN,Zoho Contact ID,Last Synced');
+    expect(lines[0]).toBe('Vendor ID,Vendor Name,Phone,Email,Created By,Created On,Status,City,Address,GSTIN,PAN,Price per Shop,Far Price per Shop,Zoho Contact ID,Last Synced');
     expect(lines.length).toBeGreaterThanOrEqual(2);
     expect(lines[1]).toContain('Active');
     const inactive = await csv('/api/v1/vendors/zoho-directory/export?format=csv&status=inactive');

@@ -68,7 +68,7 @@ export const forgotRequest = asyncHandler(async (req, res) => {
 
 export const forgotConfirm = asyncHandler(async (req, res) => {
   const body = forgotConfirmSchema.parse(req.body);
-  ok(res, await service.confirmCredentialReset(body.identifier, body.code, body.newSecret, body.authMethod));
+  ok(res, await service.confirmCredentialReset(body.identifier, body.code, body.newSecret, body.authMethod, body.confirmReuse));
 });
 
 /** Public: lets the register screen disable the Admin option once an admin exists. */

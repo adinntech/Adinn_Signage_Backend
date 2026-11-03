@@ -40,7 +40,7 @@ const group = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCa
 const mailKindOf = (kinds: CodeKind[]): Kind => (kinds.length === 2 ? 'COMBINED_CODE_REQUEST' : kinds[0] === 'CLIENT_CODE' ? 'CLIENT_CODE_REQUEST' : 'PROJECT_CODE_REQUEST');
 
 /** Adinn footer (added after sanitising, so the logo survives). */
-const footer = () =>
+export const footer = () =>
   `<hr style="border:0;border-top:1px solid #d6dff0;margin:18px 0 10px">` +
   (env.MAIL_LOGO_URL ? `<img src="${escapeHtml(env.MAIL_LOGO_URL)}" alt="Adinn" height="36" style="display:block;margin-bottom:6px">` : '') +
   `<div style="font-size:12px;color:#5b6b86">Adinn Advertising Services Ltd.</div>`;

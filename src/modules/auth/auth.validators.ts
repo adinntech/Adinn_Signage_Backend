@@ -48,6 +48,8 @@ export const forgotConfirmSchema = z.object({
   // Checked against the account's own method (MPIN or password) in the service.
   authMethod: z.enum(['PASSWORD', 'MPIN']).optional(),
   newSecret: z.string().min(1, 'Enter the new MPIN or password').max(100),
+  // true after the person agreed to keep the value they already use (answer to CREDENTIAL_REUSED).
+  confirmReuse: z.boolean().optional(),
 });
 
 export const refreshSchema = z.object({ refreshToken: z.string().min(1).optional() });

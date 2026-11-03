@@ -76,6 +76,8 @@ const schema = z
     /** Extra sender identities Client Servicing may choose for code request emails, separated by ";" e.g. "Client Servicing <cs@x.com>;Accounts <ac@x.com>". MAIL_FROM is always allowed. */
     MAIL_FROM_IDENTITIES: optional,
     /** Recipient groups for code request emails: comma-separated addresses that fill To for a client code / project code request. */
+    /** Accounts mailbox(es) that receive the vendor registration request and reply with the vendor ID, separated by ",". */
+    VENDOR_REGISTRATION_RECIPIENTS: optional,
     CODE_REQUEST_CLIENT_RECIPIENTS: optional,
     CODE_REQUEST_PROJECT_RECIPIENTS: optional,
     /** Public URL of the Adinn logo shown in the footer of code request emails. */

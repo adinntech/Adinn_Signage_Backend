@@ -10,7 +10,14 @@ import type { StoredFile } from '../files/storedFile.schema';
 import { parseWorkbook } from '../sites/excel.service';
 import { GST_RE, normKey, normalisePhone } from '../sites/site.fields';
 import { Site } from '../sites/site.model';
-import { KYC_ITEMS, VENDOR_STATUSES, VENDOR_TYPES, Vendor } from './vendor.model';
+import { KYC_DOC_TYPES, KYC_ITEMS, VENDOR_STATUSES, VENDOR_TYPES, Vendor } from './vendor.model';
+import { CostPlan } from '../costing/costing.model';
+import { Notification } from '../notifications/notification.model';
+import { deleteUser } from '../users/user.service';
+import { User } from '../users/user.model';
+import { ZohoVendor } from '../zoho/zohoVendor.model';
+import { VendorPrice } from './vendorPrice.model';
+import { VendorTypeOption } from './vendorType.model';
 
 const PAN_RE = /^[A-Z]{5}\d{4}[A-Z]$/;
 const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
@@ -20,6 +27,8 @@ const rate = z.coerce.number().min(0).max(100000).optional().or(z.literal('').tr
 export const vendorBody = z.object({
   name: z.string().trim().min(2, 'Enter the vendor name').max(150),
   type: z.enum(VENDOR_TYPES),
+  /** The vendor type chosen in the form (a VendorTypeOption name). Its rule class overrides `type`. */
+  typeName: opt(60),
   contactPerson: opt(120),
   mobile: z.string().trim().min(1, 'Enter the mobile number').max(40),
   mobileAlt: opt(40),
@@ -29,6 +38,7 @@ export const vendorBody = z.object({
   address: opt(400),
   district: opt(120),
   serviceAreas: z.array(z.string().trim().min(1).max(80)).max(60).optional(),
+  skills: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
   bank: z.object({ accountName: opt(120), accountNo: opt(30), ifsc: opt(20) }).optional(),
   ratePerShop: rate,
   farRatePerShop: rate,
@@ -39,7 +49,11 @@ export const vendorBody = z.object({
 });
 export const vendorPatch = vendorBody.partial();
 export const zohoVendorNoParam = z.object({ vendorNo: z.string().trim().regex(/^\d{2,8}$/, 'Enter the Zoho vendor number (2 to 8 digits)') });
-export const kycFileBody = z.object({ docType: z.enum(KYC_ITEMS) });
+export const kycFileBody = z.object({ docType: z.enum(KYC_DOC_TYPES) });
+export const vendorTypeBody = z.object({ name: z.string().trim().min(2, 'Enter the vendor type name').max(60), rules: z.enum(VENDOR_TYPES) });
+export const vendorIdBody = z.object({ vendorNo: z.string().trim().regex(/^\d{2,8}$/, 'Enter the vendor ID (2 to 8 digits)') });
+export const priceBody = z.object({ ratePerShop: z.coerce.number().min(0).max(100000).nullable(), farRatePerShop: z.coerce.number().min(0).max(100000).nullable().optional(), skills: z.array(z.string().trim().min(1).max(60)).max(20).optional() });
+export const skillBody = z.object({ name: z.string().trim().min(2, 'Enter the skill name').max(60) });
 export const vendorListQuery = listQuery.extend({
   status: z.enum(VENDOR_STATUSES).optional(),
   type: z.enum(VENDOR_TYPES).optional(),
@@ -72,23 +86,85 @@ export function checkVendor(raw: Partial<VendorInput>): { value: Partial<VendorI
 }
 const fail = (errors: Issue[]) => { throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', errors.map((e) => ({ path: e.field, message: e.message }))); };
 
-export async function duplicateOf(v: { mobile?: string | undefined; name?: string | undefined; district?: string | undefined }, exceptId?: string) {
+/**
+ * Only the mobile number must be new. The name is NOT checked: the same firm may be registered again with a different
+ * phone, email, address or PAN, so a repeated name is not a duplicate.
+ */
+export async function duplicateOf(v: { mobile?: string | undefined }, exceptId?: string) {
+  if (!v.mobile) return null;
   const ne = exceptId ? { _id: { $ne: exceptId } } : {};
-  if (v.mobile) {
-    const m = await Vendor.findOne({ mobile: v.mobile, deletedAt: null, ...ne }).select('name code').lean();
-    if (m) return `Mobile ${v.mobile} already belongs to ${m.name} (${m.code})`;
-  }
-  if (v.name) {
-    const n = await Vendor.findOne({ nameKey: normKey(v.name), district: v.district ?? null, deletedAt: null, ...ne }).select('name code').lean();
-    if (n) return `${n.name} (${n.code}) is already registered${v.district ? ` in ${v.district}` : ''}`;
-  }
-  return null;
+  const m = await Vendor.findOne({ mobile: v.mobile, deletedAt: null, ...ne }).select('name code').lean();
+  return m ? `Mobile ${v.mobile} already belongs to ${m.name} (${m.code})` : null;
 }
 
 const strip = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined)) as T;
 
-export async function createVendor(body: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' | 'ZOHO' = 'MANUAL') {
+/** An organization must have a contact person (the Recce contact) and a GST number; a one-man / freelancer vendor needs neither. */
+export function organizationIssues(v: { type?: string | undefined; contactPerson?: string | undefined; gstin?: string | undefined }): Issue[] {
+  if (v.type !== 'ORGANIZATION') return [];
+  const e: Issue[] = [];
+  if (!v.contactPerson?.trim()) e.push({ field: 'contactPerson', message: 'Enter the contact person for an organization' });
+  if (!v.gstin?.trim()) e.push({ field: 'gstin', message: 'Enter the GST number for an organization' });
+  return e;
+}
+
+/**
+ * Checks a typed GST number against what the company already has: the Zoho Books vendors and the registered vendors.
+ * It shows the name the number is known by, and warns when the vendor is already there. (The GST portal itself is not called.)
+ */
+export async function verifyGstin(raw: string) {
+  const gstin = raw.trim().toUpperCase();
+  if (!GST_RE.test(gstin)) throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', [{ path: 'gstin', message: 'Enter a valid GST number' }]);
+  const [zoho, registered] = await Promise.all([
+    ZohoVendor.findOne({ gstin }).select('name vendorNo zohoStatus city zohoContactId').lean(),
+    Vendor.findOne({ gstin, deletedAt: null }).select('name code status').lean(),
+  ]);
+  return {
+    gstin,
+    zoho: zoho ? { name: zoho.name, vendorNo: zoho.vendorNo ?? null, status: zoho.zohoStatus, city: zoho.city ?? null, zohoContactId: zoho.zohoContactId } : null,
+    registered: registered ? { id: String(registered._id), name: registered.name, code: registered.code, status: registered.status } : null,
+  };
+}
+
+/* ------------------------------------- vendor types ------------------------------------- */
+
+const BUILT_IN_TYPES = [
+  { name: 'Organization', rules: 'ORGANIZATION' },
+  { name: 'One-man / Freelancer', rules: 'ONE_MAN' },
+] as const;
+
+/** The type choices of the registration form. The two built-in ones are created on first use. */
+export async function listVendorTypes() {
+  await VendorTypeOption.bulkWrite(
+    BUILT_IN_TYPES.map((t) => ({ updateOne: { filter: { nameKey: normKey(t.name) }, update: { $setOnInsert: { name: t.name, nameKey: normKey(t.name), rules: t.rules, builtIn: true } }, upsert: true } })),
+  );
+  const all = await VendorTypeOption.find().lean();
+  const order = (t: { builtIn?: boolean | null; name: string }) => (t.builtIn ? BUILT_IN_TYPES.findIndex((b) => b.name === t.name) : BUILT_IN_TYPES.length);
+  return all.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+}
+
+export async function addVendorType(body: z.infer<typeof vendorTypeBody>, actor: Actor) {
+  await listVendorTypes();
+  const nameKey = normKey(body.name);
+  if (await VendorTypeOption.exists({ nameKey })) throw AppError.conflict(`"${body.name}" is already in the list`);
+  const t = await VendorTypeOption.create({ name: body.name, nameKey, rules: body.rules, createdBy: actor.id });
+  await recordAudit({ actor, action: 'CREATE', entity: 'VendorTypeOption', entityId: t._id, reason: `${body.name} (${body.rules})` });
+  return t.toObject();
+}
+
+/** The chosen type name decides the rule class on the server; an unknown name is rejected. */
+async function resolveType<T extends { type?: string | undefined; typeName?: string | undefined }>(body: T): Promise<T> {
+  if (!body.typeName) return body;
+  await listVendorTypes();
+  const t = await VendorTypeOption.findOne({ nameKey: normKey(body.typeName) }).lean();
+  if (!t) throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', [{ path: 'typeName', message: 'Choose a vendor type from the list' }]);
+  return { ...body, type: t.rules, typeName: t.name };
+}
+
+export async function createVendor(rawBody: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' | 'ZOHO' = 'MANUAL') {
+  const body = await resolveType(rawBody);
   const { value, errors } = checkVendor(body);
+  if (source !== 'IMPORT') errors.push(...organizationIssues(value));
   if (errors.length) fail(errors);
   const dup = await duplicateOf(value as never);
   if (dup) throw AppError.conflict(dup);
@@ -98,20 +174,26 @@ export async function createVendor(body: z.infer<typeof vendorBody>, actor: Acto
     source = 'ZOHO';
   }
   const code = `VND-${String(await nextSeq('vendor')).padStart(4, '0')}`;
+  // A price typed earlier for this Zoho vendor (Vendor price management) is carried over, so it is typed once only.
+  const prior = body.zohoContactId ? await VendorPrice.findOne({ zohoContactId: body.zohoContactId }).lean() : null;
+  if (prior) { value.ratePerShop ??= prior.ratePerShop ?? undefined; value.farRatePerShop ??= prior.farRatePerShop ?? undefined; if (!value.skills?.length && prior.skills?.length) value.skills = prior.skills; }
   const v = await Vendor.create({ ...strip(value), code, nameKey: normKey(body.name), source, status: 'PENDING_KYC', createdBy: actor.id, updatedBy: actor.id });
   await recordAudit({ actor, action: 'CREATE', entity: 'Vendor', entityId: v._id, reason: `${code} ${v.name}` });
   return v.toObject();
 }
 
 const AUDIT = ['name', 'type', 'contactPerson', 'mobile', 'email', 'gstin', 'pan', 'address', 'district', 'ratePerShop', 'farRatePerShop'];
-export async function updateVendor(id: string, patch: z.infer<typeof vendorPatch>, actor: Actor) {
+export async function updateVendor(id: string, rawPatch: z.infer<typeof vendorPatch>, actor: Actor) {
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
   if (!v) throw AppError.notFound('Vendor not found');
+  const patch = await resolveType(rawPatch);
   const before = v.toObject() as Record<string, unknown>;
   const merged = { ...before, ...strip(patch) } as Partial<VendorInput>;
   const { value, errors } = checkVendor(merged);
+  // Older vendors may lack these; the organization rules are checked only when the type, contact person or GST is being changed.
+  if (patch.type || patch.typeName || patch.contactPerson !== undefined || patch.gstin !== undefined) errors.push(...organizationIssues(value));
   if (errors.length) fail(errors);
-  const dup = await duplicateOf({ mobile: value.mobile, name: value.name, district: value.district }, id);
+  const dup = await duplicateOf({ mobile: value.mobile }, id);
   if (dup) throw AppError.conflict(dup);
   v.set({ ...strip(patch), ...(patch.mobile ? { mobile: value.mobile } : {}), ...(patch.gstin ? { gstin: value.gstin } : {}), ...(patch.pan ? { pan: value.pan } : {}), ...(patch.bank ? { bank: value.bank } : {}), ...(patch.name ? { nameKey: normKey(patch.name) } : {}), updatedBy: actor.id });
   await v.save();
@@ -131,10 +213,10 @@ export async function setKyc(id: string, body: z.infer<typeof kycBody>, actor: A
   return v.toObject();
 }
 
-/** PAN, bank and address proof are always needed; GST is needed for an organization. */
+/** PAN and bank proof are always needed; GST is needed for an organization. Address proof is optional. */
 export function kycComplete(v: { type?: string; kyc?: Record<string, unknown> | null }) {
   const k = v.kyc ?? {};
-  return !!(k.pan && k.bank && k.address && (v.type !== 'ORGANIZATION' || k.gst));
+  return !!(k.pan && k.bank && (v.type !== 'ORGANIZATION' || k.gst));
 }
 
 export async function setStatus(id: string, body: z.infer<typeof statusBody>, actor: Actor) {
@@ -142,6 +224,7 @@ export async function setStatus(id: string, body: z.infer<typeof statusBody>, ac
   if (!v) throw AppError.notFound('Vendor not found');
   if (body.status === 'ACTIVE' && !kycComplete(v.toObject())) throw AppError.conflict('Complete the KYC checklist before activating this vendor');
   if (body.status === 'PENDING_KYC') throw AppError.badRequest('A vendor cannot be moved back to KYC pending');
+  if (body.status === 'ACTIVE' && v.registration?.mailSentAt && !v.zohoVendorNo) throw AppError.conflict('Enter the vendor ID received from Accounts before activating this vendor');
   const old = v.status;
   v.set({ status: body.status, statusReason: body.status === 'ACTIVE' ? undefined : body.reason, updatedBy: actor.id });
   await v.save();
@@ -149,31 +232,49 @@ export async function setStatus(id: string, body: z.infer<typeof statusBody>, ac
   return v.toObject();
 }
 
+/**
+ * Deletes a vendor with everything that belongs to it, so a wrongly registered vendor leaves nothing behind: the KYC scans
+ * (erased from storage first), the vendor's mobile-app logins (signed out and removed) and their notifications, and the
+ * vendor record itself with its mail history, draft and typed details. Only the audit trail stays. A vendor that holds
+ * shops or is used in a project cost plan is not deleted: mark it inactive instead.
+ */
 export async function deleteVendor(id: string, actor: Actor) {
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
   if (!v) throw AppError.notFound('Vendor not found');
   const used = await Site.countDocuments({ vendor: id, deletedAt: null });
   if (used) throw AppError.conflict(`${used} shop(s) are allocated to this vendor. Move them first, or mark the vendor inactive`);
-  // KYC scans are erased with the vendor (files first: if one cannot be erased nothing changes and the person can retry).
+  const plans = await CostPlan.countDocuments({ 'legs.vendor': v._id });
+  if (plans) throw AppError.conflict(`This vendor is used in ${plans} project cost plan(s). Mark it inactive instead`);
+  // Files first: if one cannot be erased nothing changes and the person can retry.
   const { failed } = await removeStoredFiles((v.kycFiles ?? []) as unknown as StoredFile[]);
   if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the vendor was not deleted: ${failed.join(', ')}. Try again.`);
-  v.kycFiles.splice(0);
-  v.deletedAt = new Date();
-  await v.save();
-  await recordAudit({ actor, action: 'DELETE', entity: 'Vendor', entityId: v._id });
+  const logins = await User.find({ role: 'VENDOR', vendorId: v._id, deletedAt: null }).select('_id').lean();
+  for (const u of logins) await deleteUser(String(u._id), actor);
+  if (logins.length) await Notification.deleteMany({ recipient: { $in: logins.map((u) => u._id) } });
+  await Vendor.deleteOne({ _id: v._id });
+  await recordAudit({ actor, action: 'DELETE', entity: 'Vendor', entityId: v._id, reason: `${v.code} ${v.name}` });
 }
 
 const MAX_KYC_FILES_PER_ITEM = 3;
+const MAX_OTHER_FILES = 5;
 const vendorOwner = (id: unknown) => ({ entity: 'Vendor' as const, id: String(id) });
 
-/** KYC scans for one checklist item (up to three per item). They do not tick the checklist: Operations ticks it after viewing them. */
-export async function addKycFiles(id: string, docType: (typeof KYC_ITEMS)[number], files: UploadedFile[], actor: Actor) {
+/** Documents that must be uploaded before the registration mail goes: PAN, bank proof, and GST for an organization. Address proof is optional. */
+export function missingKycDocs(v: { type?: string; kycFiles?: ArrayLike<object> | null }) {
+  const have = new Set(Array.from(v.kycFiles ?? [], (f) => (f as { docType?: string }).docType));
+  const need = KYC_ITEMS.filter((k) => k !== 'address' && (k !== 'gst' || v.type === 'ORGANIZATION'));
+  return need.filter((k) => !have.has(k));
+}
+
+/** KYC scans for one document type (up to three per type, five under "other"). They do not tick the checklist: Operations ticks it after viewing them. */
+export async function addKycFiles(id: string, docType: (typeof KYC_DOC_TYPES)[number], files: UploadedFile[], actor: Actor) {
   if (!files.length) throw AppError.badRequest('Choose the document to upload');
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
   if (!v) throw AppError.notFound('Vendor not found');
   if (v.status === 'BLACKLISTED') throw AppError.conflict('This vendor is blacklisted');
   const have = (v.kycFiles as unknown as { docType?: string }[]).filter((f) => f.docType === docType).length;
-  if (have + files.length > MAX_KYC_FILES_PER_ITEM) throw AppError.badRequest(`Up to ${MAX_KYC_FILES_PER_ITEM} files per document type`);
+  const max = docType === 'other' ? MAX_OTHER_FILES : MAX_KYC_FILES_PER_ITEM;
+  if (have + files.length > max) throw AppError.badRequest(`Up to ${max} files per document type`);
   const stored: StoredFile[] = [];
   try {
     for (const f of files) stored.push(await storeEmbeddedFile({ category: 'VENDOR_KYC_DOCUMENT', clientName: v.name, folderKey: v.code, file: f, actor, owner: vendorOwner(v._id) }));
@@ -239,6 +340,23 @@ export async function listVendors(q: z.infer<typeof vendorListQuery>) {
 
 /** Vendors that can be given shops (active only), light fields. */
 export const activeVendors = () => Vendor.find({ status: 'ACTIVE', deletedAt: null }).sort({ name: 1 }).select('code name type district serviceAreas ratePerShop farRatePerShop mobile').limit(500).lean();
+
+/**
+ * Accounts replies to the registration mail with the vendor ID (Zoho vendor number). Typing it here lets Operations proceed
+ * (check the documents and activate). Only after the registration mail was really sent.
+ */
+export async function setVendorId(id: string, body: z.infer<typeof vendorIdBody>, actor: Actor) {
+  const v = await Vendor.findOne({ _id: id, deletedAt: null });
+  if (!v) throw AppError.notFound('Vendor not found');
+  if (!v.registration?.mailSentAt) throw AppError.conflict('Send the registration mail first');
+  const taken = await Vendor.findOne({ zohoVendorNo: body.vendorNo, deletedAt: null, _id: { $ne: v._id } }).select('name code').lean();
+  if (taken) throw AppError.conflict(`Vendor ID ${body.vendorNo} already belongs to ${taken.name} (${taken.code})`);
+  const old = v.zohoVendorNo ?? null;
+  v.set({ zohoVendorNo: body.vendorNo, 'registration.vendorIdAt': new Date(), 'registration.vendorIdBy': actor.id, updatedBy: actor.id });
+  await v.save();
+  await recordAudit({ actor, action: 'VENDOR_ID_RECEIVED', entity: 'Vendor', entityId: v._id, changes: [{ field: 'zohoVendorNo', oldValue: old, newValue: body.vendorNo }] });
+  return getVendor(id);
+}
 
 /* ------------------------------- Excel template / import / export ------------------------------- */
 
