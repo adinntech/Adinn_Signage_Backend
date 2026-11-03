@@ -53,3 +53,10 @@ export const quotationBody = z.object({
     email: z.string().trim().toLowerCase().email('Enter a valid email address'),
   }),
 });
+
+/** Rate Card Creation: the quotation plus the selected Zoho client (Client Company (Zoho)). */
+export const rateCardCreationBody = quotationBody.extend({
+  zohoId: z.string({ message: 'Select the client company' }).trim().min(1, 'Select the client company').max(64),
+  requestKey: z.string().trim().max(100).optional(),
+});
+export const rateCardCreationListQuery = listQuery;

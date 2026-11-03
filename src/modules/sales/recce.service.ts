@@ -305,7 +305,7 @@ export async function saveRateCard(id: string, input: z.infer<typeof quotationBo
   if (first && !o.recce.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)))
     throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first (Continue: Rate Card).', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
   // The PDF is generated and stored before anything is marked done; a failed save leaves the step as it was.
-  const result = await saveQuotation(id, input, actor, { workflowAuthorized: isCs(actor) });
+  const result = await saveQuotation(id, input, actor, { workflowAuthorized: isCs(actor), autoDate: true });
   const label = result.revision.label;
   if (first) {
     await SalesOrder.updateOne(

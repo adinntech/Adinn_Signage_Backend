@@ -34,6 +34,8 @@ export const PERMISSIONS = [
   'sales:write',
   'templates:manage',
   'ratecards:manage',
+  // Rate Card Creation (Client Servicing): rate cards without an order, priced from the master rates (read only).
+  'ratecards:create',
   // Client-side approval of shop details, measurements and board decisions (BD and Client Servicing).
   'approvals:client',
   // Recce staff add and correct the shops of an ASO project assigned to them, one by one, while they are at each shop.
@@ -49,8 +51,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS,
   // Client Servicing: the orders BD hands over to them (scoped to their own orders in the sales module) and the clients.
   // Add more permissions here as its modules are built.
-  // ratecards:manage: Rate Card Management (master rates: add, edit, delete); not sales:write.
-  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:manage'],
+  // ratecards:create: Rate Card Creation (master rates are read, never changed: no ratecards:manage); not sales:write.
+  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:create'],
   BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',

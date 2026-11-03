@@ -303,7 +303,7 @@ export interface EmbeddedFileInput {
   file: UploadedFile;
   actor: Actor;
   /** The record the file belongs to (audit trail). */
-  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client'; id: Types.ObjectId | string };
+  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'StandaloneRateCard'; id: Types.ObjectId | string };
   /**
    * The caller has already checked that this actor may store this file for a narrower workflow reason than the
    * category permission (the assigned Client Servicing person completing their own order). Never set from request data.

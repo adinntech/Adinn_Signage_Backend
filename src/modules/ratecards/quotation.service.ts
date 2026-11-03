@@ -52,13 +52,23 @@ export const DEFAULT_TERMS = `<ol>${[
   .join('')}</ol>`;
 
 /** 20261025ORD#1 -> ADINN/QTN/20261025/1, ORD-2026-0001 -> ADINN/QTN/2026/0001 (stable across revisions). */
-const quotationRefOf = (orderNo: string) => {
+export const quotationRefOf = (orderNo: string) => {
   const m = /^(\d{8})ORD#(\d+)$/.exec(orderNo) ?? /^ORD-(\d{4})-(\d+)$/.exec(orderNo);
   return m ? `ADINN/QTN/${m[1]}/${m[2]}` : `ADINN/QTN/${orderNo}`;
 };
 
 const addressOf = (c: { address?: string | null; city?: string | null; district?: string | null; state?: string | null; pincode?: string | null }) =>
   [c.address, c.city, c.district, c.state].filter(Boolean).join(', ') + (c.pincode ? ` - ${c.pincode}` : '');
+
+/**
+ * Full address as Create Project shows the Zoho client: the street, then city / state / PIN when the street does not
+ * already contain them (Zoho's street often ends with them), no empty parts.
+ */
+const fullAddressOf = (c: { address?: string | null; city?: string | null; state?: string | null; pincode?: string | null }) => {
+  const street = c.address?.trim() ?? '';
+  const rest = [c.city, c.state, c.pincode].map((p) => p?.trim()).filter((p): p is string => !!p && !street.toLowerCase().includes(p.toLowerCase()));
+  return [street, ...rest].filter(Boolean).join(', ');
+};
 
 async function orderWithClient(orderId: string) {
   const order = await SalesOrder.findOne({ _id: orderId, deletedAt: null }).select(WITHOUT_ARRAYS).lean();
@@ -75,8 +85,8 @@ export async function latestRevision(orderId: string | Types.ObjectId) {
   return o?.rateCardArray?.[0] ?? null;
 }
 
-type Line = { masterItem?: unknown; particulars: string; specifications?: string | null; unit: string; masterRate?: number | null; quotedRate: number; overrideReason?: string | null };
-type Snapshot = {
+export type Line = { masterItem?: unknown; particulars: string; specifications?: string | null; unit: string; masterRate?: number | null; quotedRate: number; overrideReason?: string | null };
+export type Snapshot = {
   clientAddress?: string | null;
   contact?: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null } | null;
   quotationDate: Date;
@@ -89,6 +99,8 @@ type Change = { field: string; oldValue: unknown; newValue: unknown; changeType:
 
 const lineKey = (l: Line) => (l.masterItem ? `m:${String(l.masterItem)}` : `p:${normKey(l.particulars)}`);
 const n = (v: unknown) => (v === undefined || v === '' ? null : v);
+/** Today in India (Asia/Kolkata) as a date (UTC midnight of that day, as a typed date input is stored). */
+export const todayIst = () => new Date(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()));
 const day = (d: Date | string) => new Date(d).toISOString().slice(0, 10);
 
 /** One quotation line as readable text, e.g. "LED Glow Sign · Acrylic 3D letters · Sq.ft · Rs. 450". */
@@ -154,12 +166,15 @@ export async function getQuotation(orderId: string, actor: Actor) {
   const latest = labelled[0] ?? null;
   const me = await User.findById(actor.id).select('name email phone').lean();
   const primary = client.contacts?.find((c) => c.isPrimary) ?? client.contacts?.[0];
+  // Rate Card step (Client Servicing): Bill To is the full address; elsewhere the city, as on the ADINN rate card.
+  const fullAddress = fullAddressOf(client);
+  const step = !!order.recce?.rateCardRequired;
   const draft = latest
     ? null
     : {
         clientName: client.name,
         // "Bill To" shows the city under the company name, as on the ADINN rate card.
-        clientAddress: client.city || addressOf(client),
+        clientAddress: step ? fullAddress || client.city || '' : client.city || addressOf(client),
         contact: primary ? { name: primary.name, designation: primary.designation ?? '', phone: primary.phone ?? '', email: primary.email ?? '' } : { name: '', designation: '', phone: '', email: '' },
         quotationDate: new Date(),
         subject: 'Signage Rate Card',
@@ -178,6 +193,8 @@ export async function getQuotation(orderId: string, actor: Actor) {
     quotationRef: quotationRefOf(order.orderNo),
     company: COMPANY,
     clientName: client.name,
+    /** Rate Card step: the client's full address, and its city (a saved Bill To equal to the city was the old default). */
+    billTo: step ? { full: fullAddress || null, city: client.city ?? null } : null,
     contacts: client.contacts ?? [],
     latest,
     draft,
@@ -196,15 +213,11 @@ export async function getQuotation(orderId: string, actor: Actor) {
 }
 
 /**
- * Save Changes: validates, records what changed as a new revision with its own PDF. Master rates are only read
- * (to snapshot the master rate on copied lines); this never writes to the master rate card. `workflowAuthorized`: the
- * caller already checked the actor (Client Servicing Rate Card step), so the PDF is stored without sales:write.
+ * The next version of a quotation (an order's rate card, or a Rate Card Creation one) and what changed against
+ * `latest`. Master rates are only read (copied lines must still exist); nothing is written to the master rate card.
+ * `autoDate`: the date is not typed: today in India for a version with changes, else the saved version's date.
  */
-export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor, opts: { workflowAuthorized?: boolean } = {}) {
-  const { order, client } = await orderWithClient(orderId);
-  const locked = lockedReason(order);
-  if (locked) throw AppError.conflict(locked);
-
+export async function prepareRevision(input: z.infer<typeof quotationBody>, latest: Snapshot | null, autoDate: boolean) {
   // Copied lines must point at a real master item; the master rate snapshot comes from the request (taken at copy time).
   const ids = input.items.map((i) => i.masterItemId).filter((x): x is string => !!x);
   const masters = await masterRatesById(ids);
@@ -212,7 +225,6 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
     if (l.masterItemId && !masters.has(l.masterItemId)) throw new AppError(422, 'VALIDATION_ERROR', 'A copied item no longer exists in the master rate card', [{ path: `items.${i}.masterItemId`, message: 'Master item not found' }]);
   });
 
-  const latest = await latestRevision(orderId);
   const next: Snapshot & { items: Line[] } = {
     clientAddress: input.clientAddress ?? null,
     contact: { name: input.contact.name, designation: input.contact.designation ?? null, phone: input.contact.phone ?? null, email: input.contact.email ?? null },
@@ -230,7 +242,29 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
     terms: sanitizeHtml(input.terms),
     regards: input.regards,
   };
-  const changes = quotationChanges(latest as Snapshot | null, next);
+  if (autoDate) next.quotationDate = latest?.quotationDate ?? todayIst();
+  let changes = quotationChanges(latest, next);
+  if (autoDate && changes.length) {
+    next.quotationDate = todayIst();
+    changes = quotationChanges(latest, next);
+  }
+  return { next, changes };
+}
+
+/**
+ * Save Changes: validates, records what changed as a new revision with its own PDF. Master rates are only read
+ * (to snapshot the master rate on copied lines); this never writes to the master rate card. `workflowAuthorized`: the
+ * caller already checked the actor (Client Servicing Rate Card step), so the PDF is stored without sales:write.
+ * `autoDate` (same step): the quotation date is not typed; a new version is dated today in India and a save with no
+ * other change keeps the saved version (and its date) as it is.
+ */
+export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor, opts: { workflowAuthorized?: boolean; autoDate?: boolean } = {}) {
+  const { order, client } = await orderWithClient(orderId);
+  const locked = lockedReason(order);
+  if (locked) throw AppError.conflict(locked);
+
+  const latest = await latestRevision(orderId);
+  const { next, changes } = await prepareRevision(input, latest as Snapshot | null, !!opts.autoDate);
   if (latest && !changes.length) return { saved: false, revision: { ...latest, label: revisionLabel(latest.revision) } };
 
   const revision = (latest?.revision ?? 0) + 1;
