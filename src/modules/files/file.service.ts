@@ -10,6 +10,7 @@ import { Project } from '../projects/project.model';
 import { permissionsFor, type Permission, type Role } from '../roles/roles';
 import { Client } from '../clients/client.model';
 import { clientNameOf } from '../clients/clientDetails';
+import { StandaloneRateCard } from '../ratecards/rateCardCreation.model';
 import { SalesOrder } from '../sales/sales.model';
 import { EmailTemplate } from '../templates/template.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
@@ -433,7 +434,11 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
   if (inClient) return inClient.name ?? 'file';
   const tpl = await EmailTemplate.findOne({ 'pdf.key': key }).lean();
   const inTpl = tpl && findStored(tpl, key);
-  return inTpl ? (inTpl.name ?? 'file') : null;
+  if (inTpl) return inTpl.name ?? 'file';
+  // Rate Card Creation: the version PDFs of a rate card made without an order.
+  const card = await StandaloneRateCard.findOne({ deletedAt: null, 'rateCardArray.pdf.key': key }).select('rateCardArray.pdf').lean();
+  const inCard = card && findStored(card, key);
+  return inCard ? (inCard.name ?? 'file') : null;
 }
 
 /** Every stored-file entry inside a record (comments, approvals, rate cards, sent emails ...), each once. */

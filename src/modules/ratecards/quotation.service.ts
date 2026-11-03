@@ -108,15 +108,26 @@ const describeLine = (l: Line) =>
   [l.particulars, l.specifications, RATE_UNIT_LABELS[l.unit as keyof typeof RATE_UNIT_LABELS] ?? l.unit, `Rs. ${l.quotedRate}`].filter(Boolean).join(' · ') +
   (l.overrideReason ? ` (reason: ${l.overrideReason})` : '');
 
-/** First save: every filled-in field and item is listed as added, with its value. */
+/**
+ * First save: every filled-in field and item is listed as added, with its value. A line copied from the master rate card
+ * whose quoted rate differs from the master rate it was copied at also gets that change (master -> quoted, and the
+ * reason), so the first version shows it like later edits do.
+ */
 function initialChanges(next: Snapshot): Change[] {
   const add = (field: string, v: unknown): Change[] => (n(v) === null ? [] : [{ field, oldValue: null, newValue: n(v), changeType: 'ADDED' }]);
+  const fromMaster = (l: Line): Change[] =>
+    l.masterItem && l.masterRate != null && l.quotedRate !== l.masterRate
+      ? [
+          { field: `Quoted Rate (${l.particulars}) vs master`, oldValue: l.masterRate, newValue: l.quotedRate, changeType: 'UPDATED' },
+          ...(l.overrideReason ? [{ field: `Override Reason (${l.particulars})`, oldValue: null, newValue: l.overrideReason, changeType: 'ADDED' as const }] : []),
+        ]
+      : [];
   return [
     ...add('Subject', next.subject),
     ...add('Quotation Date', day(next.quotationDate)),
     ...add('Contact Person', next.contact?.name),
     ...add('Client Address', next.clientAddress),
-    ...next.items.map((l): Change => ({ field: `Item (${l.particulars})`, oldValue: null, newValue: describeLine(l), changeType: 'ADDED' })),
+    ...next.items.flatMap((l): Change[] => [{ field: `Item (${l.particulars})`, oldValue: null, newValue: describeLine(l), changeType: 'ADDED' }, ...fromMaster(l)]),
     ...add('Terms & Conditions', htmlToText(next.terms ?? '')),
     ...add('Regards Name', next.regards?.name),
   ];

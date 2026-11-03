@@ -55,7 +55,13 @@ export const quotationBody = z.object({
 });
 
 /** Rate Card Creation: the quotation plus the selected Zoho client (Client Company (Zoho)). */
-export const rateCardCreationBody = quotationBody.extend({
+/**
+ * Client Servicing rate cards (Create Project > Rate Card, Rate Card Creation): the contact person is optional (typed;
+ * the PDF leaves out "Kind Attn" when it is blank).
+ */
+export const csQuotationBody = quotationBody.extend({ contact: quotationBody.shape.contact.extend({ name: z.string().trim().max(120).default('') }) });
+
+export const rateCardCreationBody = csQuotationBody.extend({
   zohoId: z.string({ message: 'Select the client company' }).trim().min(1, 'Select the client company').max(64),
   requestKey: z.string().trim().max(100).optional(),
 });

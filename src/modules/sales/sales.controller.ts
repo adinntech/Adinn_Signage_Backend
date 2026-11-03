@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
-import { quotationBody } from '../ratecards/ratecard.validators';
+import { csQuotationBody, quotationBody } from '../ratecards/ratecard.validators';
 import * as quotation from '../ratecards/quotation.service';
 import * as approval from './approval.service';
 import * as handover from './handover.service';
@@ -256,7 +256,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
   ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), flowActor(req)), undefined, 201);
 });
 export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
-export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), quotationBody.parse(req.body), flowActor(req))));
+export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), csQuotationBody.parse(req.body), flowActor(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 
