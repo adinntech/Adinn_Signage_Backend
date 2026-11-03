@@ -6,7 +6,7 @@ import { AppError } from '../../common/errors';
 import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { Client } from '../clients/client.model';
+import { clientOf } from '../clients/clientDetails';
 import { discardStoredFiles, storeEmbeddedFile } from '../files/file.service';
 import { mailAvailable } from '../notifications/mail.service';
 import { orderArray } from '../sales/order.service';
@@ -20,9 +20,11 @@ import type { quotationBody } from './ratecard.validators';
 
 /**
  * Why the rate card cannot be edited now (null = editable). A completed client approval always locks it. An order in
- * Lead Management is edited only in Rate Card Preparation and Negotiation, while the lead is open.
+ * Lead Management is edited only in Rate Card Preparation and Negotiation, while the lead is open. A Client Servicing
+ * order with the Rate Card step is never locked (updated at any time; each change is a new version).
  */
-const lockedReason = (order: { approvalStatus?: string | null; lead?: { stage?: string | null; status?: string | null } | null }) => {
+const lockedReason = (order: { approvalStatus?: string | null; lead?: { stage?: string | null; status?: string | null } | null; recce?: { rateCardRequired?: boolean | null } | null }) => {
+  if (order.recce?.rateCardRequired) return null;
   if (order.approvalStatus === 'COMPLETED') return 'Client approval is complete; the rate card is locked';
   const l = order.lead;
   if (!l) return null;
@@ -61,7 +63,8 @@ const addressOf = (c: { address?: string | null; city?: string | null; district?
 async function orderWithClient(orderId: string) {
   const order = await SalesOrder.findOne({ _id: orderId, deletedAt: null }).select(WITHOUT_ARRAYS).lean();
   if (!order) throw AppError.notFound('Order not found');
-  const client = await Client.findById(order.client).lean();
+  // The Client record, or the client kept on the order (Client Servicing).
+  const client = await clientOf(order);
   if (!client) throw AppError.notFound('Client not found');
   return { order, client };
 }
@@ -194,9 +197,10 @@ export async function getQuotation(orderId: string, actor: Actor) {
 
 /**
  * Save Changes: validates, records what changed as a new revision with its own PDF. Master rates are only read
- * (to snapshot the master rate on copied lines); this never writes to the master rate card.
+ * (to snapshot the master rate on copied lines); this never writes to the master rate card. `workflowAuthorized`: the
+ * caller already checked the actor (Client Servicing Rate Card step), so the PDF is stored without sales:write.
  */
-export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor) {
+export async function saveQuotation(orderId: string, input: z.infer<typeof quotationBody>, actor: Actor, opts: { workflowAuthorized?: boolean } = {}) {
   const { order, client } = await orderWithClient(orderId);
   const locked = lockedReason(order);
   if (locked) throw AppError.conflict(locked);
@@ -240,6 +244,7 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
     file: { originalname: fileName, mimetype: 'application/pdf', size: pdf.length, buffer: pdf },
     actor,
     owner: { entity: 'SalesOrder', id: order._id },
+    workflowAuthorized: !!opts.workflowAuthorized,
   });
   const revisionId = new Types.ObjectId();
   // Appended only if nobody saved a newer revision since we read the latest one.

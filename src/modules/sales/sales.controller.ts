@@ -256,6 +256,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
   ok(res, await recce.sendCodeRequest(id(req), sendEmailBody.parse(raw), uploaded(req), flowActor(req)), undefined, 201);
 });
 export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
+export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), quotationBody.parse(req.body), flowActor(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 

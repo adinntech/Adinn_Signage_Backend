@@ -210,7 +210,7 @@ export async function getLead(id: string) {
   await releaseHandoverRoutes();
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
     .select(
-      'lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase approvalDocumentsArray.supersededAt salesprofile.kind salesprofile.status salesprofile.sentAt',
+      'lead clientType currentRevision leadLogsArray requirementNotesArray._id requirementNotesArray.attachments.fileId rateCardArray.revision rateCardArray.phase rateCardArray.createdAt approvalDocumentsArray.supersededAt salesprofile.kind salesprofile.status salesprofile.sentAt',
     )
     .populate('lead.startedBy', 'name role')
     .populate('lead.closedBy', 'name role')
@@ -310,6 +310,10 @@ export async function getLead(id: string) {
       handoverReady: recceGaps.length === 0,
       /** Step 1 confirmed with "Continue" (older orders: once a request email went). */
       handoverDone: !!order.recce?.handoverDoneAt || requests.some((e) => e.status === 'SENT' || e.status === 'SKIPPED'),
+      /** Rate Card step (Client Servicing orders created with it; null for older orders): done, latest version, last save. */
+      rateCard: order.recce?.rateCardRequired
+        ? { doneAt: order.recce.rateCardDoneAt ?? null, label: o.currentRevision ? revisionLabel(o.currentRevision) : null, updatedAt: revisions.at(-1)?.createdAt ?? null }
+        : null,
       missing: recceGaps[0] ?? null,
     },
     summary: {

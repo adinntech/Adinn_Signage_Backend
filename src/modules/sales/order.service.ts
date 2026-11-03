@@ -83,7 +83,8 @@ async function createOrder(client: { _id: Types.ObjectId | null; name?: string |
     orderNo: await nextOrderNo(),
     // A Client Management client (BD), or the Zoho customer kept on the order itself (Client Servicing).
     ...(client._id ? { client: client._id } : {}),
-    ...(clientDetails ? { clientDetails: [clientDetails] } : {}),
+    // Client Servicing orders also get the Rate Card step in their Recce flow.
+    ...(clientDetails ? { clientDetails: [clientDetails], recce: { rateCardRequired: true } } : {}),
     clientType,
     stage: 'NEW_ORDER',
     stageChangedAt: new Date(),

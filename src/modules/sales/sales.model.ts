@@ -306,6 +306,14 @@ const orderSchema = new Schema(
           /** Recce route step 1 confirmed ("Continue: Project Code Request Email"). */
           handoverDoneAt: Date,
           handoverDoneBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          /**
+           * Client Servicing orders created with the Rate Card step (after Assign Type & Details, before the request
+           * email). Orders without it (created before the step) keep their flow as it was.
+           */
+          rateCardRequired: Boolean,
+          /** Rate Card step completed (first Save & Continue). The rate card stays editable afterwards. */
+          rateCardDoneAt: Date,
+          rateCardDoneBy: { type: Schema.Types.ObjectId, ref: 'User' },
           assignee: { type: Schema.Types.ObjectId, ref: 'User' },
           assignedAt: Date,
           assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
