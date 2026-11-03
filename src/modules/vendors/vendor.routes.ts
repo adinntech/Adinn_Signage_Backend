@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { lookupZohoVendor, zohoVendorDetails } from '../zoho/zoho.service';
 import { exportZohoVendors, listZohoVendors, startZohoVendorSync, zohoExportQuery, zohoVendorListQuery, zohoVendorStatus } from '../zoho/zoho.vendors';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
-import { registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
+import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
 import { addVendorSkill, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
 import { createUser, listVendorLogins } from '../users/user.service';
@@ -71,6 +71,7 @@ vendorRouter.post('/:id/kyc-files', ...write, receive, asyncHandler(async (req, 
 vendorRouter.get('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await registrationMailDraft(objectId.parse(req.params.id)))));
 vendorRouter.post('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await sendRegistrationMail(objectId.parse(req.params.id), registrationMailBody.parse(req.body), actorOf(req)), undefined, 201)));
 vendorRouter.put('/:id/registration-mail/draft', ...write, asyncHandler(async (req, res) => ok(res, await saveRegistrationDraft(objectId.parse(req.params.id), registrationDraftBody.parse(req.body), actorOf(req)))));
+vendorRouter.delete('/:id/registration-mail/draft', ...write, asyncHandler(async (req, res) => ok(res, await discardRegistrationDraft(objectId.parse(req.params.id), actorOf(req)))));
 vendorRouter.post('/:id/vendor-id', ...write, asyncHandler(async (req, res) => ok(res, await svc.setVendorId(objectId.parse(req.params.id), svc.vendorIdBody.parse(req.body), actorOf(req)))));
 vendorRouter.delete('/:id/kyc-files/:fileId',...write, asyncHandler(async (req, res) => ok(res, await svc.removeKycFile(objectId.parse(req.params.id), objectId.parse(req.params.fileId), actorOf(req)))));
 vendorRouter.get('/:id/kyc-files/:fileId/url', ...read, asyncHandler(async (req, res) => ok(res, await svc.kycFileUrl(objectId.parse(req.params.id), objectId.parse(req.params.fileId)))));

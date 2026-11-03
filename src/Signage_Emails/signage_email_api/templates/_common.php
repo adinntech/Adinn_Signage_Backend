@@ -69,7 +69,7 @@ function attachmentsCard(array $data,string $title,string $headBg,string $accent
  foreach($items as $a){
   $name=basename(str_replace('\\','/',(string)($a['filename']??'Document')));
   [$tag,$col]=fileBadge($name);
-  $b.='<div style="display:inline-block;vertical-align:top;width:47%;min-width:200px;margin:0 1.5% 8px 0;border:1px solid #e1e9f5;border-radius:8px;padding:8px 10px;box-sizing:border-box"><span style="display:inline-block;background:'.$col.';color:#fff;font-size:9px;font-weight:bold;border-radius:3px;padding:2px 5px;margin-right:6px">'.$tag.'</span><span style="font-size:11px;font-weight:700;color:#10244a;word-break:break-word">'.esc($name).'</span><div style="font-size:10px;color:#6a7890;margin-top:3px">'.esc(fileSizeText($a)).'</div></div>';
+  $b.='<div style="display:inline-block;vertical-align:top;width:47%;min-width:200px;margin:0 1.5% 8px 0;border:1px solid #e1e9f5;border-radius:8px;padding:8px 10px;box-sizing:border-box"><span style="display:inline-block;background:'.$col.';color:#fff;font-size:9px;font-weight:bold;border-radius:3px;padding:2px 5px;margin-right:6px">'.$tag.'</span><span style="font-size:11px;font-weight:700;color:#10244a;word-break:break-word">'.esc($name).'</span><div style="font-size:10px;color:#6a7890;margin-top:3px">'.esc(fileSizeText($a)).(!empty($a['label'])?' &middot; '.esc($a['label']):'').'</div></div>';
  }
  echo card($title,$b,$headBg,$accent,'#e1e9f5');
 }

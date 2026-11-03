@@ -44,6 +44,9 @@ export const PERMISSIONS = [
   'zoho:sync',
   // Adinn Connect: team channels, project channels and direct messages. Every web role has it; what each person can see is decided per channel.
   'connect:use',
+  // Recce cost module: submit own trip claims / review them (Admin edits the rates with finance:manage).
+  'recce-cost:submit',
+  'recce-cost:review',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -56,12 +59,12 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client', 'connect:use'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',
-    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use',
+    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use', 'recce-cost:submit', 'recce-cost:review',
   ],
-  RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute'],
+  RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute', 'recce-cost:submit'],
   VENDOR: ['dashboard:view', 'sites:read', 'field:execute'],
-  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use'],
-  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read', 'connect:use'],
+  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use', 'recce-cost:submit', 'recce-cost:review'],
+  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read', 'connect:use', 'recce-cost:review'],
   MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read', 'connect:use'],
 };
 

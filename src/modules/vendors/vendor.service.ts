@@ -305,7 +305,7 @@ export async function kycFileUrl(id: string, fileId: string) {
 }
 
 export async function getVendor(id: string) {
-  const v = await Vendor.findOne({ _id: id, deletedAt: null }).lean();
+  const v = await Vendor.findOne({ _id: id, deletedAt: null }).populate('createdBy updatedBy', 'name').lean();
   if (!v) throw AppError.notFound('Vendor not found');
   return { ...v, allocatedShops: await Site.countDocuments({ vendor: id, deletedAt: null }) };
 }
@@ -324,7 +324,7 @@ export const vendorExportQuery = z.object({ format: exportFormat, status: z.enum
 export async function listVendors(q: z.infer<typeof vendorListQuery>) {
   const f = vendorFilter(q);
   const [items, total, counts] = await Promise.all([
-    Vendor.find(f).sort(parseSort(q.sort, ['name', 'code', 'district', 'status', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
+    Vendor.find(f).sort(parseSort(q.sort, ['name', 'code', 'district', 'status', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).populate('createdBy updatedBy', 'name').lean(),
     Vendor.countDocuments(f),
     Vendor.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
   ]);
@@ -342,8 +342,9 @@ export async function listVendors(q: z.infer<typeof vendorListQuery>) {
 export const activeVendors = () => Vendor.find({ status: 'ACTIVE', deletedAt: null }).sort({ name: 1 }).select('code name type district serviceAreas ratePerShop farRatePerShop mobile').limit(500).lean();
 
 /**
- * Accounts replies to the registration mail with the vendor ID (Zoho vendor number). Typing it here lets Operations proceed
- * (check the documents and activate). Only after the registration mail was really sent.
+ * Accounts replied to the registration mail with the vendor ID (Zoho vendor number). Typing it here is the proof that the
+ * vendor now exists in Zoho Books, so a vendor waiting for KYC becomes ACTIVE at once (an inactive or blacklisted vendor
+ * keeps its status). Only after the registration mail was really sent.
  */
 export async function setVendorId(id: string, body: z.infer<typeof vendorIdBody>, actor: Actor) {
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
@@ -352,9 +353,11 @@ export async function setVendorId(id: string, body: z.infer<typeof vendorIdBody>
   const taken = await Vendor.findOne({ zohoVendorNo: body.vendorNo, deletedAt: null, _id: { $ne: v._id } }).select('name code').lean();
   if (taken) throw AppError.conflict(`Vendor ID ${body.vendorNo} already belongs to ${taken.name} (${taken.code})`);
   const old = v.zohoVendorNo ?? null;
-  v.set({ zohoVendorNo: body.vendorNo, 'registration.vendorIdAt': new Date(), 'registration.vendorIdBy': actor.id, updatedBy: actor.id });
+  const activate = v.status === 'PENDING_KYC';
+  v.set({ zohoVendorNo: body.vendorNo, 'registration.vendorIdAt': new Date(), 'registration.vendorIdBy': actor.id, updatedBy: actor.id, ...(activate ? { status: 'ACTIVE', statusReason: undefined } : {}) });
   await v.save();
   await recordAudit({ actor, action: 'VENDOR_ID_RECEIVED', entity: 'Vendor', entityId: v._id, changes: [{ field: 'zohoVendorNo', oldValue: old, newValue: body.vendorNo }] });
+  if (activate) await recordAudit({ actor, action: 'STATUS_CHANGE', entity: 'Vendor', entityId: v._id, changes: [{ field: 'status', oldValue: 'PENDING_KYC', newValue: 'ACTIVE' }], reason: 'Vendor ID received from Accounts' });
   return getVendor(id);
 }
 

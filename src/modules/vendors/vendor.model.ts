@@ -58,7 +58,8 @@ const vendorSchema = new Schema(
       vendorIdAt: Date,
       vendorIdBy: { type: Schema.Types.ObjectId, ref: 'User' },
       /** The mail being written (Save as Draft / autosave), kept until it is sent. */
-      draft: { to: [String], cc: [String], bcc: [String], subject: String, body: String, savedAt: Date },
+      /** createdAt / createdBy: when and by whom it was first saved; savedAt / savedBy: the last save. */
+      draft: { to: [String], cc: [String], bcc: [String], subject: String, body: String, createdAt: Date, createdBy: { type: Schema.Types.ObjectId, ref: 'User' }, savedAt: Date, savedBy: { type: Schema.Types.ObjectId, ref: 'User' } },
     },
     mails: {
       type: [
@@ -73,6 +74,10 @@ const vendorSchema = new Schema(
           error: String,
           requestKey: String,
           attachmentNames: [String],
+          /** When and by whom the mail was first written (its draft), and its last edit before sending. */
+          writtenAt: Date,
+          writtenBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          lastEditedAt: Date,
           sentBy: { type: Schema.Types.ObjectId, ref: 'User' },
           sentAt: { type: Date, default: Date.now },
         }),

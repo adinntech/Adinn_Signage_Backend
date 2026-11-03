@@ -15,6 +15,14 @@ function emails($value):array {
  return array_values(array_unique($result));
 }
 function clean($value):string{return is_scalar($value)?trim((string)$value):'';}
+/* Rich text from the CRM mail screen: keep simple formatting tags only and drop every attribute (no scripts, styles or links). */
+function safeHtml($value):string{
+ $h=is_string($value)?$value:'';
+ $h=preg_replace('#<(script|style|iframe|object|embed|svg|math)\b[\s\S]*?</\1\s*>#i','',$h);
+ $h=strip_tags($h,'<p><br><strong><b><em><i><u><ul><ol><li><h3><h4><div><span>');
+ $h=preg_replace('#<(/?)([a-z0-9]+)\b[^>]*>#i','<$1$2>',$h);
+ return function_exists('mb_substr')?mb_substr($h,0,50000):substr($h,0,50000);
+}
 function renderTemplate(string $path,array $data,array $config):string {ob_start();try{include $path;return (string)ob_get_clean();}catch(Throwable $e){ob_end_clean();throw $e;}}
 if($_SERVER['REQUEST_METHOD']!=='POST')respond(405,['status'=>'error','message'=>'POST required']);
 if(!$config['api_key'])respond(503,['status'=>'error','message'=>'Server API key is not configured']);
@@ -27,7 +35,7 @@ try{
  $data=json_decode(file_get_contents('php://input'),true,64,JSON_THROW_ON_ERROR);
  if(!is_array($data))throw new InvalidArgumentException('JSON object required');
  $type=clean($data['mailtype']??'');
- $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
+ $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','vendor'=>'signage_vendor_registration_request.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
  if(!isset($templates[$type]))throw new InvalidArgumentException('Invalid mailtype');
  $isAuth=in_array($type,['forgot_mpin','forgot_password'],true);
  $to=emails($data['toEmail']??[]);$cc=emails($data['ccEmail']??[]);$bcc=emails($data['bccEmail']??[]);
@@ -44,8 +52,11 @@ try{
  if(in_array($type,['combined','client'],true)&&clean($client['clientName']??'')==='')throw new InvalidArgumentException('client.clientName required');
  if(in_array($type,['combined','project'],true)&&clean($project['projectName']??'')==='')throw new InvalidArgumentException('project.projectName required');
  if($type==='project'&&clean($client['clientName']??'')==='')throw new InvalidArgumentException('client.clientName required');
+ $vendor=is_array($data['vendor']??null)?$data['vendor']:[];
+ if($type==='vendor'&&clean($vendor['vendorName']??'')==='')throw new InvalidArgumentException('vendor.vendorName required');
+ $data['bodyHtml']=safeHtml($data['bodyHtml']??'');
  $subject=clean($data['subject']??'');
- if($subject==='')$subject=$isAuth?'Reset your Signage '.($type==='forgot_mpin'?'MPIN':'password'):ucfirst($type).' Signage Code Request - '.$requestId;
+ if($subject==='')$subject=$isAuth?'Reset your Signage '.($type==='forgot_mpin'?'MPIN':'password'):($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId);
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
  $attachments=[];
  foreach(($data['attachments']??[]) as $a){

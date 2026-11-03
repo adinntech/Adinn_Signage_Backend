@@ -8,6 +8,7 @@ import { Requirement, Project } from './project.model';
 import { BoardOption } from '../boards/boardOption.model';
 import { CostPlan } from '../costing/costing.model';
 import { Expense } from '../expenses/expense.model';
+import { RecceTrip, VendorRecceCost } from '../recce-cost/recceCost.model';
 import { SurveyArea } from './surveyArea.model';
 import { ConnectChannel, ConnectMessage } from '../connect/connect.model';
 import { JourneyComment } from '../journey/journeyComment.model';
@@ -28,6 +29,8 @@ export const PROJECT_OWNED: { name: string; model: Model<any>; field: string }[]
   { name: 'Board options', model: BoardOption, field: 'project' },
   { name: 'Cost plans', model: CostPlan, field: 'project' },
   { name: 'Expense claims', model: Expense, field: 'project' },
+  { name: 'Recce trip claims', model: RecceTrip, field: 'project' },
+  { name: 'Vendor recce costs', model: VendorRecceCost, field: 'project' },
   { name: 'Requirements', model: Requirement, field: 'project' },
   { name: 'Chat messages', model: CommunicationMessage, field: 'project' },
   { name: 'Chat channels', model: CommunicationChannel, field: 'project' },

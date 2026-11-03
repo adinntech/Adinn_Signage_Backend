@@ -90,6 +90,8 @@ const schema = z
     SIGNAGE_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     /** Must equal SIGNAGE_API_KEY in the PHP API's config.local.php; sent in the X-API-Key header. */
     SIGNAGE_MAIL_KEY: optional,
+    /** Most MB of attached files the CRM sends to the PHP mail service in one mail. The web server in front of the PHP API may allow less than the PHP script (nginx's default is 1 MB for the whole request): set this to what that server accepts. */
+    SIGNAGE_MAIL_MAX_TOTAL_MB: z.coerce.number().positive().max(12).default(12),
     /**
      * Zoho (existing client list in Order Management / Lead Management). OAuth self client: client id + secret + a
      * refresh token. Without them a sample list is served so the screens can be used before Zoho is connected.

@@ -169,3 +169,25 @@ Limits: max 8 files, 8 MB each, request max 18 MB. Allowed: PDF, XLS, XLSX, DOCX
 ## Preview templates without sending
 
 Use a private server-side PHP script with `ob_start()` and `include` with sample `$data` and `$config`. Never expose a public unauthenticated mail preview endpoint.
+
+### 4. Vendor registration request (`mailtype: "vendor"`)
+
+Sent by the CRM when Operations mails Accounts to create a new vendor (Vendor > Registration > Registration mail). `requestId` is the vendor code (VND-0008). `bodyHtml` is the text written on the CRM mail screen; the API keeps only simple formatting tags (`p br strong b em i u ul ol li h3 h4 div span`) and drops every attribute, script and link. `attachments[].label` (optional) is the document name shown on the attachment card (PAN card, Bank proof...). Limits are the same as the other mails: 8 files, 8 MB each, PDF / PNG / JPG / WEBP etc.
+
+```json
+{
+  "mailtype": "vendor",
+  "toEmail": ["accounts@adinn.co.in"],
+  "ccEmail": ["ops@adinn.co.in"],
+  "subject": "Vendor registration request: Sri Murugan Signs (VND-0008)",
+  "requestId": "VND-0008",
+  "requestDate": "03 Nov 2026",
+  "source": "Operations Team",
+  "replyTo": "ops@adinn.co.in",
+  "vendor": { "vendorName": "Sri Murugan Signs", "vendorType": "One-man / Freelancer", "vendorCode": "VND-0008" },
+  "bodyHtml": "<p>Hi Team,</p><p>Please register the vendor and reply with the <strong>Vendor ID</strong>.</p>",
+  "attachments": [{ "filename": "pan.pdf", "base64": "...", "label": "PAN card" }]
+}
+```
+
+Template: `templates/signage_vendor_registration_request.php`. Node client: `src/modules/vendors/signageVendorMail.ts`.

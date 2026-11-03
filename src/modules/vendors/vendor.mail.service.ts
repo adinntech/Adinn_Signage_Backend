@@ -5,10 +5,13 @@ import { escapeHtml, htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { footer, senderIdentities } from '../codeRequests/codeRequest.service';
+import { signageMailAvailable } from '../codeRequests/signageCodeMail';
 import { readStoredFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { mailAvailable, sendMail } from '../notifications/mail.service';
+import { User } from '../users/user.model';
 import { Vendor } from './vendor.model';
+import { sendSignageVendorMail, signageAttachmentProblem } from './signageVendorMail';
 import { getVendor, missingKycDocs } from './vendor.service';
 
 const EMAIL = z.string().trim().toLowerCase().email();
@@ -31,6 +34,8 @@ export const registrationMailBody = z.object({
 
 const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 const DOC_LABEL: Record<string, string> = { pan: 'PAN card', gst: 'GST certificate', bank: 'Bank proof', address: 'Address proof', other: 'Other document' };
+/** "Name <a@b.com>" or "a@b.com" to the bare address (the reply-to of the PHP mail). */
+const addressOf = (s?: string) => (s ? (/<([^>]+)>/.exec(s)?.[1] ?? s).trim() : undefined);
 const group = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 /** One "Label: value" line. The editor keeps only simple tags (no tables), so details are plain lines. */
 const row = (k: string, v?: string | null) => (v ? `<li>${escapeHtml(k)}: <strong>${escapeHtml(v)}</strong></li>` : '');
@@ -51,14 +56,27 @@ function defaultContent(v: Awaited<ReturnType<typeof getVendor>>) {
   return { subject: `Vendor registration request: ${v.name} (${v.code})`, body };
 }
 
-/** What the mail composer opens with: recipients from the settings, the default text, the files that will be attached, and what was sent before. */
+/** Names for the people ids that appear in the mail records. */
+async function namesOf(ids: unknown[]) {
+  const list = [...new Set(ids.filter(Boolean).map(String))];
+  const users = list.length ? await User.find({ _id: { $in: list } }).select('name').lean() : [];
+  const map = new Map(users.map((u) => [String(u._id), u.name]));
+  return (id: unknown) => (id ? map.get(String(id)) ?? null : null);
+}
+
+/**
+ * What the mail screen opens with: the saved draft (or the default text), the recipients from the settings, the files that
+ * will be attached, and every mail sent before with who wrote and sent it and when it was created, last edited and sent.
+ */
 export async function registrationMailDraft(id: string) {
   const v = await getVendor(id);
   const d = defaultContent(v);
   const draft = v.registration?.draft;
+  const mails = v.mails ?? [];
+  const name = await namesOf([draft?.createdBy, draft?.savedBy, ...mails.flatMap((m) => [m.sentBy, m.writtenBy])]);
   const kycFiles = (v.kycFiles ?? []) as unknown as (StoredFile & { docType: string })[];
   return {
-    mail: { enabled: mailAvailable(), identities: senderIdentities() },
+    mail: { enabled: mailAvailable() || signageMailAvailable(), identities: senderIdentities() },
     vendorType: v.type,
     groups: group(env.VENDOR_REGISTRATION_RECIPIENTS),
     to: draft?.to?.length ? draft.to : group(env.VENDOR_REGISTRATION_RECIPIENTS),
@@ -68,19 +86,33 @@ export async function registrationMailDraft(id: string) {
     body: draft?.body || d.body,
     defaults: { subject: d.subject, body: d.body },
     hasDraft: !!draft?.savedAt,
+    draft: draft?.savedAt ? { subject: draft.subject || d.subject, createdAt: draft.createdAt ?? draft.savedAt, createdBy: name(draft.createdBy), updatedAt: draft.savedAt, updatedBy: name(draft.savedBy) } : null,
     missing: missingKycDocs(v).map((k) => DOC_LABEL[k]),
     attachments: kycFiles.map((f) => ({ fileId: String(f.fileId), name: f.name ?? 'file', size: f.size ?? 0, docType: f.docType })),
     registration: v.registration ?? null,
     zohoVendorNo: v.zohoVendorNo ?? null,
-    history: [...(v.mails ?? [])].reverse().map((m) => ({ _id: m._id, to: m.to, cc: m.cc, subject: m.subject, status: m.status, error: m.error, attachmentNames: m.attachmentNames, sentAt: m.sentAt })),
+    history: [...mails].reverse().map((m) => ({
+      _id: m._id, from: m.from, to: m.to, cc: m.cc, bcc: m.bcc ?? [], subject: m.subject, body: m.body, status: m.status, error: m.error, attachmentNames: m.attachmentNames,
+      writtenAt: m.writtenAt ?? m.sentAt, writtenBy: name(m.writtenBy), lastEditedAt: m.lastEditedAt ?? m.sentAt, sentAt: m.sentAt, sentBy: name(m.sentBy),
+    })),
   };
 }
 
-/** Save as Draft / autosave: keeps the mail being written until it is sent. Addresses are checked only when it is sent. */
+/** Save as Draft / autosave: keeps the mail being written until it is sent, with who first saved it and who last saved it. Addresses are checked only when it is sent. */
 export async function saveRegistrationDraft(id: string, input: z.infer<typeof registrationDraftBody>, actor: Actor) {
-  const r = await Vendor.updateOne({ _id: id, deletedAt: null }, { $set: { 'registration.draft': { ...input, body: sanitizeHtml(input.body), savedAt: new Date() }, updatedBy: actor.id } });
+  const v = await Vendor.findOne({ _id: id, deletedAt: null }).select('registration.draft.createdAt registration.draft.createdBy').lean();
+  if (!v) throw AppError.notFound('Vendor not found');
+  const now = new Date();
+  const first = v.registration?.draft;
+  await Vendor.updateOne({ _id: id }, { $set: { 'registration.draft': { ...input, body: sanitizeHtml(input.body), createdAt: first?.createdAt ?? now, createdBy: first?.createdBy ?? actor.id, savedAt: now, savedBy: actor.id }, updatedBy: actor.id } });
+  return { savedAt: now.toISOString() };
+}
+
+/** Throws the draft away (the mail returns to the default text). */
+export async function discardRegistrationDraft(id: string, actor: Actor) {
+  const r = await Vendor.updateOne({ _id: id, deletedAt: null }, { $unset: { 'registration.draft': '' }, $set: { updatedBy: actor.id } });
   if (!r.matchedCount) throw AppError.notFound('Vendor not found');
-  return { savedAt: new Date().toISOString() };
+  return registrationMailDraft(id);
 }
 
 /**
@@ -101,15 +133,35 @@ export async function sendRegistrationMail(id: string, input: z.infer<typeof reg
   const total = stored.reduce((n, f) => n + (f.size ?? 0), 0);
   if (total > MAX_TOTAL_BYTES) throw AppError.badRequest('The attached documents are over 25 MB together. Remove or compress some files');
   const body = sanitizeHtml(input.body);
+  // The PHP mail service (same as the code requests) is used when it is configured, otherwise plain SMTP.
+  const viaPhp = signageMailAvailable();
+  if (viaPhp) {
+    const problem = signageAttachmentProblem(stored);
+    if (problem) throw AppError.badRequest(problem);
+  }
   let status: 'SENT' | 'FAILED' | 'SKIPPED' = 'SENT';
   let error: string | undefined;
-  if (!mailAvailable()) {
+  if (!viaPhp && !mailAvailable()) {
     status = 'SKIPPED';
-    error = 'Email is not configured on the server (SMTP), so nothing was sent';
+    error = 'Email is not configured on the server (the PHP mail service or SMTP), so nothing was sent';
   } else {
     try {
       const files = await Promise.all(stored.map((f) => readStoredFile(f)));
-      await sendMail({
+      if (viaPhp) {
+        const labelOf = (i: number) => DOC_LABEL[(stored[i] as unknown as { docType?: string }).docType ?? ''] ?? undefined;
+        await sendSignageVendorMail({
+          to: input.to,
+          cc: input.cc,
+          bcc: input.bcc,
+          subject: input.subject,
+          requestId: v.code,
+          requestDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
+          replyTo: addressOf(input.from ?? env.MAIL_FROM),
+          vendor: { vendorName: v.name, vendorType: v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer'), vendorCode: v.code },
+          bodyHtml: body,
+          attachments: files.map((f, i) => ({ filename: f.name, content: f.content, label: labelOf(i) })),
+        });
+      } else await sendMail({
         to: input.to.join(', '),
         cc: input.cc,
         ...(input.bcc.length ? { bcc: input.bcc } : {}),
@@ -128,7 +180,7 @@ export async function sendRegistrationMail(id: string, input: z.infer<typeof reg
   const r = await Vendor.updateOne(
     { _id: v._id, 'mails.requestKey': { $ne: input.requestKey } },
     {
-      $push: { mails: { to: input.to, cc: input.cc, bcc: input.bcc, from: input.from ?? env.MAIL_FROM ?? '', subject: input.subject, body, status, error, requestKey: input.requestKey, attachmentNames: stored.map((f) => f.name ?? 'file'), sentBy: actor.id, sentAt: new Date() } },
+      $push: { mails: { writtenAt: v.registration?.draft?.createdAt ?? new Date(), writtenBy: v.registration?.draft?.createdBy ?? actor.id, lastEditedAt: v.registration?.draft?.savedAt ?? new Date(), to: input.to, cc: input.cc, bcc: input.bcc, from: input.from ?? env.MAIL_FROM ?? '', subject: input.subject, body, status, error, requestKey: input.requestKey, attachmentNames: stored.map((f) => f.name ?? 'file'), sentBy: actor.id, sentAt: new Date() } },
       ...(status === 'SENT' ? { $set: { 'registration.mailSentAt': new Date(), updatedBy: actor.id }, $unset: { 'registration.draft': '' } } : {}),
     },
   );

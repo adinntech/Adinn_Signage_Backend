@@ -83,7 +83,7 @@ describe('registration mail and vendor ID', () => {
     expect(draft.body.data).toMatchObject({ to: ['accounts@t.com'], missing: ['PAN card', 'Bank proof'] });
     // Save as Draft keeps the text being written; the next open starts from it
     expect((await api().put(`/api/v1/vendors/${v._id}/registration-mail/draft`).set(as('OPS')).send({ to: ['a@t.com'], subject: 'My subject', body: '<p>Hello</p>' })).status).toBe(200);
-    expect((await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data).toMatchObject({ hasDraft: true, to: ['a@t.com'], subject: 'My subject' });
+    expect((await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data).toMatchObject({ hasDraft: true, to: ['a@t.com'], subject: 'My subject', draft: { createdBy: 'OPS', updatedBy: 'OPS' } });
     const mail = { to: ['accounts@t.com'], subject: draft.body.data.subject, body: draft.body.data.body, requestKey: 'req-key-0001' };
     const early = await api().post(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS')).send(mail);
     expect(early.status).toBe(409);
@@ -94,7 +94,9 @@ describe('registration mail and vendor ID', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.attachments).toHaveLength(4);
-    expect(res.body.data.history[0]).toMatchObject({ status: 'SENT' });
+    expect(res.body.data.history[0]).toMatchObject({ status: 'SENT', sentBy: 'OPS', writtenBy: 'OPS', bcc: [], attachmentNames: expect.any(Array) });
+    expect(res.body.data.history[0].writtenAt).toBeTruthy();
+    expect(res.body.data.draft).toBeNull(); // the draft is gone once sent
     // same request key again: nothing is mailed twice
     await api().post(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS')).send(mail);
     expect(sent).toHaveLength(1);
@@ -103,7 +105,8 @@ describe('registration mail and vendor ID', () => {
     const blocked = await api().post(`/api/v1/vendors/${v._id}/status`).set(as('OPS')).send({ status: 'ACTIVE' });
     expect(blocked.status).toBe(409);
     expect((await api().post(`/api/v1/vendors/${v._id}/vendor-id`).set(as('OPS')).send({ vendorNo: 'abc' })).status).toBe(422);
-    expect((await api().post(`/api/v1/vendors/${v._id}/vendor-id`).set(as('OPS')).send({ vendorNo: '13001' })).body.data).toMatchObject({ zohoVendorNo: '13001' });
+    // typing the vendor ID Accounts sent makes the vendor ACTIVE at once
+    expect((await api().post(`/api/v1/vendors/${v._id}/vendor-id`).set(as('OPS')).send({ vendorNo: '13001' })).body.data).toMatchObject({ zohoVendorNo: '13001', status: 'ACTIVE' });
     expect((await api().post(`/api/v1/vendors/${v._id}/status`).set(as('OPS')).send({ status: 'ACTIVE' })).status).toBe(200);
   });
 
@@ -183,5 +186,45 @@ describe('duplicates and delete', () => {
     expect((await User.findById(uid).lean())?.deletedAt).toBeTruthy();
     expect(await Notification.countDocuments({ recipient: uid })).toBe(0);
     expect((await api().get(`/api/v1/vendors/${v._id}`).set(as('OPS'))).status).toBe(404);
+  });
+});
+
+describe('draft meta and discard', () => {
+  it('keeps who created and last saved a draft, and can discard it', async () => {
+    const v = (await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', name: 'Draft Meta Boards', mobile: '9876500060' })).body.data;
+    const put = (subject: string) => api().put(`/api/v1/vendors/${v._id}/registration-mail/draft`).set(as('OPS')).send({ subject, body: '<p>x</p>' });
+    await put('first');
+    const one = (await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data.draft;
+    await new Promise((r) => setTimeout(r, 20));
+    await put('second');
+    const two = (await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data.draft;
+    expect(two.subject).toBe('second');
+    expect(two.createdAt).toBe(one.createdAt); // created stays, last updated moves
+    expect(new Date(two.updatedAt).getTime()).toBeGreaterThan(new Date(one.updatedAt).getTime());
+    const gone = await api().delete(`/api/v1/vendors/${v._id}/registration-mail/draft`).set(as('OPS'));
+    expect(gone.body.data).toMatchObject({ hasDraft: false, draft: null });
+  });
+});
+
+describe('vendor ID activates the vendor', () => {
+  it('activates a vendor waiting for KYC even before the checklist is ticked, and leaves an inactive vendor alone', async () => {
+    const mailer = await import('../src/modules/notifications/mail.service');
+    mailer.setMailSenderForTests(async () => undefined);
+    const mk = async (name: string, mobile: string) => {
+      const v = (await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', name, mobile })).body.data;
+      await upload(v._id, 'pan');
+      await upload(v._id, 'bank');
+      await api().post(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS')).send({ to: ['a@t.com'], subject: 's', body: '<p>b</p>', requestKey: `act-${mobile}-key` });
+      return v as { _id: string };
+    };
+    const a = await mk('Auto Active Boards', '9876500070');
+    expect((await api().get(`/api/v1/vendors/${a._id}`).set(as('OPS'))).body.data.status).toBe('PENDING_KYC');
+    const done = await api().post(`/api/v1/vendors/${a._id}/vendor-id`).set(as('OPS')).send({ vendorNo: '13070' });
+    expect(done.body.data).toMatchObject({ status: 'ACTIVE', zohoVendorNo: '13070' });
+    expect(done.body.data.kyc?.pan).toBeFalsy(); // the checklist is not ticked for them; the ID is what activates
+
+    const b = await mk('Stays Inactive Boards', '9876500071');
+    await api().post(`/api/v1/vendors/${b._id}/status`).set(as('OPS')).send({ status: 'INACTIVE', reason: 'on hold' });
+    expect((await api().post(`/api/v1/vendors/${b._id}/vendor-id`).set(as('OPS')).send({ vendorNo: '13071' })).body.data).toMatchObject({ status: 'INACTIVE', zohoVendorNo: '13071' });
   });
 });
