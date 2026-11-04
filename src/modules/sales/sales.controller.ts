@@ -257,6 +257,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
 });
 export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
 export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), csQuotationBody.parse(req.body), flowActor(req))));
+export const skipRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.skipRateCard(id(req), flowActor(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 

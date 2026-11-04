@@ -10,7 +10,7 @@ import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile,
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
 import { buildTemplate, MAX_ROWS, readGrids, type SheetGrid } from '../sites/excel.service';
-import { autoMap, dupKeyOf, MAPPABLE, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
+import { autoMap, MAPPABLE, normalise, validateMapping, type MapTarget, type MappableField } from '../sites/site.fields';
 import { User } from '../users/user.model';
 import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
@@ -86,9 +86,8 @@ export function handoverGaps(o: GapInput): string[] {
   // ASO goes without a shop list (rows of the shop types stay in their own datasets and are not handed over), but
   // with at least one SO contact. Toggle OFF (client details only) returns above, so it never needs one.
   if (o.handoverType === 'ASO') return (o.soContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim()) ? [] : [SO_CONTACT_GAP];
+  // Shop types: the client's Excel as it is; at least one shop row (row states no longer block).
   if (!o.shopList?.total) return ['Add the shop list: upload the Excel or add the shops'];
-  const bad = o.shopList.error ?? 0;
-  if (bad) return [`${bad} shop row${bad === 1 ? ' has' : 's have'} errors: edit or delete ${bad === 1 ? 'it' : 'them'}`];
   return [];
 }
 
@@ -290,7 +289,6 @@ export const SHOP_FIELDS = [
 ] as const;
 type ShopField = (typeof SHOP_FIELDS)[number];
 export type ShopRowInput = Partial<Record<ShopField | 'size', string>>;
-const SIZE_FIELDS: readonly string[] = ['width', 'height', 'unit', 'size'];
 export const MAX_ROW_IMAGES = 10;
 const IMAGE_RE = /\.(jpe?g|png|webp)$/i;
 const AUDIO_RE = /\.(mp3|m4a|webm|ogg|wav)$/i;
@@ -302,22 +300,20 @@ const assertShopType = (o: { handoverType?: string | null }) => {
 };
 
 /**
- * Raw text values -> the row's fields, state and issues, with the project site import rules. Size is optional for
- * both shop types; Shop Details Only keeps no size at all.
+ * Raw text values -> the row's shop fields (used downstream: project sites, request email). The handover shop list is
+ * taken as the client's Excel (both shop types): no field is mandatory and no value is rejected, so every row is
+ * VALID with no issues; a value the site rules cannot read (e.g. a landline in the mobile column) is just not mapped,
+ * its cell stays as uploaded. Shop Details Only keeps no size at all.
  */
-function cleanRow(values: ShopRowInput, type: string | null | undefined, opts: { nameOptional?: boolean } = {}) {
+function cleanRow(values: ShopRowInput, type: string | null | undefined, _opts: { nameOptional?: boolean } = {}) {
   const n = normalise(values, { scenario: 'MEASUREMENT_REQUIRED', defaultUnit: 'ft' });
   const sized = type === 'SHOP_MEASUREMENT';
   const value: Record<string, unknown> = { ...n.value };
   if (!sized) for (const f of ['width', 'height', 'unit']) delete value[f];
-  // Imported sheets without a shop / dealer name column: the row is kept and only flagged.
-  const soft = (e: { code: string }) => !!opts.nameOptional && e.code === 'NAME_REQUIRED';
-  const errors = n.errors.filter((e) => (sized || !SIZE_FIELDS.includes(e.field)) && !soft(e));
-  const warnings = [...n.warnings, ...n.errors.filter(soft)].filter((e) => sized || !SIZE_FIELDS.includes(e.field));
   return {
     fields: Object.fromEntries(SHOP_FIELDS.map((f) => [f, value[f] ?? null])) as Record<ShopField, unknown>,
-    state: (errors.length ? 'ERROR' : warnings.length ? 'WARNING' : 'VALID') as 'ERROR' | 'WARNING' | 'VALID',
-    issues: [...errors, ...warnings].map((i) => i.message),
+    state: 'VALID' as 'ERROR' | 'WARNING' | 'VALID',
+    issues: [] as string[],
   };
 }
 
@@ -812,11 +808,6 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   // Rows from before imported columns get cells for the new columns, so the table stays one table.
   const current = (doc?.handoverShopsArray ?? []).map((r) => (existing || (r as { cells?: unknown }).cells ? r : { ...r, cells: legacyCells(r as unknown as Record<string, unknown>, columns) }));
   const byId = new Map(current.map((r) => [r.rowId!, r as typeof r & Record<string, unknown>]));
-  const seen = new Map<string, string>();
-  for (const r of current) {
-    const k = dupKeyOf(r as never);
-    if (k) seen.set(k, `row ${r.rowNumber}`);
-  }
   let next = Math.max(0, ...current.map((r) => r.rowNumber ?? 0));
   const now = new Date();
   const updates = new Map<string, Record<string, unknown>>();
@@ -853,15 +844,8 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     }
     if (!Object.keys(fileCells).length) continue;
     const c = deriveRow(fileCells, columns, o.handoverType);
-    const key = dupKeyOf(c.fields as never);
-    const issues = [...c.issues];
-    let state = c.state;
-    if (key && seen.has(key)) {
-      issues.push(`Same shop as ${seen.get(key)}`);
-      if (state === 'VALID') state = 'WARNING';
-    }
+    const { state, issues } = c;
     const rowNumber = ++next;
-    if (key) seen.set(key, `row ${rowNumber}`);
     const fresh = { rowNumber, ...c.fields, cells: fileCells, state, issues, rowId: newRowId(), updatedAt: now, updatedBy: new Types.ObjectId(actor.id) };
     added.push(fresh);
     logs.push(shopLog(actor, 'ADD', fresh.rowId, { cells: cellChanges(columns, null, fileCells), note: `From ${source}`, label: labelOf(fresh, columns) }));
@@ -965,8 +949,6 @@ export async function exportShops(id: string) {
       (k) => [k, (r: Record<string, any>) => r.extra?.[k], 18] as [string, (r: Record<string, any>) => unknown, number],
     ),
     ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0, 8]] as [string, (r: Record<string, any>) => unknown, number][]) : []),
-    ['Status', (r) => r.state, 10],
-    ['Issues', (r) => (r.issues ?? []).join('; '), 36],
     ['Modified At', (r) => istStamp(r.updatedAt), 22],
   ];
   const wb = new ExcelJS.Workbook();
@@ -984,8 +966,6 @@ async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[
   const app: [string, (r: Record<string, any>) => unknown][] = [
     ...(appSize ? ([['Size (W x H)', (r) => (r.width && r.height ? `${r.width}x${r.height}` : '')], ['Unit', (r) => r.unit]] as [string, (r: Record<string, any>) => unknown][]) : []),
     ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0]] as [string, (r: Record<string, any>) => unknown][]) : []),
-    ['Status', (r) => r.state],
-    ['Issues', (r) => (r.issues ?? []).join('; ')],
     ['Modified At', (r) => istStamp(r.updatedAt)],
   ];
   const wb = new ExcelJS.Workbook();
@@ -1001,7 +981,6 @@ async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
-const STATE_TEXT: Record<string, string> = { VALID: 'Valid', WARNING: 'Check', ERROR: 'Error' };
 const MAX_PDF_IMAGES = 300;
 const PDF_IMAGES_PER_ROW = 4;
 
@@ -1028,7 +1007,7 @@ async function rowThumbs(rows: Record<string, any>[]) {
 
 /**
  * The shop table as it is now, as PDF: the same columns as Download Excel (imported columns in sheet order, or the
- * shop fields of older tables, with extra columns), all rows with their edits, status and issues. Shop + Measurement
+ * shop fields of older tables, with extra columns), all rows with their edits. Shop + Measurement
  * keeps the sizes and adds the row images (a few thumbnails per row, the total count always shown).
  */
 export async function exportShopsPdf(id: string) {
@@ -1041,7 +1020,7 @@ export async function exportShopsPdf(id: string) {
   const rows = (o.handoverShopsArray ?? []) as Record<string, any>[];
   const size = (r: Record<string, any>) => (r.width && r.height ? `${r.width} x ${r.height}${r.unit ? ` ${r.unit}` : ''}` : '');
   type Col = [string, (r: Record<string, any>) => unknown];
-  const app: Col[] = [['Status', (r) => STATE_TEXT[r.state] ?? r.state], ['Issues', (r) => (r.issues ?? []).join('; ')]];
+  const app: Col[] = [];
   const cols: Col[] = columns
     ? [...columns.map((c, i): Col => [c.header.trim() || `Column ${i + 1}`, (r) => r.cells?.[c.id]]), ...(sized && !hasSizeColumn(columns) ? [['Size (W x H)', size] as Col] : []), ...app]
     : [
@@ -1279,7 +1258,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
       assignRoute: { $in: [null, 'HANDOVER'] },
       ...(full
         ? // Shop types: the table checked above (row count, no error rows) is still the one handed over.
-          { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.total': o.shopList?.total, 'shopList.error': { $in: [0, null] } }) }
+          { handoverFull: { $ne: false }, handoverType: o.handoverType, ...(o.handoverType === 'ASO' ? {} : { 'shopList.total': o.shopList?.total }) }
         : { handoverFull: false }),
       ...(lead ? { 'lead.status': 'OPEN', 'lead.stage': 'PROJECT_ASSIGN' } : {}),
     },

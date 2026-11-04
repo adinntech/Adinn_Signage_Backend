@@ -17,6 +17,17 @@ import { ORDER_STAGES, SalesOrder, type OrderStage } from './sales.model';
 import { liveOrder, orderArray } from './order.service';
 import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
+import { sendViaSignageMail, signageMailAvailable, signagePayload } from './signageMail';
+import { nextSeq } from '../../common/counter.model';
+
+/** Sends in progress (order + request key): a second click while the first is still sending is refused, not sent twice. */
+const inFlight = new Set<string>();
+
+/** Project code request reference, e.g. PCR-2026-0105 (numbered per year in India). */
+const nextRequestId = async () => {
+  const year = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric' }).format(new Date());
+  return `PCR-${year}-${String(await nextSeq(`projectCodeRequest:${year}`)).padStart(4, '0')}`;
+};
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
@@ -26,12 +37,7 @@ const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', R
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
 
-/**
- * Sends one email and stores exactly what was sent. Customer onboarding emails go through the PHP mail service (the
- * PDF as a link); the others through SMTP. When the transport is not configured the record says SKIPPED (never a
- * fake "sent"); a failure is stored as FAILED with the reason.
- */
-export async function deliver(rec: {
+type DeliverInput = {
   order: Types.ObjectId;
   client?: Types.ObjectId | null;
   kind: Kind;
@@ -43,26 +49,84 @@ export async function deliver(rec: {
   rateCardRevision?: number | undefined;
   requestKey?: string | undefined;
   resentFrom?: Types.ObjectId | undefined;
+  /** Project code request: the client and source the signage email API needs. */
+  signage?: { source: string; client: { clientName: string; clientCode: string } } | undefined;
   actor: Actor;
-}) {
-  const sentWithKey = async () => {
-    const o = await orderArray(String(rec.order), 'salesprofile', ['sentBy']);
-    return (o.salesprofile ?? []).find((e) => e.requestKey === rec.requestKey) ?? null;
-  };
+};
+
+/** The email recorded with this request key (a send that already went), or null. */
+const sentWith = async (order: Types.ObjectId, requestKey: string | undefined) => {
+  const o = await orderArray(String(order), 'salesprofile', ['sentBy']);
+  return (o.salesprofile ?? []).find((e) => e.requestKey === requestKey) ?? null;
+};
+
+/**
+ * Sends one email and stores exactly what was sent. Customer onboarding emails go through the PHP mail service (the
+ * PDF as a link), project code requests through the signage email API, the others through SMTP. When the transport is
+ * not configured the record says SKIPPED (never a fake "sent"); a failure is stored as FAILED with the reason.
+ */
+export async function deliver(rec: DeliverInput) {
   if (rec.requestKey) {
-    const again = await sentWithKey();
+    const again = await sentWith(rec.order, rec.requestKey);
     if (again) return again;
   }
+  const lock = rec.requestKey ? `${String(rec.order)}:${rec.requestKey}` : null;
+  if (lock && inFlight.has(lock)) throw AppError.conflict('This email is already being sent. Wait for the result.');
+  if (lock) inFlight.add(lock);
+  try {
+    return await deliverOnce(rec);
+  } finally {
+    if (lock) inFlight.delete(lock);
+  }
+}
+
+async function deliverOnce(rec: DeliverInput) {
+  const sentWithKey = () => sentWith(rec.order, rec.requestKey);
   let status: 'SENT' | 'FAILED' | 'SKIPPED' = 'SENT';
   let error: string | undefined;
   const php = rec.kind === 'ONBOARDING';
+  // Project code request: the signage email API (not SMTP).
+  const signage = rec.kind === 'PROJECT_CODE_REQUEST';
   const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
-  if (php ? !phpMailAvailable() : !mailAvailable()) {
+  let requestId: string | undefined;
+  let apiPayload: ReturnType<typeof signagePayload> | undefined;
+  let apiResponse: string | undefined;
+  if (signage) {
+    requestId = await nextRequestId();
+    apiPayload = signagePayload({
+      to: rec.to,
+      cc: rec.cc,
+      subject: rec.subject,
+      requestId,
+      text: htmlToText(rec.body),
+      html: rec.body,
+      source: rec.signage?.source ?? 'Client Servicing Team',
+      client: rec.signage?.client ?? { clientName: '', clientCode: '' },
+      attachments: rec.attachments,
+    });
+  }
+  if (signage ? !signageMailAvailable() : php ? !phpMailAvailable() : !mailAvailable()) {
     status = 'SKIPPED';
-    error = php ? 'The PHP mail service is not configured on the server (PHP_MAIL_URL), so nothing was sent' : 'Email is not configured on the server (SMTP), so nothing was sent';
+    error = signage
+      ? 'The signage email API is not configured on the server (SIGNAGE_MAIL_API_URL / SIGNAGE_MAIL_API_KEY), so nothing was sent'
+      : php
+        ? 'The PHP mail service is not configured on the server (PHP_MAIL_URL), so nothing was sent'
+        : 'Email is not configured on the server (SMTP), so nothing was sent';
   } else {
     try {
-      if (php) {
+      if (signage) {
+        apiResponse = await sendViaSignageMail({
+          to: rec.to,
+          cc: rec.cc,
+          subject: rec.subject,
+          requestId: requestId!,
+          text: htmlToText(rec.body),
+          html,
+          source: apiPayload!.source,
+          client: apiPayload!.client,
+          attachments: rec.attachments,
+        });
+      } else if (php) {
         const links = await Promise.all(rec.attachments.map(async (a) => ({ name: a.name ?? 'attachment.pdf', url: (await storedFileUrl(a)).url })));
         await sendViaPhpMail({ from: env.MAIL_FROM, to: rec.to, cc: rec.cc, subject: rec.subject, html, text: htmlToText(rec.body), attachments: links });
       } else {
@@ -92,6 +156,9 @@ export async function deliver(rec: {
     body: rec.body,
     attachments: rec.attachments,
     rateCardRevision: rec.rateCardRevision,
+    requestId,
+    apiPayload,
+    apiResponse,
     status,
     error,
     requestKey: rec.requestKey,
@@ -176,9 +243,12 @@ export async function listEmails(orderId: string, kind?: Kind) {
 
 /** Resend exactly the same content and attachment (the original PDF revision, not the latest). */
 export async function resendEmail(emailId: string, actor: Actor) {
-  const o = await SalesOrder.findOne({ 'salesprofile._id': emailId, deletedAt: null }).select('client salesprofile').lean();
+  const o = await SalesOrder.findOne({ 'salesprofile._id': emailId, deletedAt: null }).select('client salesprofile recce.projectCode recce.codesSavedAt').lean();
   const e = o?.salesprofile?.find((x) => String(x._id) === emailId);
   if (!o || !e) throw AppError.notFound('Email not found');
+  // Project code request: preview-only once the project code and estimation code are saved (same rule as sending).
+  if (e.kind === 'PROJECT_CODE_REQUEST' && (o.recce?.codesSavedAt || o.recce?.projectCode))
+    throw new AppError(409, 'CODES_SAVED', 'The project code and estimation code are saved: the request email can no longer be resent. Email History keeps what was sent.', [{ path: 'email', message: 'Codes already saved' }]);
   return deliver({
     order: o._id,
     client: o.client,
@@ -190,6 +260,11 @@ export async function resendEmail(emailId: string, actor: Actor) {
     attachments: (e.attachments ?? []).filter((a) => a.fileId) as Attachment[],
     rateCardRevision: e.rateCardRevision ?? undefined,
     resentFrom: e._id,
+    // Project code request: same client and source as the original (a new request reference is given).
+    signage: (() => {
+      const p = e.apiPayload as { source?: string; client?: { clientName?: string; clientCode?: string } } | null | undefined;
+      return p ? { source: p.source ?? 'Client Servicing Team', client: { clientName: p.client?.clientName ?? '', clientCode: p.client?.clientCode ?? '' } } : undefined;
+    })(),
     actor,
   });
 }

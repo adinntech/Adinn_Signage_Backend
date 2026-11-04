@@ -42,12 +42,13 @@ export const quotationBody = z.object({
     email: optionalEmail,
   }),
   quotationDate: z.coerce.date({ message: 'Enter the quotation date' }),
-  subject: z.string().trim().min(1, 'Enter the subject').max(250),
+  // No Subject input in the rate card editors any more: a version keeps the previous one (or the default).
+  subject: optStr(250),
   items: z.array(line).min(1, 'Add at least one signage item').max(100),
   terms: z.string().trim().max(20000).default(''),
   regards: z.object({
     name: z.string().trim().min(1, 'Enter the name').max(120),
-    // Not printed on the ADINN rate card (Business Analyst shows name, email and phone); kept for older revisions.
+    // Not printed on the ADINN rate card (Client Service shows name, email and phone); kept for older revisions.
     designation: optStr(120),
     mobile: mobileRule,
     email: z.string().trim().toLowerCase().email('Enter a valid email address'),

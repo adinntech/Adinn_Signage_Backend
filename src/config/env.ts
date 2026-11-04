@@ -78,6 +78,14 @@ const schema = z
     /** Optional key sent to the PHP mail service in the X-Api-Key header. */
     PHP_MAIL_KEY: optional,
     /**
+     * Signage email API for the project code request email (JSON POST with the X-API-Key header). Both URL and key are
+     * needed; without them the email is recorded as not sent. The key stays on the server (never sent to the web app).
+     */
+    SIGNAGE_MAIL_API_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
+    SIGNAGE_MAIL_API_KEY: optional,
+    /** How files go in `attachments`: base64 (file content in the JSON, default) or url (short-lived download links). */
+    SIGNAGE_MAIL_ATTACHMENTS: z.enum(['base64', 'url']).default('base64'),
+    /**
      * Zoho (existing client list in Order Management / Lead Management). OAuth self client: client id + secret + a
      * refresh token. Without them a sample list is served so the screens can be used before Zoho is connected.
      */
@@ -143,6 +151,7 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
+  signageMailEnabled: !!(parsed.data.SIGNAGE_MAIL_API_URL && parsed.data.SIGNAGE_MAIL_API_KEY),
   zohoCustomersLive: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),

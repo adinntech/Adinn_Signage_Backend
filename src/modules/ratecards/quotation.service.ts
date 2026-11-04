@@ -89,10 +89,14 @@ export type Snapshot = {
   terms?: string | null;
   regards?: { name?: string | null; designation?: string | null; mobile?: string | null; email?: string | null } | null;
 };
-type Change = { field: string; oldValue: unknown; newValue: unknown; changeType: 'ADDED' | 'UPDATED' | 'REMOVED' };
+type Change = { field: string; oldValue: unknown; newValue: unknown; changeType: 'ADDED' | 'UPDATED' | 'REMOVED'; reason?: string };
 
 const lineKey = (l: Line) => (l.masterItem ? `m:${String(l.masterItem)}` : `p:${normKey(l.particulars)}`);
-const n = (v: unknown) => (v === undefined || v === '' ? null : v);
+/** Compared value: text with its spacing collapsed, blank = null, so formatting alone is never a change. */
+const n = (v: unknown) => {
+  const x = typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : v;
+  return x === undefined || x === '' ? null : x;
+};
 /** Today in India (Asia/Kolkata) as a date (UTC midnight of that day, as a typed date input is stored). */
 export const todayIst = () => new Date(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()));
 const day = (d: Date | string) => new Date(d).toISOString().slice(0, 10);
@@ -103,36 +107,24 @@ const describeLine = (l: Line) =>
   (l.overrideReason ? ` (reason: ${l.overrideReason})` : '');
 
 /**
- * First save: every filled-in field and item is listed as added, with its value. A line copied from the master rate card
- * whose quoted rate differs from the master rate it was copied at also gets that change (master -> quoted, and the
- * reason), so the first version shows it like later edits do.
+ * First save: compared with the Super Admin master rates captured on each copied line, so only real differences are
+ * listed: a quoted rate that differs from its master rate (e.g. ₹300 -> ₹250, with the override reason) and custom
+ * lines that are not in the master. Lines quoted at the master rate are not changes.
  */
 function initialChanges(next: Snapshot): Change[] {
-  const add = (field: string, v: unknown): Change[] => (n(v) === null ? [] : [{ field, oldValue: null, newValue: n(v), changeType: 'ADDED' }]);
-  const fromMaster = (l: Line): Change[] =>
-    l.masterItem && l.masterRate != null && l.quotedRate !== l.masterRate
-      ? [
-          { field: `Quoted Rate (${l.particulars}) vs master`, oldValue: l.masterRate, newValue: l.quotedRate, changeType: 'UPDATED' },
-          ...(l.overrideReason ? [{ field: `Override Reason (${l.particulars})`, oldValue: null, newValue: l.overrideReason, changeType: 'ADDED' as const }] : []),
-        ]
-      : [];
-  return [
-    ...add('Subject', next.subject),
-    ...add('Quotation Date', day(next.quotationDate)),
-    ...add('Contact Person', next.contact?.name),
-    ...add('Client Address', next.clientAddress),
-    ...next.items.flatMap((l): Change[] => [{ field: `Item (${l.particulars})`, oldValue: null, newValue: describeLine(l), changeType: 'ADDED' }, ...fromMaster(l)]),
-    ...add('Terms & Conditions', htmlToText(next.terms ?? '')),
-    ...add('Regards Name', next.regards?.name),
-  ];
+  return next.items.flatMap((l): Change[] => {
+    if (!l.masterItem) return [{ field: `Added Item (${l.particulars})`, oldValue: null, newValue: describeLine(l), changeType: 'ADDED' }];
+    if (l.masterRate == null || l.quotedRate === l.masterRate) return [];
+    return [{ field: `Quoted Rate (${l.particulars})`, oldValue: l.masterRate, newValue: l.quotedRate, changeType: 'UPDATED', ...(l.overrideReason ? { reason: l.overrideReason } : {}) }];
+  });
 }
 
 /** Field-level changes between two saved versions (what the Edit History tab shows). */
 export function quotationChanges(prev: Snapshot | null, next: Snapshot): Change[] {
   if (!prev) return initialChanges(next);
   const out: Change[] = [];
-  const upd = (field: string, a: unknown, b: unknown) => {
-    if (JSON.stringify(n(a)) !== JSON.stringify(n(b))) out.push({ field, oldValue: n(a), newValue: n(b), changeType: 'UPDATED' });
+  const upd = (field: string, a: unknown, b: unknown, reason?: string | null) => {
+    if (JSON.stringify(n(a)) !== JSON.stringify(n(b))) out.push({ field, oldValue: n(a), newValue: n(b), changeType: 'UPDATED', ...(reason ? { reason } : {}) });
   };
   upd('Client Address', prev.clientAddress, next.clientAddress);
   upd('Contact Person', prev.contact?.name, next.contact?.name);
@@ -155,8 +147,9 @@ export function quotationChanges(prev: Snapshot | null, next: Snapshot): Change[
     upd(`Signage Particulars (${o.particulars})`, o.particulars, l.particulars);
     upd(`Specifications (${l.particulars})`, o.specifications, l.specifications);
     upd(`Rate Unit (${l.particulars})`, o.unit, l.unit);
-    upd(`Quoted Rate (${l.particulars})`, o.quotedRate, l.quotedRate);
-    upd(`Override Reason (${l.particulars})`, o.overrideReason, l.overrideReason);
+    upd(`Quoted Rate (${l.particulars})`, o.quotedRate, l.quotedRate, l.overrideReason);
+    // The reason of a changed rate shows with it; a reason edited on its own is its own change.
+    if (Number(o.quotedRate) === Number(l.quotedRate)) upd(`Override Reason (${l.particulars})`, o.overrideReason, l.overrideReason);
   }
   for (const [k, l] of before) if (!after.has(k)) out.push({ field: `Removed Item (${l.particulars})`, oldValue: describeLine(l), newValue: null, changeType: 'REMOVED' });
   return out;
@@ -234,7 +227,7 @@ export async function prepareRevision(input: z.infer<typeof quotationBody>, late
     clientAddress: input.clientAddress ?? null,
     contact: { name: input.contact.name, designation: input.contact.designation ?? null, phone: input.contact.phone ?? null, email: input.contact.email ?? null },
     quotationDate: input.quotationDate,
-    subject: input.subject,
+    subject: input.subject ?? latest?.subject ?? 'Signage Rate Card',
     items: input.items.map((l) => ({
       masterItem: l.masterItemId ? new Types.ObjectId(l.masterItemId) : undefined,
       particulars: l.particulars,

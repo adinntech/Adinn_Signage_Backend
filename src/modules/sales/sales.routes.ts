@@ -33,6 +33,7 @@ salesRouter.get('/orders/:id/recce', csFlow, c.getRecce);
 salesRouter.post('/orders/:id/recce/handover-done', csFlow, c.confirmRecceHandover);
 // Rate Card (Client Servicing orders created with the step): Save & Continue, and later updates
 salesRouter.put('/orders/:id/recce/rate-card', csFlow, c.saveRecceRateCard);
+salesRouter.post('/orders/:id/recce/rate-card/skip', csFlow, c.skipRecceRateCard);
 salesRouter.post('/orders/:id/recce/code-request', csFlow, receive, c.sendCodeRequest);
 salesRouter.put('/orders/:id/recce/codes', csFlow, c.saveRecceCodes);
 salesRouter.post('/orders/:id/recce/assign', csFlow, c.assignRecce);

@@ -312,7 +312,13 @@ export async function getLead(id: string) {
       handoverDone: !!order.recce?.handoverDoneAt || requests.some((e) => e.status === 'SENT' || e.status === 'SKIPPED'),
       /** Rate Card step (Client Servicing orders created with it; null for older orders): done, latest version, last save. */
       rateCard: order.recce?.rateCardRequired
-        ? { doneAt: order.recce.rateCardDoneAt ?? null, label: o.currentRevision ? revisionLabel(o.currentRevision) : null, updatedAt: revisions.at(-1)?.createdAt ?? null }
+        ? {
+            doneAt: order.recce.rateCardDoneAt ?? null,
+            // INCLUDED / SKIPPED (older orders done before the choice: included).
+            choice: order.recce.rateCardChoice ?? (order.recce.rateCardDoneAt ? 'INCLUDED' : null),
+            label: o.currentRevision ? revisionLabel(o.currentRevision) : null,
+            updatedAt: revisions.at(-1)?.createdAt ?? null,
+          }
         : null,
       missing: recceGaps[0] ?? null,
     },

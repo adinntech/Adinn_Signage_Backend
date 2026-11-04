@@ -10,7 +10,6 @@ import { clientOf, latestDetails } from '../clients/clientDetails';
 import { CommunicationMessage } from '../communications/communication.model';
 import { discardStoredFiles, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
-import { mailAvailable } from '../notifications/mail.service';
 import { Project, Requirement } from '../projects/project.model';
 import { assignProject, createProject } from '../projects/project.service';
 import { projectCreate } from '../projects/project.validators';
@@ -24,6 +23,7 @@ import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
 import type { recceAssignBody, recceCodesBody, sendEmailBody } from './sales.validators';
+import { signageMailAvailable } from './signageMail';
 
 /** Recce / Operations people a project can be assigned to (same rule as the projects module). */
 export const recceUsers = () =>
@@ -106,6 +106,22 @@ const newClientCertificates = (clientType: string | null | undefined, c: { gstCe
 /** One copy of each file. */
 const uniqueFiles = (files: StoredFile[]) => files.filter((f, i, all) => all.findIndex((x) => String(x.fileId) === String(f.fileId)) === i);
 
+type RateCardFlow = { rateCardRequired?: boolean | null; rateCardDoneAt?: Date | null; rateCardChoice?: string | null; rateCardRevision?: number | null } | null | undefined;
+/** Rate Card step's choice: INCLUDED / SKIPPED, null until made. Orders done before the choice existed count as included. */
+const rateCardChoiceOf = (r: RateCardFlow) => (r?.rateCardChoice as 'INCLUDED' | 'SKIPPED' | null | undefined) ?? (r?.rateCardDoneAt ? 'INCLUDED' : null);
+
+/**
+ * The saved rate card version that goes with the project code request email: only one explicitly included in this
+ * flow (Save & Continue), never one that was skipped (its versions stay saved), never unsaved edits. Orders done before
+ * the choice existed: their latest saved version, as before.
+ */
+async function includedRateCard(orderId: Types.ObjectId, r: RateCardFlow) {
+  if (!r?.rateCardRequired || rateCardChoiceOf(r) !== 'INCLUDED') return null;
+  if (!r.rateCardRevision) return latestRevision(orderId);
+  const o = await SalesOrder.findOne({ _id: orderId }, { rateCardArray: { $elemMatch: { revision: r.rateCardRevision } } }).lean();
+  return o?.rateCardArray?.[0] ?? null;
+}
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
@@ -136,14 +152,17 @@ export async function getRecce(id: string, actor: Actor) {
   // Rate Card step (Client Servicing orders created with it): the latest saved version and its PDF.
   const rateCardRequired = !!r?.rateCardRequired;
   const rc = rateCardRequired ? await latestRevision(o._id) : null;
-  const rcPdf = (rc?.pdf ?? null) as StoredFile | null;
+  const rateCardChoice = rateCardRequired ? rateCardChoiceOf(r) : null;
+  // Only the version included in this flow goes with the email (none when skipped).
+  const inc = await includedRateCard(o._id, r);
+  const rcPdf = (inc?.pdf ?? null) as StoredFile | null;
   // Steps in order: handover details, the request email, the codes (+ Client ID for a New client), then the assignment.
   const missing = r?.assignee
     ? []
     : [
         ...handoverMissing,
         ...(handoverDone ? [] : ['Confirm Assign Type & Details (Continue)']),
-        ...(rateCardRequired && !r?.rateCardDoneAt ? ['Save the Rate Card (Save & Continue)'] : []),
+        ...(rateCardRequired && !r?.rateCardDoneAt ? ['Save the Rate Card (Save & Continue) or skip it'] : []),
         ...(sentOk ? [] : ['Send the project code request email']),
         ...(codes ? [] : ['Enter the project code and estimation code']),
         ...(codes && !existing && !codes.clientId ? ['Enter the Client ID created in Zoho'] : []),
@@ -181,9 +200,19 @@ export async function getRecce(id: string, actor: Actor) {
     handoverReady: handoverMissing.length === 0,
     /** Handover Type & Details confirmed with "Continue" (unlocks the request email). */
     handoverDone,
-    /** Rate Card step (null for orders created before it): done with the first Save & Continue; editable at any time. */
+    /**
+     * Rate Card step (null for orders created before it): done with Save & Continue (INCLUDED) or Skip (SKIPPED);
+     * editable at any time. `includedLabel`: the version that goes with the request email.
+     */
     rateCard: rateCardRequired
-      ? { doneAt: r?.rateCardDoneAt ?? null, label: rc ? revisionLabel(rc.revision) : null, updatedAt: rc?.createdAt ?? null, items: rc?.items?.length ?? 0 }
+      ? {
+          doneAt: r?.rateCardDoneAt ?? null,
+          choice: rateCardChoice,
+          includedLabel: inc ? revisionLabel(inc.revision) : null,
+          label: rc ? revisionLabel(rc.revision) : null,
+          updatedAt: rc?.createdAt ?? null,
+          items: rc?.items?.length ?? 0,
+        }
       : null,
     clientType: o.clientType,
     /** Client ID in Zoho: Existing clients have it from Zoho (read-only); New clients type it at Project Code. */
@@ -191,8 +220,8 @@ export async function getRecce(id: string, actor: Actor) {
     /** Sent automatically with every request email (besides the client details and contacts in the message). */
     autoAttachments: {
       shopExcel: shopRows ? { rows: shopRows, sized: o.handoverType === 'SHOP_MEASUREMENT' } : null,
-      /** Rate Card step: the latest saved version's PDF (the version current when the email is sent goes). */
-      rateCard: rcPdf ? { fileId: String(rcPdf.fileId), name: rcPdf.name, size: rcPdf.size, mimeType: rcPdf.mimeType, label: revisionLabel(rc!.revision) } : null,
+      /** Rate Card step: the PDF of the version included in this flow (none when the rate card was skipped). */
+      rateCard: rcPdf ? { fileId: String(rcPdf.fileId), name: rcPdf.name, size: rcPdf.size, mimeType: rcPdf.mimeType, label: revisionLabel(inc!.revision) } : null,
       documents: docs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType, so: soDocs.some((x) => String(x.fileId) === String(f.fileId)) })),
       /** New Client only: the client's GST certificates (they support the client ID creation). */
       gstCertificates: certs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType })),
@@ -207,7 +236,8 @@ export async function getRecce(id: string, actor: Actor) {
     note: r?.note ?? null,
     project: r?.project ?? null,
     missing,
-    mail: { enabled: mailAvailable(), from: env.MAIL_FROM ?? null },
+    // Sent through the signage email API (its URL and key on the server), not SMTP.
+    mail: { enabled: signageMailAvailable(), from: env.MAIL_FROM ?? null },
     draft: {
       to: [] as string[],
       cc: [] as string[],
@@ -240,7 +270,7 @@ export async function getRecce(id: string, actor: Actor) {
           ? `<p><strong>SO contacts</strong><br>${o.soContacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')}</p>`
           : '') +
         (shopRows || docs.length || certs.length || rcPdf
-          ? `<p><strong>Attachments</strong><br>${[rcPdf ? `Rate Card (${revisionLabel(rc!.revision)}) PDF` : null, shopRows ? `Shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, certs.length ? `GST certificate${certs.length === 1 ? '' : 's'}` : null, soDocs.length ? `${soDocs.length} SO additional document${soDocs.length === 1 ? '' : 's'}` : null, docs.length > soDocs.length ? `${docs.length - soDocs.length} document${docs.length - soDocs.length === 1 ? '' : 's'} from the communication` : null].filter(Boolean).join('<br>')}</p>`
+          ? `<p><strong>Attachments</strong><br>${[rcPdf ? `Rate Card (${revisionLabel(inc!.revision)}) PDF` : null, shopRows ? `Shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, certs.length ? `GST certificate${certs.length === 1 ? '' : 's'}` : null, soDocs.length ? `${soDocs.length} SO additional document${soDocs.length === 1 ? '' : 's'}` : null, docs.length > soDocs.length ? `${docs.length - soDocs.length} document${docs.length - soDocs.length === 1 ? '' : 's'} from the communication` : null].filter(Boolean).join('<br>')}</p>`
           : '') +
         `<p>Regards,<br>${escapeHtml(bd?.name ?? 'BD Team')}</p>`,
     },
@@ -248,6 +278,10 @@ export async function getRecce(id: string, actor: Actor) {
 }
 
 /** Project code request email: To / CC / subject / message with optional attachments, recorded in the email history. */
+/** Project code and estimation code saved: the request email can no longer be sent or resent. */
+export const codesSavedError = () =>
+  new AppError(409, 'CODES_SAVED', 'The project code and estimation code are saved: the request email can no longer be sent. Email History keeps what was sent.', [{ path: 'email', message: 'Codes already saved' }]);
+
 export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmailBody>, files: UploadedFile[], actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
@@ -256,14 +290,20 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     const again = (await listEmails(id, 'PROJECT_CODE_REQUEST')).find((e) => e.requestKey === input.requestKey);
     if (again) return again;
   }
+  // Codes saved: the request email is preview-only (no new send).
+  if (o.recce?.codesSavedAt || o.recce?.projectCode) throw codesSavedError();
   // Steps in order: the handover details come first (the email carries them).
   const client = await clientOf(o);
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Assign Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
   if (!o.recce?.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
-  // Orders with the Rate Card step: the rate card is saved first; its latest PDF goes with the email.
-  if (o.recce?.rateCardRequired && !o.recce.rateCardDoneAt) throw new AppError(422, 'RATE_CARD_INCOMPLETE', 'Save the Rate Card first (Save & Continue: Project Code Request Email).', [{ path: 'rateCard', message: 'Save the Rate Card first' }]);
-  const rateCardPdf = o.recce?.rateCardRequired ? ((await latestRevision(o._id))?.pdf as StoredFile | undefined) : undefined;
+  // Orders with the Rate Card step: the rate card is saved (Save & Continue) or skipped first. Only the version included
+  // in this flow goes with the email; a skipped rate card never does, even when a version is saved.
+  if (o.recce?.rateCardRequired && !o.recce.rateCardDoneAt) throw new AppError(422, 'RATE_CARD_INCOMPLETE', 'Save the Rate Card (Save & Continue) or skip it first.', [{ path: 'rateCard', message: 'Save or skip the Rate Card first' }]);
+  const included = await includedRateCard(o._id, o.recce);
+  const rateCardPdf = (included?.pdf ?? undefined) as StoredFile | undefined;
+  // Signage email API: the company name and its business Client ID in Zoho (e.g. 30196), not the CRM CLI- number.
+  const clientCode = o.recce?.clientId ?? (o.clientType === 'EXISTING' ? await zohoClientIdOf(client) : client?.zohoCustomerNo) ?? '';
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRecce(o, actor);
   const stored: StoredFile[] = [];
@@ -279,7 +319,20 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     // Documents shared in the handover Communication go as they are (no copy).
     // + New Client only: the client's GST certificates (as they are, no copy). One copy of each file.
     const attachments = uniqueFiles([...(rateCardPdf ? [rateCardPdf] : []), ...stored, ...chatDocuments(o.toObject()), ...soDocuments(o.toObject()), ...newClientCertificates(o.clientType, client)]);
-    const sent = await deliver({ order: o._id, client: o.client, kind: 'PROJECT_CODE_REQUEST', to: input.to, cc: input.cc, subject: input.subject, body: sanitizeHtml(input.body), attachments, requestKey: input.requestKey, actor });
+    const sent = await deliver({
+      order: o._id,
+      client: o.client,
+      kind: 'PROJECT_CODE_REQUEST',
+      to: input.to,
+      cc: input.cc,
+      subject: input.subject,
+      body: sanitizeHtml(input.body),
+      attachments,
+      rateCardRevision: included?.revision ?? undefined,
+      requestKey: input.requestKey,
+      signage: { source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team', client: { clientName: client?.name ?? '', clientCode } },
+      actor,
+    });
     const status = (sent as { status?: string }).status ?? 'SENT';
     await SalesOrder.updateOne(
       { _id: o._id },
@@ -297,6 +350,15 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
  * save (same validation, version and PDF) and, the first time, completes the step, which unlocks the request email.
  * It stays editable afterwards (also after the codes and the assignment); each change is a new version with its PDF.
  */
+/**
+ * Assign Type & Details mandatory details (assign type; shop list without row errors for the shop types; an SO contact
+ * for SO): every forward transition out of step 1 checks them (Continue, Skip: Rate Card, the first Rate Card save).
+ */
+function assertHandoverComplete(o: Awaited<ReturnType<typeof liveOrder>>) {
+  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
+  if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
+}
+
 export async function saveRateCard(id: string, input: z.infer<typeof quotationBody>, actor: Actor) {
   const o = await liveOrder(id);
   if (!o.recce?.rateCardRequired) throw AppError.conflict('This order has no Rate Card step.');
@@ -304,21 +366,66 @@ export async function saveRateCard(id: string, input: z.infer<typeof quotationBo
   const first = !o.recce.rateCardDoneAt;
   if (first && !o.recce.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)))
     throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first (Continue: Rate Card).', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
+  // First save completes the step: the mandatory details must still be complete (no bypass through a direct link).
+  if (first && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) assertHandoverComplete(o);
   // The PDF is generated and stored before anything is marked done; a failed save leaves the step as it was.
   const result = await saveQuotation(id, input, actor, { workflowAuthorized: isCs(actor), autoDate: true });
   const label = result.revision.label;
+  // Saving here includes the saved version in this flow (also a save with no changes: the saved version is included).
+  const wasIncluded = rateCardChoiceOf(o.recce) === 'INCLUDED' && (!o.recce.rateCardRevision || o.recce.rateCardRevision === result.revision.revision);
+  const now = new Date();
+  const include = { 'recce.rateCardChoice': 'INCLUDED', 'recce.rateCardRevision': result.revision.revision, 'recce.rateCardChoiceAt': now, 'recce.rateCardChoiceBy': actor.id };
   if (first) {
     await SalesOrder.updateOne(
       { _id: o._id, 'recce.rateCardDoneAt': null },
       {
-        $set: { 'recce.rateCardDoneAt': new Date(), 'recce.rateCardDoneBy': actor.id },
-        $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Rate Card ${label} saved · step completed`, { step: 'ratecard', newValue: { version: label } }) },
+        $set: { 'recce.rateCardDoneAt': now, 'recce.rateCardDoneBy': actor.id, ...include },
+        $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Rate Card ${label} saved · included in the request email · step completed`, { step: 'ratecard', newValue: { version: label, choice: 'INCLUDED' } }) },
       },
     );
-  } else if (result.saved) {
-    await SalesOrder.updateOne({ _id: o._id }, { $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `Rate Card ${label} saved`, { step: 'ratecard', newValue: { version: label } }) } });
+  } else if (result.saved || !wasIncluded) {
+    const what = result.saved ? `Rate Card ${label} saved` : `Rate Card ${label}`;
+    await SalesOrder.updateOne(
+      { _id: o._id },
+      {
+        $set: include,
+        $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, `${what}${wasIncluded ? '' : ' · included in the request email'}`, { step: 'ratecard', newValue: { version: label, choice: 'INCLUDED' } }) },
+      },
+    );
   }
   return result;
+}
+
+/**
+ * Skip Rate Card (Assign Type & Details > Skip: Rate Card, or inside the Rate Card step): the step is done without a
+ * rate card, so the request email goes without one, even when a version is saved (versions and their history stay).
+ * Saving the rate card later in this flow includes it again.
+ */
+export async function skipRateCard(id: string, actor: Actor) {
+  const o = await liveOrder(id);
+  if (!o.recce?.rateCardRequired) throw AppError.conflict('This order has no Rate Card step.');
+  assertBranchOpen(o, actor);
+  if (!o.recce.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)))
+    throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first.', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
+  // Skip leaves out only the Rate Card, never the mandatory assignment details.
+  if (!(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) assertHandoverComplete(o);
+  if (rateCardChoiceOf(o.recce) !== 'SKIPPED') {
+    const now = new Date();
+    const r = await SalesOrder.updateOne(
+      { ...branchFilter(o, actor), 'recce.rateCardRequired': true },
+      {
+        $set: {
+          ...(o.recce.rateCardDoneAt ? {} : { 'recce.rateCardDoneAt': now, 'recce.rateCardDoneBy': actor.id }),
+          'recce.rateCardChoice': 'SKIPPED',
+          'recce.rateCardChoiceAt': now,
+          'recce.rateCardChoiceBy': actor.id,
+        },
+        $push: { leadLogsArray: leadLog(actor, 'STEP', null, null, 'Rate Card skipped · the request email goes without a rate card', { step: 'ratecard', newValue: { choice: 'SKIPPED' } }) },
+      },
+    );
+    if (!r.matchedCount) throw AppError.conflict('This project was assigned meanwhile. Reload the page.');
+  }
+  return getRecce(id, actor);
 }
 
 /** Codes are unique across operations projects and other orders. */
@@ -335,8 +442,7 @@ async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, est
 export async function confirmHandover(id: string, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
-  if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
+  assertHandoverComplete(o);
   await claimRecce(o, actor);
   if (!o.recce?.handoverDoneAt) {
     const now = new Date();

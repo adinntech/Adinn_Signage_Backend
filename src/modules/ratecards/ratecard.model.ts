@@ -59,7 +59,7 @@ export const rateCardRevisionSchema = new Schema({
   items: [lineSchema],
   terms: String, // sanitized HTML
   regards: { name: String, designation: String, mobile: String, email: String },
-  changes: [{ _id: false, field: String, oldValue: Schema.Types.Mixed, newValue: Schema.Types.Mixed, changeType: { type: String, enum: ['ADDED', 'UPDATED', 'REMOVED'] } }],
+  changes: [{ _id: false, field: String, oldValue: Schema.Types.Mixed, newValue: Schema.Types.Mixed, changeType: { type: String, enum: ['ADDED', 'UPDATED', 'REMOVED'] }, reason: String }],
   pdf: { type: storedFileSchema },
   /** Lead stage the revision was saved in: the first rate card, or a negotiation round. */
   phase: { type: String, enum: ['PREPARATION', 'NEGOTIATION'], default: 'PREPARATION' },

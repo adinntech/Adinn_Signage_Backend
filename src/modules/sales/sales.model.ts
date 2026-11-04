@@ -62,6 +62,13 @@ const emailSchema = new Schema({
   body: String,
   attachments: [fileRef],
   rateCardRevision: Number,
+  /**
+   * Project code request emails sent through the signage email API: the request reference, and the JSON sent (files
+   * as references only, never their content) with the API's reply.
+   */
+  requestId: String,
+  apiPayload: Schema.Types.Mixed,
+  apiResponse: String,
   status: { type: String, enum: DELIVERY_STATUSES, required: true },
   error: String,
   resentFrom: Schema.Types.ObjectId,
@@ -314,6 +321,15 @@ const orderSchema = new Schema(
           /** Rate Card step completed (first Save & Continue). The rate card stays editable afterwards. */
           rateCardDoneAt: Date,
           rateCardDoneBy: { type: Schema.Types.ObjectId, ref: 'User' },
+          /**
+           * The Rate Card step's choice: INCLUDED (saved with Save & Continue; `rateCardRevision` is the version that goes
+           * with the request email) or SKIPPED (no rate card goes, even when a version is saved; versions are kept).
+           * Null on orders done before the choice existed: their latest version goes, as before.
+           */
+          rateCardChoice: { type: String, enum: ['INCLUDED', 'SKIPPED'], default: null },
+          rateCardRevision: Number,
+          rateCardChoiceAt: Date,
+          rateCardChoiceBy: { type: Schema.Types.ObjectId, ref: 'User' },
           assignee: { type: Schema.Types.ObjectId, ref: 'User' },
           assignedAt: Date,
           assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },

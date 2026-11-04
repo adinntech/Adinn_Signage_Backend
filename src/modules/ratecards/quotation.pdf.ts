@@ -9,25 +9,23 @@ export interface QuotationPdfInput {
   quotationRef: string;
   revisionLabel: string;
   quotationDate: Date;
-  subject: string;
+  /** Kept on each version (older PDFs printed it); no longer printed. */
+  subject?: string | null;
   clientName: string;
   /** "Bill To" line under the company name (usually the city). */
   clientAddress?: string | null;
   contact?: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null } | null;
   items: { particulars: string; specifications?: string | null; unit: string; quotedRate: number }[];
   terms?: string | null;
-  /** Business Analyst shown under Quote & Contact. */
+  /** Client Service person shown under Quote & Contact. */
   regards?: { name?: string | null; designation?: string | null; mobile?: string | null; email?: string | null } | null;
 }
 
-const RED = '#E3000F';
 const DARK = '#1E2235';
 const MUTED = '#5B6475';
 const LINE = '#E4E7EC';
 const HEAD_BG = '#EEF0F3';
 const ZEBRA = '#FAFAFB';
-const PINK = '#FDF0F0';
-const PINK_LINE = '#F4CFCF';
 const PILL = '#1F2433';
 
 const M = 34; // side margin
@@ -58,7 +56,7 @@ export function termsList(html?: string | null): string[] {
 
 /**
  * ADINN rate card PDF, laid out like the company's own quotation: header card on every page, Bill To and
- * Quote & Contact cards, subject bar, rate table, Terms & Conditions with numbered rows, and a page footer.
+ * Quote & Contact cards, rate table, Terms & Conditions with numbered rows, and a page footer.
  */
 export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -114,10 +112,7 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const leftW = 260;
     const rightX = M + leftW + 12;
     const rightW = COLS[4]! - rightX;
-    const titled = (x: number, title: string) => {
-      doc.roundedRect(x + 13, top + 11, 4, 15, 2).fill(RED);
-      put(title, x + 26, top + 14, { font: BOLD, size: 9.5 });
-    };
+    const titled = (x: number, title: string) => put(title, x + 13, top + 14, { font: BOLD, size: 9.5 });
     const textW = leftW - 26;
     const addr = q.clientAddress?.trim() ?? '';
     const attn = q.contact?.name ? `Kind Attn : ${q.contact.name}` : '';
@@ -127,7 +122,7 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const attnH = attn ? height(attn, REG, 8.5, textW) : 0;
     const quoteRows: [string, string][] = [
       ['DATE', dateText(q.quotationDate)],
-      ['BUSINESS ANALYST', q.regards?.name ?? ''],
+      ['CLIENT SERVICE', q.regards?.name ?? ''],
       ['EMAIL ID', q.regards?.email ?? ''],
       ['PHONE NUMBER', phoneText(q.regards?.mobile)],
       ['WEBSITE', COMPANY.website],
@@ -152,13 +147,6 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
       put(v, rightX + 103, ry, { size: 8, width: rightW - 110 });
     });
 
-    // ---- subject bar ----
-    const sy = top + cardH + 8;
-    card(M, sy, W, 26, PINK, PINK_LINE, 6);
-    put('SUBJECT', 56, sy + 8.5, { font: BOLD, size: 9, color: RED });
-    doc.moveTo(124, sy + 5).lineTo(124, sy + 21).lineWidth(1.2).strokeColor(RED).stroke();
-    put(q.subject, 137, sy + 8, { font: BOLD, size: 9.5, width: M + W - 137 - 12 });
-
     // ---- rate table ----
     const BODY = 8;
     // The rate column keeps a smaller right padding so "120/ Running Feet" wraps to two lines, as on the company sheet.
@@ -168,7 +156,8 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
       ['S.NO', 'PARTICULARS', 'SPECIFICATION', 'RATE / SQFT'].forEach((h, j) => put(h, COLS[j]! + PAD, hy + 8, { font: BOLD, size: 7.5 }));
       return hy + 23;
     };
-    y = tableHead(sy + 26 + 8);
+    // No subject strip: the rate table follows the Bill To / Quote & Contact cards.
+    y = tableHead(top + cardH + 10);
     q.items.forEach((it, i) => {
       const cells = [String(i + 1), it.particulars, it.specifications?.trim() || '-', rateText(it.quotedRate, it.unit)];
       const h = Math.max(30, ...cells.map((c, j) => height(c, REG, BODY, colW(j)) + 16));
