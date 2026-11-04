@@ -24,6 +24,8 @@ export interface QuotationPdfInput {
 // Colours of the company quotation design (same values as the web preview, quotation-preview.tsx).
 const INK = '#0F172A';
 const SLATE = '#334155';
+/** Dark text of the Bill To address, Quote & Contact labels and the specification column (easy to read when zoomed). */
+const TEXT = '#1E293B';
 const LABEL = '#475569';
 const MUTED = '#64748B';
 const LINE = '#E5E7EB';
@@ -140,8 +142,8 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const addr = q.clientAddress?.trim() ?? '';
     const attn = q.contact?.name ? `Kind Attn : ${q.contact.name}` : '';
     const nameH = height(q.clientName, BOLD, 11, textW);
-    const addrH = addr ? height(addr, MED, 9, textW) : 0;
-    const attnH = attn ? height(attn, MED, 9, textW) : 0;
+    const addrH = addr ? height(addr, SEMI, 9, textW) : 0;
+    const attnH = attn ? height(attn, SEMI, 9, textW) : 0;
     const quoteRows: [string, string][] = [
       ['DATE', dateText(q.quotationDate)],
       ['CLIENT SERVICE', q.regards?.name ?? ''],
@@ -158,17 +160,17 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     put(q.clientName, M + 15, y, { font: BOLD, size: 11, width: textW });
     y += nameH + 3;
     if (addr) {
-      put(addr, M + 15, y, { font: MED, size: 9, color: SLATE, width: textW });
+      put(addr, M + 15, y, { font: SEMI, size: 9, color: TEXT, width: textW });
       y += addrH + 3;
     }
-    if (attn) put(attn, M + 15, y, { font: MED, size: 9, color: SLATE, width: textW });
+    if (attn) put(attn, M + 15, y, { font: SEMI, size: 9, color: TEXT, width: textW });
     heading('QUOTE & CONTACT', rightX + 15, top + 10.5);
     // Label left, value right, a thin line between rows.
     const valueX = rightX + 15 + 80;
     const valueW = rightW - 30 - 80;
     quoteRows.forEach(([k, v], i) => {
       const c = top + 34 + i * ROW;
-      put(k, rightX + 15, c - 4.8, { font: SEMI, size: 7, color: LABEL, spacing: 1 });
+      put(k, rightX + 15, c - 4.8, { font: BOLD, size: 7, color: TEXT, spacing: 1 });
       put(v || '-', valueX, c - 6, { font: BOLD, size: 8.75, width: valueW, align: 'right' });
       if (i < quoteRows.length - 1) hline(rightX + 15, rightX + rightW - 15, c + ROW / 2);
     });
@@ -178,7 +180,7 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const CELL = [
       { font: SEMI, size: 8.5, color: INK },
       { font: BOLD, size: 9, color: INK },
-      { font: MED, size: 8.25, color: SLATE },
+      { font: MED, size: 8.25, color: TEXT },
       { font: SEMI, size: 8.5, color: INK },
     ];
     const HEAD_H = 26;
