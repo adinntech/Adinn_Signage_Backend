@@ -84,7 +84,6 @@ const schema = z
     SIGNAGE_MAIL_API_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     SIGNAGE_MAIL_API_KEY: optional,
     /** How files go in `attachments`: base64 (file content in the JSON, default) or url (short-lived download links). */
-    SIGNAGE_MAIL_ATTACHMENTS: z.enum(['base64', 'url']).default('base64'),
     /**
      * Zoho (existing client list in Order Management / Lead Management). OAuth self client: client id + secret + a
      * refresh token. Without them a sample list is served so the screens can be used before Zoho is connected.

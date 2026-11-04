@@ -165,7 +165,7 @@ export async function listLeads(q: z.infer<typeof leadListQuery>, actor?: Actor)
   if (and.length) filter.$and = and;
   const [rows, total] = await Promise.all([
     SalesOrder.find(filter)
-      .select('orderNo client clientDetails clientType owner lead csAssignee handover.assignedAt currentRevision createdAt')
+      .select('orderNo client clientDetails clientType owner lead csAssignee handover.assignedAt recce.assignee recce.assignedAt currentRevision createdAt updatedAt')
       .sort(parseSort(q.sort, ['lead.stageChangedAt', 'lead.startedAt', 'orderNo', 'createdAt'], '-lead.stageChangedAt'))
       .skip((q.page - 1) * q.limit)
       .limit(q.limit)
@@ -181,6 +181,8 @@ export async function listLeads(q: z.infer<typeof leadListQuery>, actor?: Actor)
     stageNumber: stagesFor(o.clientType).indexOf(o.lead!.stage as LeadStage) + 1,
     stageCount: stagesFor(o.clientType).length,
     rateCardLabel: o.currentRevision ? revisionLabel(o.currentRevision) : null,
+    /** Final Recce / Operations assignment (Create Project list): assigned or not, and when. */
+    recceAssign: { assigned: !!o.recce?.assignee, assignedAt: o.recce?.assignee ? (o.recce.assignedAt ?? null) : null },
   }));
   return { items, meta: pageMeta(q.page, q.limit, total) };
 }

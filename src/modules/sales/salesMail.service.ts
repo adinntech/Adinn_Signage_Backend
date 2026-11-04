@@ -50,7 +50,7 @@ type DeliverInput = {
   requestKey?: string | undefined;
   resentFrom?: Types.ObjectId | undefined;
   /** Project code request: the client and source the signage email API needs. */
-  signage?: { source: string; client: { clientName: string; clientCode: string } } | undefined;
+  signage?: { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string> } | undefined;
   actor: Actor;
 };
 
@@ -103,6 +103,7 @@ async function deliverOnce(rec: DeliverInput) {
       source: rec.signage?.source ?? 'Client Servicing Team',
       client: rec.signage?.client ?? { clientName: '', clientCode: '' },
       attachments: rec.attachments,
+      docTypes: rec.signage?.docTypes,
     });
   }
   if (signage ? !signageMailAvailable() : php ? !phpMailAvailable() : !mailAvailable()) {
@@ -125,6 +126,7 @@ async function deliverOnce(rec: DeliverInput) {
           source: apiPayload!.source,
           client: apiPayload!.client,
           attachments: rec.attachments,
+          docTypes: rec.signage?.docTypes,
         });
       } else if (php) {
         const links = await Promise.all(rec.attachments.map(async (a) => ({ name: a.name ?? 'attachment.pdf', url: (await storedFileUrl(a)).url })));
@@ -262,8 +264,9 @@ export async function resendEmail(emailId: string, actor: Actor) {
     resentFrom: e._id,
     // Project code request: same client and source as the original (a new request reference is given).
     signage: (() => {
-      const p = e.apiPayload as { source?: string; client?: { clientName?: string; clientCode?: string } } | null | undefined;
-      return p ? { source: p.source ?? 'Client Servicing Team', client: { clientName: p.client?.clientName ?? '', clientCode: p.client?.clientCode ?? '' } } : undefined;
+      const p = e.apiPayload as { source?: string; client?: { clientName?: string; clientCode?: string }; attachments?: { fileId?: string; docType?: string }[] } | null | undefined;
+      const docTypes = Object.fromEntries((p?.attachments ?? []).filter((a) => a.fileId && a.docType).map((a) => [a.fileId!, a.docType!]));
+      return p ? { source: p.source ?? 'Client Servicing Team', client: { clientName: p.client?.clientName ?? '', clientCode: p.client?.clientCode ?? '' }, docTypes } : undefined;
     })(),
     actor,
   });

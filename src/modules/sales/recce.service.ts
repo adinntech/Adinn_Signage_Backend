@@ -307,18 +307,30 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRecce(o, actor);
   const stored: StoredFile[] = [];
+  // Signage email API: where each file comes from (first source wins, like the de-duplication below).
+  const docTypes: Record<string, string> = {};
+  const tag = <T extends { fileId?: unknown }>(list: T[], type: string) => {
+    for (const f of list) if (f.fileId) docTypes[String(f.fileId)] ??= type;
+    return list;
+  };
   // Assigned Client Servicing (checked by assertBranchOpen): the shop Excel and their added files are stored for the email.
   const store = (f: UploadedFile) => storeEmbeddedFile({ category: 'SALES_HANDOVER_DOCUMENT', clientName: client?.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: ownerOf(o._id), workflowAuthorized: isCs(actor) });
   try {
     // Shop types: the shop table as it is now, as Excel (with sizes for Shop + Measurement).
     if (o.handoverType && shopTypesList.includes(o.handoverType) && o.shopList?.total) {
       const x = await exportShops(id);
-      stored.push(await store({ originalname: x.name, mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: x.buffer.length, buffer: x.buffer }));
+      stored.push(...tag([await store({ originalname: x.name, mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: x.buffer.length, buffer: x.buffer })], 'shoplist'));
     }
-    for (const f of files) stored.push(await store(f));
+    for (const f of files) stored.push(...tag([await store(f)], 'upload'));
     // Documents shared in the handover Communication go as they are (no copy).
     // + New Client only: the client's GST certificates (as they are, no copy). One copy of each file.
-    const attachments = uniqueFiles([...(rateCardPdf ? [rateCardPdf] : []), ...stored, ...chatDocuments(o.toObject()), ...soDocuments(o.toObject()), ...newClientCertificates(o.clientType, client)]);
+    const attachments = uniqueFiles([
+      ...tag(rateCardPdf ? [rateCardPdf] : [], 'ratecard'),
+      ...stored,
+      ...tag(chatDocuments(o.toObject()), 'communication'),
+      ...tag(soDocuments(o.toObject()), 'so'),
+      ...tag(newClientCertificates(o.clientType, client), 'gst'),
+    ]);
     const sent = await deliver({
       order: o._id,
       client: o.client,
@@ -330,7 +342,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       attachments,
       rateCardRevision: included?.revision ?? undefined,
       requestKey: input.requestKey,
-      signage: { source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team', client: { clientName: client?.name ?? '', clientCode } },
+      signage: { source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team', client: { clientName: client?.name ?? '', clientCode }, docTypes },
       actor,
     });
     const status = (sent as { status?: string }).status ?? 'SENT';
