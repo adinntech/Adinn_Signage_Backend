@@ -33,6 +33,8 @@ const siteSchema = new Schema(
     clientSiteCode: String,
     extra: { type: Schema.Types.Mixed }, // any other client columns, original header -> value
     dupKey: { type: String, index: true },
+    /** Work area chosen by the smart plan (a key of the cost plan's area); shops are given to a team by it. */
+    planArea: { type: String, index: true },
     status: { type: String, enum: SITE_STATUSES, default: 'PENDING' },
     /** Two independent pre-recce approvals of the shop details / board measurement. */
     opsApproval: { type: String, enum: APPROVAL_STATES, default: 'PENDING' },
@@ -83,7 +85,7 @@ const batchSchema = new Schema(
     duplicatePolicy: { type: String, enum: ['skip', 'import', 'update'], default: 'skip' },
     status: { type: String, enum: ['UPLOADED', 'PREVIEWED', 'COMMITTING', 'COMMITTED', 'FAILED', 'DISCARDED'], default: 'UPLOADED', index: true },
     totalRows: { type: Number, default: 0 },
-    summary: { valid: Number, warning: Number, error: Number, duplicates: Number, skipped: Number },
+    summary: { valid: Number, warning: Number, error: Number, duplicates: Number, skipped: Number, importable: Number },
     result: { created: Number, updated: Number, skippedRows: Number, errorRows: Number },
     committedAt: Date,
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },

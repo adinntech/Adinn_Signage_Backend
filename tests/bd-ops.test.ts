@@ -34,7 +34,7 @@ const create = (over: Record<string, unknown> = {}, role = 'BD') => api().post('
 const assign = (id: string, assigneeId = uid.OPERATIONS!, role = 'BD') => api().post(`/api/v1/projects/${id}/assign`).set(as(role)).send({ assigneeId });
 const stage = (id: string, s: string, role = 'OPERATIONS') => api().post(`/api/v1/projects/${id}/stage`).set(as(role)).send({ stage: s });
 const addSite = (pid: string, over: Record<string, unknown> = {}, role = 'OPERATIONS') =>
-  api().post(`/api/v1/projects/${pid}/sites`).set(as(role)).send({ shopName: `Shop ${++seq}`, dealerName: 'Dealer', district: 'Dindigul', mobile: '9843011122', ...over });
+  api().post(`/api/v1/projects/${pid}/sites`).set(as(role)).send({ shopName: `Shop ${++seq}`, dealerName: 'Dealer', district: 'Dindigul', mobile: `98430${String(11000 + seq).padStart(5, '0')}`, address1: 'Main Road, Dindigul', ...over });
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();

@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
 import { AppError } from '../../common/errors';
-import { FIELD_LABELS, type MappableField, type Scenario } from './site.fields';
+import { autoMap, FIELD_LABELS, type MappableField, type Scenario } from './site.fields';
 
 export const MAX_ROWS = 20000;
 const MAX_COLS = 100;
@@ -24,8 +24,56 @@ export interface ParsedSheet {
   sheetName: string;
   headers: string[];
   rows: { rowNumber: number; raw: Record<string, string> }[];
+  /** Every sheet the workbook has and what was done with it, so the screen can say why a sheet was not used. */
+  sheets: { name: string; used: boolean; rows: number; note?: string }[];
 }
 
+const HEADER_SCAN_ROWS = 15;
+
+/** Reads one sheet: finds the real header row (skipping title lines above it) and returns the rows below it. */
+function readSheet(ws: ExcelJS.Worksheet): { headers: string[]; headerRow: number; score: number; rows: ParsedSheet['rows'] } | null {
+  const grid: { rowNumber: number; cells: string[] }[] = [];
+  ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+    const cells: string[] = [];
+    const max = Math.min(row.cellCount, MAX_COLS);
+    for (let c = 1; c <= max; c++) cells.push(cellText(row.getCell(c).value));
+    if (cells.some((c) => c !== '')) grid.push({ rowNumber, cells });
+  });
+  if (!grid.length) return null;
+
+  // The header is the line among the first few that names the most known shop columns; title lines (one filled cell) score 0.
+  let best = -1;
+  let score = 0;
+  grid.slice(0, HEADER_SCAN_ROWS).forEach((g, i) => {
+    const filled = g.cells.filter((c) => c !== '');
+    if (filled.length < 2) return;
+    const known = Object.values(autoMap(filled)).filter((t) => t !== 'extra' && t !== 'ignore').length;
+    if (known > score) { score = known; best = i; }
+  });
+  if (best < 0) best = Math.max(0, grid.findIndex((g) => g.cells.filter((c) => c !== '').length >= 2));
+  const head = grid[best]!;
+  const seen = new Map<string, number>();
+  const headers = head.cells.map((h, i) => {
+    const base = h || `Column ${i + 1}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n > 1 ? `${base} (${n})` : base;
+  });
+  const rows: ParsedSheet['rows'] = [];
+  for (const g of grid.slice(best + 1)) {
+    if (rows.length >= MAX_ROWS) throw AppError.badRequest(`Too many rows (limit ${MAX_ROWS}). Split the file and import in parts.`);
+    const raw: Record<string, string> = {};
+    headers.forEach((h, i) => { raw[h] = g.cells[i] ?? ''; });
+    rows.push({ rowNumber: g.rowNumber, raw });
+  }
+  return { headers, headerRow: head.rowNumber, score, rows };
+}
+
+/**
+ * Picks the sheet that holds the shops: hidden sheets are skipped, summary / pivot sheets lose to a sheet that really has the
+ * shop columns, and among real shop sheets the one with the most rows wins. Rows hidden by an Excel filter are still read
+ * (the client's list is the whole list). Lines above the header (a title) are ignored.
+ */
 export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<ParsedSheet> {
   const wb = new ExcelJS.Workbook();
   const isCsv = /\.csv$/i.test(fileName);
@@ -35,37 +83,27 @@ export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<P
   } catch {
     throw AppError.badRequest('Could not read the file. Upload a valid .xlsx or .csv file.');
   }
-  const ws = wb.worksheets.find((w) => w.actualRowCount > 0);
-  if (!ws) throw AppError.badRequest('The file is empty');
+  const candidates = wb.worksheets
+    .filter((w) => w.actualRowCount > 0)
+    .map((ws) => ({ ws, hidden: ws.state !== 'visible', read: ws.state === 'visible' ? readSheet(ws) : null }));
+  if (!candidates.length) throw AppError.badRequest('The file is empty');
 
-  let headers: string[] | null = null;
-  let headerRow = 0;
-  const rows: ParsedSheet['rows'] = [];
-  ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    const cells: string[] = [];
-    const max = Math.min(Math.max(row.cellCount, headers?.length ?? 0), MAX_COLS);
-    for (let c = 1; c <= max; c++) cells.push(cellText(row.getCell(c).value));
-    if (cells.every((c) => c === '')) return;
-    if (!headers) {
-      headerRow = rowNumber;
-      const seen = new Map<string, number>();
-      headers = cells.map((h, i) => {
-        const base = h || `Column ${i + 1}`;
-        const n = (seen.get(base) ?? 0) + 1;
-        seen.set(base, n);
-        return n > 1 ? `${base} (${n})` : base;
-      });
-      return;
-    }
-    if (rowNumber <= headerRow) return;
-    if (rows.length >= MAX_ROWS) throw AppError.badRequest(`Too many rows (limit ${MAX_ROWS}). Split the file and import in parts.`);
-    const raw: Record<string, string> = {};
-    headers.forEach((h, i) => { raw[h] = cells[i] ?? ''; });
-    rows.push({ rowNumber, raw });
-  });
-  if (!headers) throw AppError.badRequest('The file has no header row');
-  if (!rows.length) throw AppError.badRequest('The file has a header but no data rows');
-  return { sheetName: ws.name, headers, rows };
+  const usable = candidates.filter((c) => c.read && c.read.rows.length > 0);
+  // Real shop sheets (at least a shop name, owner or mobile column recognised) first, then by number of rows.
+  const shopLike = (c: (typeof usable)[number]) => (c.read!.score >= 2 ? 1 : 0);
+  usable.sort((a, b) => shopLike(b) - shopLike(a) || b.read!.rows.length - a.read!.rows.length);
+  const chosen = usable[0];
+  if (!chosen) {
+    if (candidates.every((c) => c.hidden)) throw AppError.badRequest('Every sheet in the file is hidden. Unhide the sheet that has the shops and upload again.');
+    throw AppError.badRequest(candidates.some((c) => c.read) ? 'The file has a header but no data rows' : 'The file has no header row');
+  }
+  const sheets = candidates.map((c) => ({
+    name: c.ws.name,
+    used: c === chosen,
+    rows: c.read?.rows.length ?? 0,
+    ...(c === chosen ? {} : { note: c.hidden ? 'Hidden sheet, skipped' : c.read && c.read.score < 2 ? 'Not a shop list (no shop columns found), skipped' : 'Fewer rows than the chosen sheet, skipped' }),
+  }));
+  return { sheetName: chosen.ws.name, headers: chosen.read!.headers, rows: chosen.read!.rows, sheets };
 }
 
 // ---------- export ----------

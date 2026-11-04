@@ -165,7 +165,7 @@ export function normalise(raw: Raw, opts: { scenario: Scenario; defaultUnit?: Un
     const area = m?.[1]?.trim() ?? v.address3;
     if (area) v.location = area.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
   }
-  if (!v.address1 && !v.address2 && !v.address3) warn('address1', 'MISSING_ADDRESS', 'Address is missing');
+  if (!v.address1 && !v.address2 && !v.address3) warn('address1', 'MISSING_ADDRESS', 'Address is missing: the shop is saved, but recce starts only after the address is filled');
   if (!v.district) warn('district', 'MISSING_DISTRICT', 'District is missing');
 
   const phoneRaw = s(raw.mobile).replace(/\.0+$/, '');
@@ -216,4 +216,21 @@ export function normalise(raw: Raw, opts: { scenario: Scenario; defaultUnit?: Un
     else err('quantity', 'BAD_QTY', `Invalid quantity "${q}"`);
   }
   return { value: v, errors, warnings };
+}
+
+type DupFields = { shopName?: string | undefined; dealerName?: string | undefined; district?: string | undefined; location?: string | undefined; mobile?: string | undefined };
+/**
+ * The identities a shop can be recognised by. Two shops are duplicates when they share ANY key:
+ *  - the same mobile number, or
+ *  - the same shop name AND the same dealer AND the same location (area / town).
+ * Nothing else counts: a wrong GST number is reported on the row (to be corrected) but never makes a duplicate, and the same
+ * shop name with another dealer or in another area, or one dealer with several shops, are different shops.
+ */
+export function dupKeysOf(v: DupFields): string[] {
+  const keys: string[] = [];
+  const m = (v.mobile ?? '').replace(/\D/g, '').slice(-10);
+  if (m.length === 10) keys.push(`mob:${m}`);
+  const who = normKey(v.shopName) || normKey(v.dealerName);
+  if (who) keys.push(`name:${who}|${normKey(v.dealerName)}|${normKey(v.location)}`);
+  return keys;
 }

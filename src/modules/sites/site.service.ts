@@ -10,7 +10,8 @@ import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
 import { permissionsFor, type Role } from '../roles/roles';
 import { buildSitesFile, buildTemplate, DEFAULT_EXPORT, EXPORT_COLUMNS } from './excel.service';
-import { dupKeyOf, normalise, sqftOf, type Scenario, type SiteInput, type Unit } from './site.fields';
+import { dupKeysOf, normalise, sqftOf, type Scenario, type SiteInput, type Unit } from './site.fields';
+import { CostPlan } from '../costing/costing.model';
 import { Site } from './site.model';
 import type { bulkBody, exportQuery, siteCreate, siteFilter, siteListQuery, sitePatch } from './site.validators';
 
@@ -28,6 +29,8 @@ export function buildFilter(projectId: string, f: Filter, ids?: string[]) {
   const q: Record<string, any> = { project: new Types.ObjectId(projectId), deletedAt: null };
   if (ids?.length) q._id = { $in: ids.map((i) => new Types.ObjectId(i)) };
   if (f.district) q.district = new RegExp(`^${escapeRegex(f.district)}$`, 'i');
+  if (f.location) q.location = new RegExp('^\s*' + escapeRegex(f.location.trim()) + '\s*$', 'i');
+  if (f.planArea) q.planArea = f.planArea;
   if (f.status) q.status = f.status;
   if (f.scenario) q.scenario = f.scenario;
   if (f.importBatchId) q.importBatch = new Types.ObjectId(f.importBatchId);
@@ -37,7 +40,7 @@ export function buildFilter(projectId: string, f: Filter, ids?: string[]) {
   }
   const empty = (field: string) => ({ $or: [{ [field]: null }, { [field]: '' }] });
   const and: unknown[] = [];
-  if (f.missing === 'address') and.push(empty('address1'), empty('address2'));
+  if (f.missing === 'address') and.push(empty('address1'), empty('address2'), empty('address3'));
   if (f.missing === 'mobile') and.push(empty('mobile'));
   if (f.missing === 'gst') and.push(empty('gstin'));
   if (f.missing === 'district') and.push(empty('district'));
@@ -65,9 +68,12 @@ export async function listSites(projectId: string, q: z.infer<typeof siteListQue
 export async function siteStats(projectId: string) {
   await requireProject(projectId);
   const base = { project: new Types.ObjectId(projectId), deletedAt: null };
-  const [total, districts, noAddr, noMobile, noMeasure, noGst, sqft] = await Promise.all([
+  const [total, districts, locations, clusterCounts, plan, noAddr, noMobile, noMeasure, noGst, sqft] = await Promise.all([
     Site.countDocuments(base),
     Site.aggregate([{ $match: base }, { $group: { _id: { $ifNull: ['$district', ''] }, n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 500 }]),
+    Site.aggregate([{ $match: base }, { $group: { _id: { district: { $toLower: { $trim: { input: { $ifNull: ['$district', ''] } } } }, location: { $toLower: { $trim: { input: { $ifNull: ['$location', ''] } } } } }, district: { $first: '$district' }, location: { $first: '$location' }, n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 1000 }]),
+    Site.aggregate([{ $match: { ...base, planArea: { $exists: true, $ne: '' } } }, { $group: { _id: '$planArea', n: { $sum: 1 } } }]),
+    CostPlan.findOne({ project: projectId }).select('legs').lean(),
     Site.countDocuments(buildFilter(projectId, { missing: 'address' })),
     Site.countDocuments(buildFilter(projectId, { missing: 'mobile' })),
     Site.countDocuments(buildFilter(projectId, { missing: 'measurement' })),
@@ -75,8 +81,15 @@ export async function siteStats(projectId: string) {
     Site.aggregate([{ $match: base }, { $group: { _id: null, s: { $sum: '$sqft' } } }]),
   ]);
   return {
-    total, totalSqft: Math.round((sqft[0]?.s ?? 0) * 100) / 100,
+    total, waitingForAddress: noAddr, readyForRecce: total - noAddr, totalSqft: Math.round((sqft[0]?.s ?? 0) * 100) / 100,
     districts: districts.map((d) => ({ district: d._id || '(none)', count: d.n })),
+    /** Nearby-shop clusters made by the smart plan, named as in the plan. Empty until "Use this plan" was pressed. */
+    clusters: ((plan?.legs ?? []) as { key: string; name: string; district?: string | null; clustered?: boolean | null }[])
+      .filter((l) => l.clustered)
+      .map((l) => ({ key: l.key, name: l.name, district: l.district ?? '', count: (clusterCounts.find((c) => c._id === l.key)?.n as number | undefined) ?? 0 }))
+      .filter((c) => c.count > 0),
+    /** Areas (towns) inside each district: the clusters Operations works by. */
+    locations: locations.filter((l) => String(l.location ?? '').trim()).map((l) => ({ district: String(l.district ?? '').trim() || '(none)', location: String(l.location).trim(), count: l.n as number })),
     missing: { address: noAddr, mobile: noMobile, measurement: noMeasure, gst: noGst },
   };
 }
@@ -85,7 +98,7 @@ type Raw = z.infer<typeof sitePatch>;
 function prepare(raw: Raw, scenario: Scenario) {
   const n = normalise(raw as never, { scenario, defaultUnit: (raw.unit as Unit | undefined) ?? 'ft' });
   const v = n.value;
-  const doc = { ...v, sqft: sqftOf(v.width, v.height, v.unit ?? 'ft', v.quantity ?? 1), dupKey: dupKeyOf(v) };
+  const doc = { ...v, sqft: sqftOf(v.width, v.height, v.unit ?? 'ft', v.quantity ?? 1), dupKey: dupKeysOf(v).join(' ') };
   // A sheet import only warns about a bad pincode, but a person typing one in must correct it.
   const bad = n.warnings.filter((w) => w.code === 'BAD_PINCODE');
   return { ...n, errors: [...n.errors, ...bad], doc };
@@ -118,8 +131,8 @@ export async function createSite(projectId: string, input: z.infer<typeof siteCr
   const scenario = (sc as Scenario | undefined) ?? 'MEASUREMENT_REQUIRED';
   const n = prepare(raw, scenario);
   if (n.errors.length) fail(n.errors);
-  if (n.doc.dupKey && !allowDuplicate && (await Site.exists({ project: projectId, dupKey: n.doc.dupKey, deletedAt: null }))) {
-    throw AppError.conflict('A site with the same shop, dealer and district already exists');
+  if (!allowDuplicate && (await findDuplicateSite(projectId, n.value))) {
+    throw AppError.conflict('A shop with the same mobile number, or the same shop name, dealer and location, already exists');
   }
   const seq = await nextSeqBlock(`site:${projectId}`, 1);
   const site = await Site.create({
@@ -148,8 +161,8 @@ export async function updateSite(id: string, patch: Raw, actor: Actor) {
   const n = prepare(merged as Raw, scenario);
   if (n.errors.length) fail(n.errors);
   // Editing must not silently create a duplicate of another shop in the same project.
-  if (n.doc.dupKey && n.doc.dupKey !== before.dupKey && (await Site.exists({ project: before.project, dupKey: n.doc.dupKey, deletedAt: null, _id: { $ne: id } }))) {
-    throw AppError.conflict('Another site with the same shop, dealer and district already exists');
+  if (n.doc.dupKey && n.doc.dupKey !== before.dupKey && (await findDuplicateSite(before.project, n.value, id))) {
+    throw AppError.conflict('Another shop with the same mobile number, or the same shop name, dealer and location, already exists');
   }
   const set = { ...n.doc, scenario, updatedBy: actor.id } as Record<string, unknown>;
   // A changed size or board type must be re-verified, so both approvals start again.
@@ -241,3 +254,11 @@ export async function exportSites(projectId: string, q: z.infer<typeof exportQue
 export const templateFile = (scenario: Scenario) => buildTemplate(scenario);
 export type { SiteInput };
 
+
+/** Another live shop of the project with the same GST number, or the same shop name and address (see dupKeysOf). */
+async function findDuplicateSite(projectId: unknown, value: object, exceptId?: string) {
+  const keys = new Set(dupKeysOf(value as never));
+  if (!keys.size) return null;
+  const rows = await Site.find({ project: projectId as never, deletedAt: null, ...(exceptId ? { _id: { $ne: exceptId } } : {}) } as never).select('shopName dealerName location mobile').lean();
+  return rows.find((r) => dupKeysOf(r as never).some((k) => keys.has(k))) ?? null;
+}

@@ -20,6 +20,10 @@ const bool = z.enum(['true', 'false']);
 export const siteFilter = z.object({
   q: z.string().trim().max(100).optional(),
   district: z.string().trim().max(120).optional(),
+  /** The shop's area / town (the Location column). */
+  location: z.string().trim().max(250).optional(),
+  /** A nearby-shop cluster made by the smart plan (Use this plan). */
+  planArea: z.string().trim().max(120).optional(),
   status: z.string().max(40).optional(),
   scenario: z.enum(SCENARIOS).optional(),
   missing: z.enum(['address', 'mobile', 'measurement', 'gst', 'district']).optional(),
@@ -61,6 +65,7 @@ export const fromFileBody = z.object({ fileId: objectId });
 export const commitBody = z.object({ duplicatePolicy: z.enum(['skip', 'import', 'update']).optional() });
 export const rowListQuery = listQuery.extend({
   limit: z.coerce.number().int().min(1).max(200).default(50),
-  state: z.enum(['VALID', 'WARNING', 'ERROR', 'DUPLICATE']).optional(),
+  state: z.enum(['VALID', 'WARNING', 'ERROR', 'DUPLICATE', 'IMPORT']).optional(),
 });
 export const rowPatch = z.object({ mapped: siteFields.partial().optional(), skipped: z.boolean().optional() });
+export const bulkSkipBody = z.object({ scope: z.enum(['ALL', 'DUPLICATE', 'ERROR', 'WARNING']), skipped: z.boolean() });

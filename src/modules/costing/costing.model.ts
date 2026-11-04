@@ -38,6 +38,10 @@ const legSchema = new Schema(
     vendorOther: { type: Number, default: 0 },
     tripStart: String, // yyyy-mm-ddThh:mm, wall-clock time
     tripEnd: String,
+    /** True when the area is a group of nearby shops made by the smart plan (shops carry it as Site.planArea), not a whole district. */
+    clustered: { type: Boolean, default: false },
+    /** The channel and vendor were chosen by the smart plan and not changed by a person since. */
+    autoSelected: { type: Boolean, default: false },
     clientsShared: { type: Number, default: 1 },
     otherAmount: { type: Number, default: 0 },
   },
