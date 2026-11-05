@@ -32,7 +32,7 @@ function pageStart(string $title,string $subtitle,array $config):void{
  }else{
   echo '<tr><td style="padding:22px 30px;background:#10244a;border-bottom:4px solid #ed2435;font-size:12px;letter-spacing:2px;color:#9fb3d9;font-weight:bold">ADINN &middot; SIGNAGE SOLUTIONS</td></tr>';
  }
- echo '<tr><td style="padding:20px 22px 6px"><div style="font-size:26px;line-height:1.25;font-weight:800;color:#10244a;margin:0 0 6px">'.esc($title).'</div><div style="font-size:13px;line-height:1.6;color:#61718a;margin:0 0 16px">'.esc($subtitle).'</div>';
+ echo '<tr><td style="padding:20px 22px 6px"><div style="font-size:21px;line-height:1.3;font-weight:600;letter-spacing:-.2px;color:#10244a;margin:0 0 6px">'.esc($title).'</div><div style="font-size:13px;line-height:1.6;color:#61718a;margin:0 0 16px">'.esc($subtitle).'</div>';
 }
 
 /* Four summary cards: Request ID, Date, Type, Source. */
@@ -40,7 +40,7 @@ function chips(array $data,string $typeLabel):void{
  $cells=[['id','Request ID',$data['requestId']??'','#fde8ea','#e11d48'],['date','Request Date',$data['requestDate']??date('d M Y'),'#e6f7ef','#16a34a'],['type','Request Type',$typeLabel,'#efeafd','#7c3aed'],['source','Request Source',$data['source']??'Client Servicing Team','#e6f6f1','#0f9d78']];
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="6" style="margin:0 -6px 8px;width:calc(100% + 12px)"><tr>';
  foreach($cells as [$ic,$label,$val,$bg,$fg]){
-  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="width:30px">'.ic($ic,28,'chip-').'</td><td valign="middle" style="padding-left:8px"><div style="font-size:10px;color:#6a7890">'.esc($label).'</div><div style="font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.esc($val).'</div></td></tr></table></td>';
+  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="width:30px">'.ic($ic,28,'chip-').'</td><td valign="middle" style="padding-left:8px"><div style="font-size:10px;color:#6a7890">'.esc($label).'</div><div style="font-size:12px;font-weight:600;color:#10244a;word-break:break-word">'.esc($val).'</div></td></tr></table></td>';
  }
  echo '</tr></table>';
 }
@@ -50,7 +50,7 @@ function rowsHtml(array $rows):string{
  $o='<table role="presentation" width="100%" cellpadding="0" cellspacing="0">';
  foreach($rows as [$ic,$label,$val]){
   if($val===null||trim((string)$val)==='')continue;
-  $o.='<tr><td valign="top" width="24" style="padding:7px 0;border-bottom:1px solid #edf1f7;">'.ic($ic,16).'</td><td valign="top" width="36%" style="padding:7px 6px;border-bottom:1px solid #edf1f7;font-size:12px;color:#6a7890">'.esc($label).'</td><td valign="top" style="padding:7px 0;border-bottom:1px solid #edf1f7;font-size:12px;font-weight:700;color:#10244a;word-break:break-word">'.nl2br(esc($val)).'</td></tr>';
+  $o.='<tr><td valign="top" width="24" style="padding:7px 0;border-bottom:1px solid #edf1f7;">'.ic($ic,16).'</td><td valign="top" width="36%" style="padding:7px 6px;border-bottom:1px solid #edf1f7;font-size:12px;color:#6a7890">'.esc($label).'</td><td valign="top" style="padding:7px 0;border-bottom:1px solid #edf1f7;font-size:12px;font-weight:600;color:#10244a;word-break:break-word">'.nl2br(esc($val)).'</td></tr>';
  }
  return $o.'</table>';
 }
@@ -58,7 +58,7 @@ function rowsHtml(array $rows):string{
 /* A bordered card with a coloured title bar. $num shows a numbered circle (combined mail). */
 function card(string $title,string $bodyHtml,string $headBg,string $accent,string $border,?string $num=null):string{
  $badge=$num!==null?'<span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:11px;background:'.$accent.';color:#fff;font-size:12px;font-weight:bold;margin-right:8px">'.esc($num).'</span>':'';
- return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid '.$border.';border-radius:9px;overflow:hidden;margin:0 0 14px"><tr><td style="padding:11px 14px;background:'.$headBg.';color:'.$accent.';font-size:15px;font-weight:bold">'.$badge.esc($title).'</td></tr><tr><td style="padding:6px 14px 10px;background:#ffffff">'.$bodyHtml.'</td></tr></table>';
+ return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid '.$border.';border-radius:9px;overflow:hidden;margin:0 0 14px"><tr><td style="padding:11px 14px;background:'.$headBg.';color:'.$accent.';font-size:13px;font-weight:600;letter-spacing:.2px">'.$badge.esc($title).'</td></tr><tr><td style="padding:6px 14px 10px;background:#ffffff">'.$bodyHtml.'</td></tr></table>';
 }
 
 function attachmentsCard(array $data,string $title,string $headBg,string $accent,string $hint=''):void{
@@ -69,7 +69,7 @@ function attachmentsCard(array $data,string $title,string $headBg,string $accent
  foreach($items as $a){
   $name=basename(str_replace('\\','/',(string)($a['filename']??'Document')));
   [$tag,$col]=fileBadge($name);
-  $b.='<div style="display:inline-block;vertical-align:top;width:47%;min-width:200px;margin:0 1.5% 8px 0;border:1px solid #e1e9f5;border-radius:8px;padding:8px 10px;box-sizing:border-box"><span style="display:inline-block;background:'.$col.';color:#fff;font-size:9px;font-weight:bold;border-radius:3px;padding:2px 5px;margin-right:6px">'.$tag.'</span><span style="font-size:11px;font-weight:700;color:#10244a;word-break:break-word">'.esc($name).'</span><div style="font-size:10px;color:#6a7890;margin-top:3px">'.esc(fileSizeText($a)).(!empty($a['label'])?' &middot; '.esc($a['label']):'').'</div></div>';
+  $b.='<div style="display:inline-block;vertical-align:top;width:47%;min-width:200px;margin:0 1.5% 8px 0;border:1px solid #e1e9f5;border-radius:8px;padding:8px 10px;box-sizing:border-box"><span style="display:inline-block;background:'.$col.';color:#fff;font-size:9px;font-weight:bold;border-radius:3px;padding:2px 5px;margin-right:6px">'.$tag.'</span><span style="font-size:11px;font-weight:600;color:#10244a;word-break:break-word">'.esc($name).'</span><div style="font-size:10px;color:#6a7890;margin-top:3px">'.esc(fileSizeText($a)).(!empty($a['label'])?' &middot; '.esc($a['label']):'').'</div></div>';
  }
  echo card($title,$b,$headBg,$accent,'#e1e9f5');
 }
@@ -85,7 +85,7 @@ function messageBlock(array $data):void{
 /* Sign-off, logo and (optional) footer banner; closes the document. */
 function pageEnd(string $greeting,string $team,array $config):void{
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px"><tr><td valign="bottom" style="font-size:12px;line-height:1.7;color:#4a5b74;padding:6px 0 14px">'.esc($greeting).'<br><strong style="color:#10244a">'.esc($team).'</strong><br>Adinn Advertising Services Ltd.</td>';
- echo '<td align="right" valign="bottom" style="padding:6px 0 14px"><img src="'.esc($config['logo_url']).'" alt="Adinn" height="38" style="height:38px;width:auto;border:0;display:inline-block"><div style="font-size:12px;color:#ed2435;font-style:italic;font-weight:bold;margin-top:4px">Ideas into Visible Impact</div></td></tr></table>';
+ echo '<td align="right" valign="bottom" style="padding:6px 0 14px"><img src="'.esc($config['logo_url']).'" alt="Adinn" height="38" style="height:38px;width:auto;border:0;display:inline-block"><div style="font-size:12px;color:#ed2435;font-style:italic;font-weight:600;margin-top:4px">Ideas into Visible Impact</div></td></tr></table>';
  echo '</td></tr>';
  if(hasAsset('footer.png'))echo '<tr><td style="padding:0;line-height:0;font-size:0;border-top:1px solid #e7edf4"><img src="'.esc(asset($config,'footer.png')).'" alt="Adinn Advertising Services Ltd." width="700" style="display:block;width:100%;max-width:700px;height:auto;border:0"></td></tr>';
  echo '</table></td></tr></table></body></html>';

@@ -17,5 +17,7 @@ return [
  // White-theme logo (mail body is white). Dark-theme logo: https://adinnoutdoors.com/images/adinnHeaderlogo.svg
  'logo_url'=>'https://adinnroadshows.com/images/logo/AdinnLogo.png',
  // Optional banner images uploaded to templates/Images/ (Signage_Email_Header.png, footer.png).
+ // Static page the forgot-password mail's "Copy code" button opens (copy.html, uploaded next to index_signage.php).
+ 'copy_url'=>(string)$env('SIGNAGE_COPY_URL','https://adinndigital.com/api/signage_emails/signage_email_api/copy.html'),
  'asset_url'=>(string)$env('SIGNAGE_ASSET_URL','https://adinndigital.com/api/signage_emails/signage_email_api/templates/Images/'),
 ];
