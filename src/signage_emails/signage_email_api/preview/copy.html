@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Copy code</title>
+<style>
+ body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#eef2f8;font-family:Montserrat,'Segoe UI',Arial,sans-serif;color:#14294d}
+ .card{background:#fff;border:1px solid #dfe7f3;border-radius:12px;padding:28px 26px;width:min(92vw,380px);text-align:center;box-shadow:0 6px 24px rgba(16,36,73,.08)}
+ h1{font-size:17px;font-weight:600;margin:0 0 4px;color:#10244a}
+ p{font-size:12px;color:#61718a;margin:0 0 16px}
+ .code{font-family:Consolas,'Courier New',monospace;font-size:32px;font-weight:600;letter-spacing:10px;padding:12px 8px 12px 18px;background:#f4f8fd;border:1px dashed #9fb3d9;border-radius:10px;margin-bottom:18px;user-select:all}
+ button{border:0;cursor:pointer;color:#fff;font:600 14px Montserrat,'Segoe UI',Arial,sans-serif;padding:12px 26px;border-radius:9px;background:linear-gradient(90deg,#7c3aed,#f26b3a)}
+ button:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
+ .ok{color:#059669;font-size:12px;font-weight:600;min-height:18px;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="card">
+ <h1>Your verification code</h1>
+ <p>Copy it and paste it in the Signage app.</p>
+ <div class="code" id="code" aria-live="polite">------</div>
+ <button id="copy" type="button">Copy code &#128203;</button>
+ <div class="ok" id="msg" role="status"></div>
+</div>
+<script>
+(function(){
+ var code=(location.hash||'').replace(/\D/g,'').slice(0,6);
+ var box=document.getElementById('code'),msg=document.getElementById('msg'),btn=document.getElementById('copy');
+ if(code.length!==6){box.textContent='------';msg.style.color='#dc2626';msg.textContent='No code found. Open the link from the email again.';btn.disabled=true;return;}
+ box.textContent=code;
+ function done(){msg.style.color='#059669';msg.textContent='Copied. Paste it in the app.';}
+ function fallback(){var r=document.createRange();r.selectNodeContents(box);var s=getSelection();s.removeAllRanges();s.addRange(r);try{if(document.execCommand('copy'))return done();}catch(e){}msg.style.color='#61718a';msg.textContent='Code selected. Press Ctrl+C (or Copy).';}
+ function copy(){if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(code).then(done,fallback);}else fallback();}
+ btn.addEventListener('click',copy);
+ try{if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(code).then(done,function(){});}catch(e){}
+ history.replaceState(null,'',location.pathname);
+})();
+</script>
+</body>
+</html>

@@ -65,7 +65,7 @@ describe('Scenario 2: 260-row client sheet', () => {
   it('uploads, extracts and auto-maps', async () => {
     const rows: unknown[][] = [H2];
     for (let i = 1; i <= 250; i++) {
-      rows.push([i, `Dealer ${i}`, districts[i % 5], i % 7 === 0 ? '12 x 5' : '10 x 4', `${i} Main Road`, 'Near bus stand', 9000000000 + i, '33AAACA2094M1ZK', i % 3 ? 'North' : '']);
+      rows.push([i, `Dealer ${i}`, districts[i % 5], i % 7 === 0 ? '12 x 5' : '10 x 4', `${i} Main Road`, 'Near bus stand', 9000000000 + i, `33AAACA${String(i).padStart(4, '0')}M1ZK`, i % 3 ? 'North' : '']);
     }
     rows.push([251, 'Bad Phone Dealer', 'Vellore', '10 x 4', 'addr', '', '12345', '', '']); // sheet row 252
     rows.push([252, 'Bad Gst Dealer', 'Vellore', '10 x 4', 'addr', '', '9876500001', 'XYZ', '']); // 253
@@ -220,12 +220,20 @@ describe('Scenario 2: 260-row client sheet', () => {
 
 describe('Scenario 1 manual entry', () => {
   it('adds, validates, detects duplicates and multi-numbers', async () => {
-    const ok = await api().post(base('s1')).set(as('BD')).send({ shopName: 'Lakshmi Electricals', dealerName: 'Lakshmi', district: 'Madurai', address1: '1 Bazaar St', mobile: '98765 43210 / 9123456780' });
+    const ok = await api().post(base('s1')).set(as('BD')).send({ shopName: 'Lakshmi Electricals', dealerName: 'Lakshmi', district: 'Madurai', address1: '1 Bazaar St', mobile: '98765 43211 / 9123456780' });
     expect(ok.status).toBe(201);
-    expect(ok.body.data.site).toMatchObject({ scenario: 'MEASUREMENT_REQUIRED', mobile: '9876543210', mobileAlt: '9123456780' });
+    expect(ok.body.data.site).toMatchObject({ scenario: 'MEASUREMENT_REQUIRED', mobile: '9876543211', mobileAlt: '9123456780' });
     expect(ok.body.data.site.siteCode).toMatch(/-S\d{3}$/);
     expect(ok.body.data.warnings.map((w: any) => w.code)).toEqual([]);
-    const body = { shopName: 'LAKSHMI electricals', dealerName: 'lakshmi', district: 'madurai' };
+    const body = { shopName: 'LAKSHMI electricals', dealerName: 'lakshmi', district: 'madurai', address1: '1 bazaar st' }; // same shop and address = duplicate
+    // A different dealer using the same shop name at another address is a different shop
+    expect((await api().post(base('s1')).set(as('BD')).send({ shopName: 'Lakshmi Electricals', dealerName: 'Other Dealer', district: 'Madurai', address1: '88 Temple Road' })).status).toBe(201);
+    // Same mobile number = same shop
+    expect((await api().post(base('s1')).set(as('BD')).send({ shopName: 'Phone Shop A', district: 'Madurai', mobile: '9111111111' })).status).toBe(201);
+    expect((await api().post(base('s1')).set(as('BD')).send({ shopName: 'Phone Shop B', district: 'Madurai', mobile: '91111 11111' })).status).toBe(409);
+    // The same GST number alone is not a duplicate
+    expect((await api().post(base('s1')).set(as('BD')).send({ shopName: 'Gst Shop A', district: 'Madurai', gstin: '33AAACA1111M1ZK' })).status).toBe(201);
+    expect((await api().post(base('s1')).set(as('BD')).send({ shopName: 'Gst Shop B', district: 'Madurai', gstin: '33AAACA1111M1ZK' })).status).toBe(201);
     expect((await api().post(base('s1')).set(as('BD')).send(body)).status).toBe(409);
     expect((await api().post(base('s1')).set(as('BD')).send({ ...body, allowDuplicate: true })).status).toBe(201);
     const bad = await api().post(base('s1')).set(as('BD')).send({ district: 'X', mobile: 'abc' });

@@ -1,5 +1,5 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
-import { ROLES } from '../roles/roles';
+import { ROLES, userTypeOf, type Role } from '../roles/roles';
 
 const userSchema = new Schema(
   {
@@ -14,6 +14,10 @@ const userSchema = new Schema(
     role: { type: String, enum: ROLES, required: true, index: true },
     isActive: { type: Boolean, default: true },
     vendorId: { type: Schema.Types.ObjectId, index: true }, // the vendor company a VENDOR login belongs to; sees only that vendor's shops
+    // Forgot MPIN / password: a hashed 6-digit code emailed to the user. Single use, short-lived, limited attempts.
+    resetCodeHash: { type: String, select: false },
+    resetCodeExpiresAt: { type: Date, select: false },
+    resetCodeAttempts: { type: Number, default: 0, select: false },
     failedLogins: { type: Number, default: 0 },
     lockedUntil: Date,
     lastLoginAt: Date,
@@ -33,6 +37,7 @@ export const toPublicUser = (u: UserDoc) => ({
   employeeId: u.employeeId ?? null,
   phone: u.phone ?? null,
   role: u.role,
+  userType: userTypeOf(u.role as Role),
   vendorId: u.vendorId ? String(u.vendorId) : null,
   isActive: u.isActive,
   authMethod: u.authMethod ?? 'PASSWORD',

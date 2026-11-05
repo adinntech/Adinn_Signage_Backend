@@ -12,6 +12,8 @@ import { Client } from '../clients/client.model';
 import { clientNameOf, type ClientDetails } from '../clients/clientDetails';
 import { CommunicationMessage } from '../communications/communication.model';
 import { Site } from '../sites/site.model';
+import { removeProjectConnectData } from '../connect/connect.service';
+import { removeProjectWorkspaceData } from '../workspace/workspace.service';
 import { User } from '../users/user.model';
 import { SurveyArea } from './surveyArea.model';
 import { PROJECT_STATUSES, Project, Requirement, type RequirementType } from './project.model';
@@ -58,14 +60,14 @@ async function assertUniqueProject(input: { code?: string | undefined; clientId?
 const STAGE_TEXT: Record<string, string> = { PLANNING: 'in planning', IN_PROGRESS: 'in progress', CLIENT_APPROVAL: 'awaiting client approval', COMPLETED: 'completed' };
 
 type NotifyArgs = Omit<NotifySpec, 'project' | 'actorId'> & { actor: Actor };
-async function notifyProject(p: { _id: Types.ObjectId; code: string; client: unknown; clientDetails?: unknown }, a: NotifyArgs) {
-  const client = { name: await clientNameOf(p) };
+async function notifyProject(p: { _id: Types.ObjectId; code: string; client?: unknown; clientDetails?: unknown }, a: NotifyArgs) {
+  const clientName = (await clientNameOf(p)) ?? undefined;
   const { actor, ...spec } = a;
-  await notify({ ...spec, project: { _id: p._id, code: p.code, clientName: client?.name }, actorId: actor.id });
+  await notify({ ...spec, project: { _id: p._id, code: p.code, clientName }, actorId: actor.id });
 }
 
 /** Tells the new owner (and the previous one, if the project moved) about an assignment. Email + in-app, stored per person. */
-async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS') {
+async function notifyAssignment(p: InstanceType<typeof Project>, previous: string | null, assigneeName: string, actor: Actor, assigneeRole = 'OPERATIONS', note?: string) {
   const [clientName, by] = await Promise.all([clientNameOf(p), User.findById(actor.id).select('name').lean()]);
   const client = { name: clientName };
   const when = p.assignedAt!.getTime();
@@ -77,7 +79,7 @@ async function notifyAssignment(p: InstanceType<typeof Project>, previous: strin
     kind: 'PROJECT_ASSIGNED',
     recipients: [String(p.assignedTo)],
     title: assigneeRole === 'RECCE_EXECUTIVE' ? 'New Recce Job Assigned' : 'New Project Assigned',
-    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.${assigneeRole === 'RECCE_EXECUTIVE' ? ' Go to the area and add each shop\'s details as you reach it.' : ''}`,
+    body: `Project ${p.code}: ${detail}. Assigned by ${by?.name ?? 'BD'}.${note ? ` Note: ${note}.` : ''}${assigneeRole === 'RECCE_EXECUTIVE' ? ' Go to the area and add each shop\'s details as you reach it.' : ''}`,
     dedupe: (r) => `assigned:${id}:${r}:${when}`,
     actor,
   });
@@ -272,7 +274,10 @@ export async function deleteProject(id: string, actor: Actor) {
   if (!p) throw AppError.notFound('Project not found');
   if (actor.role !== 'SUPER_ADMIN' && (p.assignedTo || !(UNASSIGNED.includes(p.status) || p.status === 'CANCELLED'))) throw AppError.conflict(NOT_DELETABLE_HINT);
   // Files first: if one cannot be erased from storage, nothing is deleted and the person can simply try again.
-  const { failed } = await removeProjectFiles(id);
+  const { failed: connectFailed } = await removeProjectConnectData(id);
+  const { failed: workspaceFailed } = await removeProjectWorkspaceData(id);
+  const { failed: projectFailed } = await removeProjectFiles(id);
+  const failed = [...connectFailed, ...workspaceFailed, ...projectFailed];
   if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the project was not deleted: ${failed.join(', ')}. Try again.`);
   return { id, removed: await purgeProjectData(id) };
 }
@@ -317,9 +322,9 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   if (UNASSIGNED.includes(p.status)) p.status = 'RECCE_ASSIGNED';
   p.updatedBy = new Types.ObjectId(actor.id);
   await p.save();
-  await recordAudit({ actor, action: 'ASSIGN', entity: 'Project', entityId: id, project: id, changes: [{ field: 'assignedTo', oldValue: previous, newValue: body.assigneeId }], reason: `Assigned to ${assignee.name}` });
+  await recordAudit({ actor, action: 'ASSIGN', entity: 'Project', entityId: id, project: id, changes: [{ field: 'assignedTo', oldValue: previous, newValue: body.assigneeId }], reason: `Assigned to ${assignee.name}${body.note ? `: ${body.note}` : ''}` });
   await systemMessage(id, `Assigned to ${assignee.name} (${assignee.role.toLowerCase().replace('_', ' ')})`, actor);
-  await notifyAssignment(p, previous, assignee.name, actor, assignee.role);
+  await notifyAssignment(p, previous, assignee.name, actor, assignee.role, body.note);
   return getProject(id);
 }
 

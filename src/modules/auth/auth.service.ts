@@ -5,6 +5,8 @@ import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { User, toPublicUser, type UserDoc } from '../users/user.model';
 import { RefreshToken } from './refreshToken.model';
+import { sendAuthMail } from './authMail';
+import { mpinRule, passwordRule } from '../../common/validators/credentials';
 import { LOGIN_ROLE_GROUPS, ROLE_HOME, ROLE_PLATFORMS, permissionsFor, type LoginRoleKey, type Platform, type Role } from '../roles/roles';
 
 export interface AccessPayload {
@@ -72,10 +74,10 @@ export async function login(input: LoginInput, meta: ClientMeta) {
     throw new AppError(429, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes or ask an admin to reset your MPIN.`);
   }
 
-  // The credential must match how the account was set up (accounts without a stored method use a password).
-  const usesPassword = !!user && user.authMethod !== 'MPIN';
-  const supplied = usesPassword ? input.password : input.mpin;
-  const stored = usesPassword ? user?.passwordHash : user?.mpinHash;
+  // The person signs in with whichever credential the account holds. Registration stores one; a reset can add the other.
+  const useMpin = !!input.mpin;
+  const supplied = useMpin ? input.mpin : input.password;
+  const stored = useMpin ? user?.mpinHash : user?.passwordHash;
   const valid = await bcrypt.compare(supplied ?? '', stored ?? DUMMY_HASH);
 
   if (!user || !valid) {
@@ -224,6 +226,76 @@ export async function logout(token?: string) {
   if (!token) return;
   const stored = await RefreshToken.findOne({ tokenHash: sha256(token) });
   if (stored) await RefreshToken.updateMany({ family: stored.family, revokedAt: null }, { revokedAt: new Date() });
+}
+
+// ---- Forgot MPIN / password (emailed 6-digit code) ----
+const RESET_CODE_MINUTES = 10;
+const MAX_RESET_ATTEMPTS = 5;
+const RESET_RESEND_SECONDS = 60;
+const GENERIC_RESET_MESSAGE = 'If this account exists, a verification code has been sent to its email.';
+
+/**
+ * Emails a one-time code. The reply is always the same so nobody can learn which emails are registered.
+ * The mail is sent in the background of the request: a mail failure is logged, never shown to the caller.
+ */
+export async function requestCredentialReset(identifier: string) {
+  const user = await findByIdentifier(identifier).select('+resetCodeExpiresAt');
+  // Sent time = expiry - code lifetime. A repeat call inside the cooldown sends nothing, so the first mail's code stays valid.
+  const sentAt = user?.resetCodeExpiresAt ? user.resetCodeExpiresAt.getTime() - RESET_CODE_MINUTES * 60_000 : 0;
+  const coolingDown = Date.now() - sentAt < RESET_RESEND_SECONDS * 1000;
+  if (user && user.isActive && !coolingDown) {
+    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+    user.set({ resetCodeHash: await bcrypt.hash(code, 10), resetCodeExpiresAt: new Date(Date.now() + RESET_CODE_MINUTES * 60_000), resetCodeAttempts: 0 });
+    await user.save();
+    const mailType = user.authMethod === 'MPIN' ? 'forgot_mpin' : 'forgot_password';
+    // Production sends through the PHP mail API; any other NODE_ENV prints the mail (with the code) to the console instead.
+    sendAuthMail({ mailType, to: user.email, name: user.name, code, expiresInMinutes: RESET_CODE_MINUTES, requestId: `RST-${crypto.randomBytes(4).toString('hex').toUpperCase()}` }).catch((e) =>
+      console.error('Reset code mail failed:', e instanceof Error ? e.message : e),
+    );
+  }
+  return { message: GENERIC_RESET_MESSAGE, expiresInMinutes: RESET_CODE_MINUTES, resendAfterSeconds: RESET_RESEND_SECONDS };
+}
+
+/** Checks the emailed code and sets the new MPIN (MPIN accounts) or password (password accounts). Signs the user out everywhere. */
+export async function confirmCredentialReset(identifier: string, code: string, newSecret: string, chosen?: 'MPIN' | 'PASSWORD', confirmReuse = false) {
+  const invalid = () => new AppError(400, 'INVALID_RESET_CODE', 'The code is invalid or has expired. Request a new one.');
+  const user = await findByIdentifier(identifier).select('+resetCodeHash +resetCodeExpiresAt +resetCodeAttempts +mpinHash +passwordHash');
+  if (!user || !user.isActive || !user.resetCodeHash || !user.resetCodeExpiresAt || user.resetCodeExpiresAt < new Date()) throw invalid();
+  if ((user.resetCodeAttempts ?? 0) >= MAX_RESET_ATTEMPTS) throw invalid();
+
+  if (!(await bcrypt.compare(code, user.resetCodeHash))) {
+    user.resetCodeAttempts = (user.resetCodeAttempts ?? 0) + 1;
+    await user.save();
+    throw invalid();
+  }
+
+  // The email code proves ownership, so the person may also switch method here; default is the account's own.
+  const method = chosen ?? (user.authMethod === 'MPIN' ? 'MPIN' : 'PASSWORD');
+  const rule = method === 'MPIN' ? mpinRule : passwordRule;
+  const checked = rule.safeParse(newSecret);
+  // A weak new value does not burn the code: the person can fix it and resubmit.
+  if (!checked.success) throw AppError.badRequest(checked.error.issues[0]?.message ?? `Invalid ${method}`);
+
+  // Same value as the one already stored: ask the person to confirm before keeping it. The code is not used up meanwhile.
+  const current = method === 'MPIN' ? user.mpinHash : user.passwordHash;
+  if (current && !confirmReuse && (await bcrypt.compare(newSecret, current))) {
+    const what = method === 'MPIN' ? 'MPIN' : 'password';
+    throw new AppError(409, 'CREDENTIAL_REUSED', `This is your already used ${what}. Keep it?`);
+  }
+
+  // Set the chosen credential and keep the other one, so after a reset the person can sign in with either.
+  user.set({
+    authMethod: method,
+    ...(method === 'MPIN' ? { mpinHash: await hashMpin(newSecret) } : { passwordHash: await hashPassword(newSecret) }),
+    failedLogins: 0,
+    lockedUntil: null,
+    resetCodeHash: undefined,
+    resetCodeExpiresAt: undefined,
+    resetCodeAttempts: 0,
+  });
+  await user.save();
+  await RefreshToken.updateMany({ user: user._id, revokedAt: null }, { revokedAt: new Date() });
+  return { authMethod: method };
 }
 
 export async function getMe(userId: string) {

@@ -15,6 +15,7 @@ import { siteRouter } from './modules/sites/site.routes';
 import { boardRouter } from './modules/boards/boardOption.routes';
 import { costRouter } from './modules/costing/costing.routes';
 import { expenseRouter } from './modules/expenses/expense.routes';
+import { recceCostRouter } from './modules/recce-cost/recceCost.routes';
 import { vendorRouter } from './modules/vendors/vendor.routes';
 import { vendorJobsRouter } from './modules/vendor-jobs/vendorJobs.routes';
 import { allocationRouter } from './modules/allocation/allocation.routes';
@@ -25,6 +26,9 @@ import { templateRouter } from './modules/templates/template.routes';
 import { rateItemRouter } from './modules/ratecards/rateItem.routes';
 import { rateCardCreationRouter } from './modules/ratecards/rateCardCreation.routes';
 import { mastersRouter } from './modules/masters/masters.routes';
+import { journeyRouter } from './modules/journey/journey.routes';
+import { connectRouter } from './modules/connect/connect.routes';
+import { workspaceRouter } from './modules/workspace/workspace.routes';
 
 export function createApp() {
   const app = express();
@@ -60,10 +64,14 @@ export function createApp() {
   app.use('/api/v1/rate-items', rateItemRouter);
   app.use('/api/v1/rate-card-creation', rateCardCreationRouter);
   app.use('/api/v1/masters', mastersRouter);
+  app.use('/api/v1/journey', journeyRouter);
+  app.use('/api/v1/connect', connectRouter);
+  app.use('/api/v1/workspace', workspaceRouter);
   app.use('/api/v1', siteRouter);
   app.use('/api/v1', boardRouter);
   app.use('/api/v1', costRouter);
   app.use('/api/v1', expenseRouter);
+  app.use('/api/v1', recceCostRouter);
   app.use('/api/v1/vendors', vendorRouter);
   app.use('/api/v1/vendor', vendorJobsRouter);
   app.use('/api/v1', allocationRouter);

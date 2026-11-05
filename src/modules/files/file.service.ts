@@ -11,8 +11,10 @@ import { permissionsFor, type Permission, type Role } from '../roles/roles';
 import { Client } from '../clients/client.model';
 import { clientNameOf } from '../clients/clientDetails';
 import { StandaloneRateCard } from '../ratecards/rateCardCreation.model';
+import { CodeRequest } from '../codeRequests/codeRequest.model';
 import { SalesOrder } from '../sales/sales.model';
 import { EmailTemplate } from '../templates/template.model';
+import { Vendor } from '../vendors/vendor.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
 import { getStorage, getStorageFor, type StorageProvider, type Disposition } from './storage';
 import type { StoredFile } from './storedFile.schema';
@@ -303,13 +305,10 @@ export interface EmbeddedFileInput {
   folderKey: string;
   file: UploadedFile;
   actor: Actor;
-  /** The record the file belongs to (audit trail). */
-  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'StandaloneRateCard'; id: Types.ObjectId | string };
-  /**
-   * The caller has already checked that this actor may store this file for a narrower workflow reason than the
-   * category permission (the assigned Client Servicing person completing their own order). Never set from request data.
-   */
+  /** The caller has already checked the actor's right to add this file as part of a workflow step (skips the category role check). */
   workflowAuthorized?: boolean;
+  /** The record the file belongs to (audit trail). */
+  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'Vendor' | 'ConnectChannel' | 'Project' | 'StandaloneRateCard'; id: Types.ObjectId | string };
 }
 
 /**
@@ -432,6 +431,12 @@ async function liveEmbeddedName(key: string): Promise<string | null> {
   const client = await Client.findOne({ deletedAt: null, 'gstCertificates.key': key }).select('gstCertificates').lean();
   const inClient = client && findStored(client, key);
   if (inClient) return inClient.name ?? 'file';
+  const vendor = await Vendor.findOne({ deletedAt: null, 'kycFiles.key': key }).select('kycFiles').lean();
+  const inVendor = vendor && findStored(vendor, key);
+  if (inVendor) return inVendor.name ?? 'file';
+  const code = await CodeRequest.findOne({ 'evidence.key': key }).select('evidence').lean();
+  const inCode = code && findStored(code, key);
+  if (inCode) return inCode.name ?? 'file';
   const tpl = await EmailTemplate.findOne({ 'pdf.key': key }).lean();
   const inTpl = tpl && findStored(tpl, key);
   if (inTpl) return inTpl.name ?? 'file';

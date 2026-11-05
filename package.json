@@ -12,6 +12,7 @@
         "seed": "tsx src/scripts/seed.ts",
         "create-user": "tsx src/scripts/create-user.ts",
         "reset-mpin": "tsx src/scripts/reset-mpin.ts",
+        "set-role-emails": "tsx src/scripts/set-role-emails.ts",
         "zoho:token": "tsx src/scripts/zoho-refresh-token.ts",
         "migrate:sales-arrays": "tsx src/scripts/migrate-sales-arrays.ts",
         "migrate:file-assets": "tsx src/scripts/migrate-file-assets.ts",
@@ -39,8 +40,9 @@
         "morgan": "^1.12.1",
         "multer": "^2.4.0",
         "nodemailer": "^10.1.7",
-        "web-push": "^3.6.7",
         "pdfkit": "^0.17.2",
+        "socket.io": "^4.8.1",
+        "web-push": "^3.6.7",
         "zod": "^4.6.5"
     },
     "devDependencies": {
@@ -57,6 +59,7 @@
         "@types/web-push": "^3.6.4",
         "mongodb-memory-server": "^11.3.0",
         "prettier": "^3.9.9",
+        "socket.io-client": "^4.8.1",
         "supertest": "^7.3.1",
         "tsx": "^4.23.15",
         "typescript": "^7.0.2",

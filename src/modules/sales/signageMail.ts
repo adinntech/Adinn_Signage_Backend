@@ -1,8 +1,10 @@
 import { env } from '../../config/env';
+import { readStoredFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
+import { explainSignageError, signageAttachmentProblem } from '../vendors/signageVendorMail';
 
 /** The project code request email goes through the signage email API when its URL and key are set. */
-export const signageMailAvailable = () => env.signageMailEnabled;
+export const signageMailAvailable = () => env.signageProjectMailEnabled;
 
 export interface SignageMail {
   to: string[];
@@ -93,12 +95,19 @@ type Reply = { success?: boolean | string; status?: string | boolean | number; m
  */
 export async function sendViaSignageMail(m: SignageMail): Promise<string> {
   if (!env.SIGNAGE_MAIL_API_URL || !env.SIGNAGE_MAIL_API_KEY) throw new Error('The signage email API is not configured (SIGNAGE_MAIL_API_URL / SIGNAGE_MAIL_API_KEY)');
+  // Same attachment format as the vendor registration mail: the real files (filename, size, base64), within the same limits.
+  const files = await Promise.all(m.attachments.map((a) => readStoredFile(a)));
+  const problem = signageAttachmentProblem(files.map((f) => ({ name: f.name, size: f.content.length })));
+  if (problem) throw new Error(problem);
+  const payload = signagePayload(m);
+  const wire = { ...payload, attachments: payload.attachments.map((a, i) => ({ ...a, filename: a.name, base64: files[i]!.content.toString('base64') })) };
+  const explain = (message: string) => explainSignageError(message, { attachments: payload.attachments.map((a, i) => ({ filename: a.name, content: files[i]!.content })) });
   let res: Response;
   try {
     res = await fetch(env.SIGNAGE_MAIL_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-API-Key': env.SIGNAGE_MAIL_API_KEY },
-      body: JSON.stringify(signagePayload(m)),
+      body: JSON.stringify(wire),
       signal: AbortSignal.timeout(60_000),
     });
   } catch (e) {
@@ -115,7 +124,7 @@ export async function sendViaSignageMail(m: SignageMail): Promise<string> {
   const accepted = res.ok && !!body && (flag(body.success) || flag(body.status));
   if (!accepted) {
     const why = body?.message ?? body?.error ?? (raw || `HTTP ${res.status}`);
-    throw new Error(`The signage email API did not confirm the email (HTTP ${res.status}): ${String(why).slice(0, 400)}`);
+    throw new Error(explain(`The signage email API did not confirm the email (HTTP ${res.status}): ${String(why).slice(0, 400)}`));
   }
   return raw;
 }

@@ -1,0 +1,44 @@
+import type { Request } from 'express';
+import { AppError } from '../../common/errors';
+import { asyncHandler, ok } from '../../common/http';
+import { actorOf, objectId } from '../../common/query';
+import * as svc from './codeRequest.service';
+import * as project from './projectFromOrder.service';
+import * as recce from './recceAssignment.service';
+import { alreadySentBody, codeListQuery, orderStatesQuery, confirmBody, csProjectBody, draftBody, recceAssignmentBody, rejectBody, retryBody, sendBody } from './codeRequest.validators';
+
+const id = (req: Request) => objectId.parse(req.params.id);
+const uploaded = (req: Request) =>
+  ((req.files as Express.Multer.File[] | undefined) ?? []).map((f) => ({ originalname: f.originalname, mimetype: f.mimetype, size: f.size, buffer: f.buffer }));
+
+/** Multipart: the email fields arrive as JSON in `payload`, the attachments as `files`. */
+const payload = (req: Request): unknown => {
+  if (typeof req.body?.payload !== 'string') return req.body;
+  try {
+    return JSON.parse(req.body.payload);
+  } catch {
+    throw AppError.badRequest('Invalid email details');
+  }
+};
+
+export const overview = asyncHandler(async (req, res) => ok(res, await svc.overview(id(req), actorOf(req))));
+export const history = asyncHandler(async (req, res) => ok(res, await svc.history(id(req), actorOf(req))));
+export const saveDraft = asyncHandler(async (req, res) => ok(res, await svc.saveDraft(id(req), draftBody.parse(req.body), actorOf(req))));
+export const send = asyncHandler(async (req, res) => ok(res, await svc.sendRequests(id(req), sendBody.parse(payload(req)), uploaded(req), actorOf(req)), undefined, 201));
+export const alreadySent = asyncHandler(async (req, res) => ok(res, await svc.markAlreadySent(id(req), alreadySentBody.parse(req.body), actorOf(req))));
+export const retry = asyncHandler(async (req, res) => ok(res, await svc.retryBatch(id(req), retryBody.parse(req.body).mailBatchId, actorOf(req))));
+export const confirm = asyncHandler(async (req, res) => ok(res, await svc.confirmCode(id(req), confirmBody.parse(payload(req)), uploaded(req), actorOf(req))));
+export const evidenceUrl = asyncHandler(async (req, res) => ok(res, await svc.evidenceUrl(id(req), objectId.parse(req.params.fileId), actorOf(req))));
+export const projectDraft = asyncHandler(async (req, res) => ok(res, await project.projectDraft(id(req), actorOf(req))));
+export const createProject = asyncHandler(async (req, res) => ok(res, await project.createFromOrder(id(req), csProjectBody.parse(req.body), actorOf(req)), undefined, 201));
+export const recceAssignment = asyncHandler(async (req, res) => ok(res, await recce.recceAssignment(id(req), actorOf(req))));
+export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecceTeam(id(req), recceAssignmentBody.parse(req.body), actorOf(req))));
+export const reject = asyncHandler(async (req, res) => ok(res, await svc.rejectRequest(id(req), rejectBody.parse(req.body), actorOf(req))));
+export const list = asyncHandler(async (req, res) => {
+  const { items, meta } = await svc.listRequests(codeListQuery.parse(req.query), actorOf(req));
+  ok(res, items, meta);
+});
+export const orderStates = asyncHandler(async (req, res) => {
+  const { items, meta } = await svc.orderStates(orderStatesQuery.parse(req.query), actorOf(req));
+  ok(res, items, meta);
+});

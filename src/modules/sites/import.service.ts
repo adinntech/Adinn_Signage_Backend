@@ -10,12 +10,12 @@ import { notifyProjectParty } from '../notifications/notification.service';
 import { Project, Requirement } from '../projects/project.model';
 import { parseWorkbook } from './excel.service';
 import {
-  autoMap, dealerKeyOf, dupKeyOf, normalise, sqftOf, validateMapping,
+  autoMap, dupKeysOf, normalise, sqftOf, validateMapping,
   type MapTarget, type MappableField, type RowIssue, type Scenario, type Unit,
 } from './site.fields';
 import { ImportBatch, ImportRow, Site } from './site.model';
 import { requireProject, syncSiteCount, tellRecceAboutNewShops } from './site.service';
-import type { commitBody, previewBody, rowListQuery, rowPatch } from './site.validators';
+import type { bulkSkipBody, commitBody, previewBody, rowListQuery, rowPatch } from './site.validators';
 
 const CHUNK = 1000;
 type Mapping = Record<string, MapTarget>;
@@ -47,7 +47,7 @@ export async function uploadSheet(projectId: string, file: { buffer: Buffer; ori
     await ImportRow.insertMany(parsed.rows.slice(i, i + CHUNK).map((r) => ({ batch: batch._id, rowNumber: r.rowNumber, raw: r.raw })), { ordered: false });
   }
   const sample = parsed.rows.slice(0, 8);
-  return { batch: batch.toObject(), suggestedMapping: mapping, sample, problems: validateMapping(mapping, scenario) };
+  return { batch: batch.toObject(), suggestedMapping: mapping, sample, problems: validateMapping(mapping, scenario), sheets: parsed.sheets };
 }
 
 /**
@@ -79,24 +79,25 @@ function rawFor(raw: Record<string, string>, mapping: Mapping) {
   return { out, extra };
 }
 
-interface Evaluated { state: 'VALID' | 'WARNING' | 'ERROR'; mapped: Record<string, unknown>; extra: Record<string, string>; errors: RowIssue[]; warnings: RowIssue[]; dupKey: string }
+interface Evaluated { state: 'VALID' | 'WARNING' | 'ERROR'; mapped: Record<string, unknown>; extra: Record<string, string>; errors: RowIssue[]; warnings: RowIssue[] }
 function evaluate(raw: Record<string, string>, mapping: Mapping, scenario: Scenario, unit: Unit): Evaluated {
   const { out, extra } = rawFor(raw, mapping);
   const n = normalise(out, { scenario, defaultUnit: unit });
   const state = n.errors.length ? 'ERROR' : n.warnings.length ? 'WARNING' : 'VALID';
-  return { state, mapped: n.value as Record<string, unknown>, extra, errors: n.errors, warnings: n.warnings, dupKey: dupKeyOf(n.value) };
+  return { state, mapped: n.value as Record<string, unknown>, extra, errors: n.errors, warnings: n.warnings };
 }
 
+/** Rows the commit will really bring in: not an error, not skipped, and (policy "skip") not a duplicate. */
+const importableFilter = (batchId: string, policy: string): Record<string, unknown> => ({
+  batch: new Types.ObjectId(batchId), state: { $ne: 'ERROR' }, skipped: { $ne: true }, ...(policy === 'skip' ? { 'dup.type': { $nin: ['FILE', 'EXISTING'] } } : {}),
+});
+
 async function existingKeys(projectId: string) {
-  const rows = await Site.find({ project: projectId, deletedAt: null }).select('dupKey shopName dealerName district').lean();
+  // Worked out from the stored fields (not the stored dupKey) so shops imported under the older rule are still recognised.
+  const rows = await Site.find({ project: projectId, deletedAt: null }).select('shopName dealerName location mobile').lean();
   const byKey = new Map<string, string>();
-  const dealers = new Set<string>();
-  for (const r of rows) {
-    if (r.dupKey) byKey.set(r.dupKey, String(r._id));
-    const d = dealerKeyOf(r as never);
-    if (d) dealers.add(d);
-  }
-  return { byKey, dealers };
+  for (const r of rows) for (const k of dupKeysOf(r as never)) if (!byKey.has(k)) byKey.set(k, String(r._id));
+  return { byKey };
 }
 
 export async function previewImport(projectId: string, batchId: string, body: z.infer<typeof previewBody>) {
@@ -108,57 +109,51 @@ export async function previewImport(projectId: string, batchId: string, body: z.
   const problems = validateMapping(mapping, scenario);
   if (problems.length) throw AppError.badRequest('Column mapping is incomplete', problems.map((message) => ({ path: 'mapping', message })));
 
-  const { byKey, dealers } = await existingKeys(projectId);
+  const { byKey } = await existingKeys(projectId);
   const seenKey = new Map<string, number>();
-  const seenDealerShop = new Map<string, string>();
   const summary = { valid: 0, warning: 0, error: 0, duplicates: 0, skipped: 0 };
   const ops: any[] = [];
 
   const cursor = ImportRow.find({ batch: batchId }).sort({ rowNumber: 1 }).lean().cursor();
   for await (const row of cursor) {
     const e = evaluate(row.raw as Record<string, string>, mapping, scenario, body.defaultUnit);
-    let dup: { type: 'FILE' | 'EXISTING' | 'DEALER'; ref: string } | null = null;
+    let dup: { type: 'FILE' | 'EXISTING'; ref: string } | null = null;
     const warnings = [...e.warnings];
-    if (e.dupKey) {
-      if (seenKey.has(e.dupKey)) {
-        dup = { type: 'FILE', ref: String(seenKey.get(e.dupKey)) };
-        warnings.push({ field: 'shopName', code: 'DUPLICATE_IN_FILE', message: `Duplicate of row ${seenKey.get(e.dupKey)} in this file` });
-      } else {
-        seenKey.set(e.dupKey, row.rowNumber);
-        if (byKey.has(e.dupKey)) {
-          dup = { type: 'EXISTING', ref: byKey.get(e.dupKey)! };
-          warnings.push({ field: 'shopName', code: 'DUPLICATE_EXISTING', message: 'Already exists in this project' });
-        }
+    const keys = dupKeysOf(e.mapped as never);
+    const dupKey = keys.join(' ');
+    const inFileRow = keys.map((k) => seenKey.get(k)).find((n) => n !== undefined);
+    if (inFileRow !== undefined) {
+      dup = { type: 'FILE', ref: String(inFileRow) };
+      warnings.push({ field: 'shopName', code: 'DUPLICATE_IN_FILE', message: `Same mobile number, or same shop + dealer + location, as row ${inFileRow} in this file` });
+    } else {
+      for (const k of keys) seenKey.set(k, row.rowNumber);
+      const existing = keys.map((k) => byKey.get(k)).find(Boolean);
+      if (existing) {
+        dup = { type: 'EXISTING', ref: existing };
+        warnings.push({ field: 'shopName', code: 'DUPLICATE_EXISTING', message: 'Same mobile number, or same shop + dealer + location, already in this project' });
       }
-    }
-    const dk = dealerKeyOf(e.mapped as never);
-    if (!dup && dk) {
-      const shop = String(e.mapped.shopName ?? '');
-      if (dealers.has(dk) || (seenDealerShop.has(dk) && seenDealerShop.get(dk) !== shop)) {
-        dup = { type: 'DEALER', ref: '' };
-        warnings.push({ field: 'dealerName', code: 'DUPLICATE_DEALER', message: 'Same dealer already listed in this district (different shop)' });
-      }
-      if (!seenDealerShop.has(dk)) seenDealerShop.set(dk, shop);
     }
     const state = e.errors.length ? 'ERROR' : warnings.length ? 'WARNING' : 'VALID';
     summary[state === 'ERROR' ? 'error' : state === 'WARNING' ? 'warning' : 'valid']++;
-    if (dup && dup.type !== 'DEALER') summary.duplicates++;
+    if (dup) summary.duplicates++;
     if (row.skipped) summary.skipped++;
     ops.push({
-      updateOne: { filter: { _id: row._id }, update: { $set: { mapped: e.mapped, extra: e.extra, errors: e.errors, warnings, state, dupKey: e.dupKey, dup } } },
+      updateOne: { filter: { _id: row._id }, update: { $set: { mapped: e.mapped, extra: e.extra, errors: e.errors, warnings, state, dupKey, dup } } },
     });
     if (ops.length >= CHUNK) await ImportRow.bulkWrite(ops.splice(0));
   }
   if (ops.length) await ImportRow.bulkWrite(ops);
-  batch.set({ mapping, scenario, defaultUnit: body.defaultUnit, duplicatePolicy: body.duplicatePolicy, status: 'PREVIEWED', summary });
+  const importable = await ImportRow.countDocuments(importableFilter(batchId, body.duplicatePolicy));
+  batch.set({ mapping, scenario, defaultUnit: body.defaultUnit, duplicatePolicy: body.duplicatePolicy, status: 'PREVIEWED', summary: { ...summary, importable } });
   await batch.save();
   return batch.toObject();
 }
 
 export async function listRows(projectId: string, batchId: string, q: z.infer<typeof rowListQuery>) {
-  await getBatch(projectId, batchId);
+  const batch = await getBatch(projectId, batchId);
   const filter: Record<string, unknown> = { batch: new Types.ObjectId(batchId) };
   if (q.state === 'DUPLICATE') filter['dup.type'] = { $in: ['FILE', 'EXISTING'] };
+  else if (q.state === 'IMPORT') Object.assign(filter, importableFilter(batchId, batch.duplicatePolicy ?? 'skip'));
   else if (q.state) filter.state = q.state;
   const [items, total] = await Promise.all([
     ImportRow.find(filter).sort({ rowNumber: 1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
@@ -178,9 +173,9 @@ export async function patchRow(projectId: string, batchId: string, rowId: string
     const merged = { ...(row.mapped as Record<string, unknown>), ...body.mapped } as Record<string, unknown>;
     const n = normalise(merged as never, { scenario: batch.scenario as Scenario, defaultUnit: batch.defaultUnit as Unit });
     const warnings = [...n.warnings];
-    const dupKey = dupKeyOf(n.value);
-    let dup = row.dup?.type ? { type: row.dup.type, ref: row.dup.ref ?? '' } : null;
-    if (dup && dup.type !== 'DEALER' && dupKey !== row.dupKey) dup = null; // identity changed: re-evaluated on commit
+    const dupKey = dupKeysOf(n.value as never).join(' ');
+    let dup = row.dup?.type && row.dup.type !== 'DEALER' ? { type: row.dup.type, ref: row.dup.ref ?? '' } : null;
+    if (dup && dupKey !== row.dupKey) dup = null; // identity changed: re-evaluated on commit
     if (dup?.type === 'FILE') warnings.push({ field: 'shopName', code: 'DUPLICATE_IN_FILE', message: `Duplicate of row ${dup.ref} in this file` });
     if (dup?.type === 'EXISTING') warnings.push({ field: 'shopName', code: 'DUPLICATE_EXISTING', message: 'Already exists in this project' });
     row.set({ mapped: n.value, errors: n.errors, warnings, state: n.errors.length ? 'ERROR' : warnings.length ? 'WARNING' : 'VALID', dupKey, dup });
@@ -192,7 +187,8 @@ export async function patchRow(projectId: string, batchId: string, rowId: string
     ImportRow.countDocuments({ batch: batchId, state: 'ERROR' }), ImportRow.countDocuments({ batch: batchId, skipped: true }),
     ImportRow.countDocuments({ batch: batchId, 'dup.type': { $in: ['FILE', 'EXISTING'] } }),
   ]);
-  batch.summary = { valid, warning, error, skipped, duplicates } as never;
+  const importable = await ImportRow.countDocuments(importableFilter(batchId, batch.duplicatePolicy ?? 'skip'));
+  batch.summary = { valid, warning, error, skipped, duplicates, importable } as never;
   await batch.save();
   return { row: row.toObject(), summary: batch.summary };
 }
@@ -224,10 +220,11 @@ export async function commitImport(projectId: string, batchId: string, body: z.i
       // Re-validate: rows may have been edited after preview.
       const n = normalise(row.mapped as never, { scenario, defaultUnit: locked.defaultUnit as Unit });
       if (n.errors.length) { errorRows++; continue; }
-      const dupKey = dupKeyOf(n.value);
-      const inFile = !!dupKey && seen.has(dupKey);
-      const existingId = dupKey ? byKey.get(dupKey) : undefined;
-      if (dupKey) seen.add(dupKey);
+      const keys = dupKeysOf(n.value as never);
+      const dupKey = keys[0] ?? '';
+      const inFile = keys.some((k) => seen.has(k));
+      const existingId = keys.map((k) => byKey.get(k)).find(Boolean);
+      keys.forEach((k) => seen.add(k));
       if (existingId && !inFile && policy === 'update') { toUpdate.push({ id: existingId, row: { ...row, n } }); continue; }
       if ((inFile || existingId) && policy !== 'import') { skippedRows++; continue; }
       toCreate.push({ ...row, n, dupKey });
@@ -313,3 +310,23 @@ export async function getImport(projectId: string, batchId: string) {
   return (await getBatch(projectId, batchId)).toObject();
 }
 
+
+/** Skip (or restore) many staged rows at once: every duplicate, every row with an error, every warning, or all of them. */
+export async function bulkSkip(projectId: string, batchId: string, body: z.infer<typeof bulkSkipBody>) {
+  const batch = await getBatch(projectId, batchId);
+  if (['COMMITTING', 'COMMITTED'].includes(batch.status)) throw AppError.conflict('This import is already committed');
+  const filter: Record<string, unknown> = { batch: new Types.ObjectId(batchId) };
+  if (body.scope === 'DUPLICATE') filter['dup.type'] = { $in: ['FILE', 'EXISTING'] };
+  else if (body.scope === 'ERROR') filter.state = 'ERROR';
+  else if (body.scope === 'WARNING') filter.state = 'WARNING';
+  const r = await ImportRow.updateMany(filter, { $set: { skipped: body.skipped } });
+  const [valid, warning, error, skipped, duplicates] = await Promise.all([
+    ImportRow.countDocuments({ batch: batchId, state: 'VALID' }), ImportRow.countDocuments({ batch: batchId, state: 'WARNING' }),
+    ImportRow.countDocuments({ batch: batchId, state: 'ERROR' }), ImportRow.countDocuments({ batch: batchId, skipped: true }),
+    ImportRow.countDocuments({ batch: batchId, 'dup.type': { $in: ['FILE', 'EXISTING'] } }),
+  ]);
+  const importable = await ImportRow.countDocuments(importableFilter(batchId, batch.duplicatePolicy ?? 'skip'));
+  batch.summary = { valid, warning, error, skipped, duplicates, importable } as never;
+  await batch.save();
+  return { changed: r.modifiedCount, summary: batch.summary };
+}

@@ -15,9 +15,10 @@ import { ensureTemplate } from '../templates/template.service';
 import { User } from '../users/user.model';
 import { ORDER_STAGES, SalesOrder, type OrderStage } from './sales.model';
 import { liveOrder, orderArray } from './order.service';
+import { sendSignageCodeMail, signageMailAvailable, type SignageCodeMailInput } from '../codeRequests/signageCodeMail';
 import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
-import { sendViaSignageMail, signageMailAvailable, signagePayload } from './signageMail';
+import { sendViaSignageMail, signagePayload } from './signageMail';
 import { nextSeq } from '../../common/counter.model';
 
 /** Sends in progress (order + request key): a second click while the first is still sending is refused, not sent twice. */
@@ -31,11 +32,13 @@ const nextRequestId = async () => {
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
-export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING' | 'PROJECT_CODE_REQUEST';
-const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form', PROJECT_CODE_REQUEST: 'Project code request' };
+export type Kind = 'COMPANY_PROFILE' | 'RATE_CARD' | 'ONBOARDING' | 'PROJECT_CODE_REQUEST' | 'CLIENT_CODE_REQUEST' | 'COMBINED_CODE_REQUEST';
+const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', RATE_CARD: 'Rate card', ONBOARDING: 'Customer onboarding form', PROJECT_CODE_REQUEST: 'Project code request', CLIENT_CODE_REQUEST: 'Client code request', COMBINED_CODE_REQUEST: 'Client code and project code request' };
 
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
+
+type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string> };
 
 type DeliverInput = {
   order: Types.ObjectId;
@@ -43,14 +46,20 @@ type DeliverInput = {
   kind: Kind;
   to: string[];
   cc: string[];
+  bcc?: string[] | undefined;
+  from?: string | undefined;
   subject: string;
   body: string;
   attachments: Attachment[];
   rateCardRevision?: number | undefined;
   requestKey?: string | undefined;
   resentFrom?: Types.ObjectId | undefined;
-  /** Project code request: the client and source the signage email API needs. */
-  signage?: { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string> } | undefined;
+  /**
+   * Project code request (Recce Assign): the client and source the signage email API needs.
+   * Code request emails (Code Requests): structured fields (has `mailType`) sent to the signage PHP API, which renders the branded mail.
+   * The PHP API falls back to SMTP when it is not configured.
+   */
+  signage?: ProjectRequestSignage | SignageCodeMailInput | undefined;
   actor: Actor;
 };
 
@@ -85,14 +94,18 @@ async function deliverOnce(rec: DeliverInput) {
   let status: 'SENT' | 'FAILED' | 'SKIPPED' = 'SENT';
   let error: string | undefined;
   const php = rec.kind === 'ONBOARDING';
-  // Project code request: the signage email API (not SMTP).
-  const signage = rec.kind === 'PROJECT_CODE_REQUEST';
+  // Code request emails: structured fields to the signage PHP API (it renders the branded mail); SMTP when it is not configured.
+  const codeMail = rec.signage && 'mailType' in rec.signage ? rec.signage : undefined;
+  const viaCodeMail = !!codeMail && signageMailAvailable();
+  // Project code request (Recce Assign): the signage email API (not SMTP).
+  const projectRequest = rec.signage && !('mailType' in rec.signage) ? rec.signage : undefined;
+  const signage = !!projectRequest;
   // Project code request: the email-safe layout (inline styles, tables); the others as before.
   const html = signage ? styledEmailHtml(rec.body) : `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
   let requestId: string | undefined;
   let apiPayload: ReturnType<typeof signagePayload> | undefined;
   let apiResponse: string | undefined;
-  if (signage) {
+  if (projectRequest) {
     requestId = await nextRequestId();
     apiPayload = signagePayload({
       to: rec.to,
@@ -101,13 +114,13 @@ async function deliverOnce(rec: DeliverInput) {
       requestId,
       text: htmlToText(rec.body),
       html: rec.body,
-      source: rec.signage?.source ?? 'Client Servicing Team',
-      client: rec.signage?.client ?? { clientName: '', clientCode: '' },
+      source: projectRequest.source ?? 'Client Servicing Team',
+      client: projectRequest.client ?? { clientName: '', clientCode: '' },
       attachments: rec.attachments,
-      docTypes: rec.signage?.docTypes,
+      docTypes: projectRequest.docTypes,
     });
   }
-  if (signage ? !signageMailAvailable() : php ? !phpMailAvailable() : !mailAvailable()) {
+  if (signage ? !env.signageProjectMailEnabled : viaCodeMail ? false : php ? !phpMailAvailable() : !mailAvailable()) {
     status = 'SKIPPED';
     error = signage
       ? 'The signage email API is not configured on the server (SIGNAGE_MAIL_API_URL / SIGNAGE_MAIL_API_KEY), so nothing was sent'
@@ -116,7 +129,7 @@ async function deliverOnce(rec: DeliverInput) {
         : 'Email is not configured on the server (SMTP), so nothing was sent';
   } else {
     try {
-      if (signage) {
+      if (projectRequest) {
         apiResponse = await sendViaSignageMail({
           to: rec.to,
           cc: rec.cc,
@@ -127,8 +140,11 @@ async function deliverOnce(rec: DeliverInput) {
           source: apiPayload!.source,
           client: apiPayload!.client,
           attachments: rec.attachments,
-          docTypes: rec.signage?.docTypes,
+          docTypes: projectRequest.docTypes,
         });
+      } else if (viaCodeMail) {
+        const files = await Promise.all(rec.attachments.map((a) => readStoredFile(a)));
+        await sendSignageCodeMail({ ...codeMail!, to: rec.to, cc: rec.cc, ...(rec.bcc?.length ? { bcc: rec.bcc } : {}), subject: rec.subject, attachments: files.map((f) => ({ filename: f.name, content: f.content })) });
       } else if (php) {
         const links = await Promise.all(rec.attachments.map(async (a) => ({ name: a.name ?? 'attachment.pdf', url: (await storedFileUrl(a)).url })));
         await sendViaPhpMail({ from: env.MAIL_FROM, to: rec.to, cc: rec.cc, subject: rec.subject, html, text: htmlToText(rec.body), attachments: links });
@@ -137,6 +153,8 @@ async function deliverOnce(rec: DeliverInput) {
         await sendMail({
           to: rec.to.join(', '),
           cc: rec.cc,
+          ...(rec.bcc?.length ? { bcc: rec.bcc } : {}),
+          ...(rec.from ? { from: rec.from } : {}),
           subject: rec.subject,
           html,
           text: htmlToText(rec.body),
@@ -152,7 +170,7 @@ async function deliverOnce(rec: DeliverInput) {
   const entry = {
     _id: emailId,
     kind: rec.kind,
-    from: env.MAIL_FROM ?? '',
+    from: rec.from ?? env.MAIL_FROM ?? '',
     to: rec.to,
     cc: rec.cc,
     subject: rec.subject,

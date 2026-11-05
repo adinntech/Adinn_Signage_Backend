@@ -1,8 +1,10 @@
+import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
 import { importZohoClient, previewZohoIdentity } from '../clients/client.service';
 import { Client } from '../clients/client.model';
+import { Vendor } from '../vendors/vendor.model';
 import { zohoGet } from './zoho.client';
-import { customerNoOf, toClientFields, type ZohoContact } from './zoho.mapper';
+import { customerNoOf, toClientFields, toVendorFields, type ZohoContact } from './zoho.mapper';
 
 export interface ZohoPayment {
   payment_id: string;
@@ -80,6 +82,30 @@ export async function previewZohoClient(contactId: string) {
     },
     imported: !!existing,
     clientNo: existing?.clientNo,
+  };
+}
+
+/**
+ * Vendor lookup by Zoho vendor number (the digits before " - " in the contact name, e.g. 12543). Returns the details
+ * for the registration form and, if that vendor is already in the vendor master, who it is. Nothing is saved here.
+ */
+export async function lookupZohoVendor(vendorNo: string) {
+  // contact_name_contains, not search_text: with contact_type=vendor Zoho ignores search_text and returns every vendor.
+  const list = await zohoGet<{ contacts?: ZohoContact[] }>('/contacts', { contact_name_contains: vendorNo, contact_type: 'vendor', per_page: 25 });
+  const hit = (list.contacts ?? []).find((c) => customerNoOf(c.contact_name) === vendorNo);
+  if (!hit) throw AppError.notFound(`No Zoho vendor with number ${vendorNo}`);
+  return zohoVendorDetails(hit.contact_id);
+}
+
+/** Registration-form fields of one Zoho vendor (full detail call: address and contact persons), plus who already holds it. */
+export async function zohoVendorDetails(contactId: string) {
+  const detail = await zohoGet<{ contact: ZohoContact }>(`/contacts/${encodeURIComponent(contactId)}`);
+  const existing = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null }).select('code name status').lean();
+  return {
+    contactId,
+    vendorNo: customerNoOf(detail.contact.contact_name),
+    vendor: toVendorFields(detail.contact),
+    existing: existing ? { id: String(existing._id), code: existing.code, name: existing.name, status: existing.status } : null,
   };
 }
 

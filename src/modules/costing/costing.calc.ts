@@ -190,3 +190,18 @@ export function totalsOf(legs: { name: string; shops: number; channel?: Channel 
   const cost = r2(chosenTotal);
   return { shops, chosenLegs, legs: legs.length, chosenTotal: cost, recommendedTotal: r2(recommendedTotal), perShop: shops && chosenLegs === legs.length ? r2(cost / shops) : 0, inHouseShops, vendorShops, needsApproval, reasons };
 }
+
+/** Planning assumptions used when the real trip dates are not known yet (from the earlier recce planner). */
+export const PLANNING = { avgSpeedKmph: 40, minutesPerShop: 45, workingHoursPerDay: 9 } as const;
+
+/**
+ * Field days a team needs for an area: driving time (round trip) plus the time at the shops, divided by a working day.
+ * Returns wall-clock trip start / end strings that `tripSpan` turns into meals and nights (3 meals a day, one night less than days).
+ */
+export function estimateTrip(shops: number, distanceKm: number, routeKm?: number, startDay = '2000-01-03') {
+  const km = routeKm && routeKm > 0 ? routeKm : 2 * Math.max(0, distanceKm);
+  const hours = km / PLANNING.avgSpeedKmph + (Math.max(1, shops) * PLANNING.minutesPerShop) / 60;
+  const days = Math.min(25, Math.max(1, Math.ceil(hours / PLANNING.workingHoursPerDay)));
+  const end = new Date(Date.parse(`${startDay}T00:00:00Z`) + (days - 1) * 86_400_000).toISOString().slice(0, 10);
+  return { days, hours: r2(hours), routeKm: r2(km), tripStart: `${startDay}T08:00`, tripEnd: `${end}T20:00` };
+}

@@ -1,3 +1,4 @@
+import { FINDABLE, NO_ADDRESS, isFindable } from './site.ready';
 import { Types } from 'mongoose';
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
@@ -29,6 +30,9 @@ export async function setApproval(siteId: string, body: z.infer<typeof approvalB
   await assertNotCancelled(site.project);
   if (site.scenario === 'CLIENT_PROVIDED' && body.value === 'APPROVED' && (!site.width || !site.height))
     throw new AppError(422, 'VALIDATION_ERROR', 'A shop without a measurement cannot be approved', [{ path: 'width', message: 'Add the board width and height first' }]);
+  // A shop that cannot be found (no address, and no area + district) cannot be verified: fill the details first.
+  if (body.level === 'ops' && body.value === 'APPROVED' && !isFindable(site))
+    throw new AppError(422, 'VALIDATION_ERROR', 'A shop without an address cannot be verified', [{ path: 'address1', message: 'Fill the address (or at least the area and district) first. The shop stays saved and waits until then' }]);
   const field = FIELD[body.level];
   const old = site.get(field) as string;
   site.set({ [field]: body.value, [`${body.level}ApprovalAt`]: new Date(), [`${body.level}ApprovalBy`]: actor.id, approvalNote: body.value === 'CORRECTION' ? body.note : undefined, approvalUpdatedAt: new Date(), approvalUpdatedBy: actor.id });
@@ -60,13 +64,15 @@ export async function approveAllPending(projectId: string, level: 'ops' | 'bd', 
   const field = FIELD[level];
   // Only measurement projects need a size before approval; for shop-details projects approval means "details verified".
   const needsSize = project.requirementType === 'SHOP_MEASUREMENT' ? { width: { $gt: 0 }, height: { $gt: 0 } } : {};
+  // Shops without an address (or at least area + district) are left pending: they wait until the details are filled.
   const res = await Site.updateMany(
-    { project: projectId, deletedAt: null, [field]: 'PENDING', ...needsSize },
+    { project: projectId, deletedAt: null, [field]: 'PENDING', ...needsSize, ...(level === 'ops' ? FINDABLE : {}) },
     { $set: { [field]: 'APPROVED', [`${level}ApprovalAt`]: new Date(), [`${level}ApprovalBy`]: actor.id, approvalUpdatedAt: new Date(), approvalUpdatedBy: actor.id } },
   );
   await recordAudit({ actor, action: 'APPROVAL', entity: 'Project', entityId: projectId, project: projectId, reason: `${level.toUpperCase()} approved ${res.modifiedCount} shop(s)` });
   const skipped = await Site.countDocuments({ project: projectId, deletedAt: null, [field]: 'PENDING' });
-  return { approved: res.modifiedCount, stillPending: skipped };
+  const waitingForAddress = level === 'ops' ? await Site.countDocuments({ project: projectId, deletedAt: null, [field]: 'PENDING', ...NO_ADDRESS }) : 0;
+  return { approved: res.modifiedCount, stillPending: skipped, waitingForAddress };
 }
 
 /** For each level: how many shops are approved / pending / need correction, who approved last and when, and the latest correction note. */

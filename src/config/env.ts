@@ -73,10 +73,28 @@ const schema = z
     SMTP_USER: optional,
     SMTP_PASS: optional,
     MAIL_FROM: optional,
+    /** Extra sender identities Client Servicing may choose for code request emails, separated by ";" e.g. "Client Servicing <cs@x.com>;Accounts <ac@x.com>". MAIL_FROM is always allowed. */
+    MAIL_FROM_IDENTITIES: optional,
+    /** Recipient groups for code request emails: comma-separated addresses that fill To for a client code / project code request. */
+    /** Accounts mailbox(es) that receive the vendor registration request and reply with the vendor ID, separated by ",". */
+    VENDOR_REGISTRATION_RECIPIENTS: optional,
+    CODE_REQUEST_CLIENT_RECIPIENTS: optional,
+    CODE_REQUEST_PROJECT_RECIPIENTS: optional,
+    /** Public URL of the Adinn logo shown in the footer of code request emails. */
+    MAIL_LOGO_URL: optional,
     /** PHP mail service for client emails (Customer Onboarding Form). JSON is POSTed here; the PDF goes as a link. Empty = not sent. */
     PHP_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
     /** Optional key sent to the PHP mail service in the X-Api-Key header. */
     PHP_MAIL_KEY: optional,
+    /** Signage code-request PHP mail API (signage_email_api/index_signage.php). Structured JSON (mailtype, client, project) is POSTed here. Empty = not sent. */
+    SIGNAGE_MAIL_URL: z.string().trim().url().optional().or(z.literal('').transform(() => undefined)),
+    /** Must equal SIGNAGE_API_KEY in the PHP API's config.local.php; sent in the X-API-Key header. */
+    SIGNAGE_MAIL_KEY: optional,
+    /** Most MB of attached files the CRM sends to the PHP mail service in one mail. The web server in front of the PHP API may allow less than the PHP script (nginx's default is 1 MB for the whole request): set this to what that server accepts. */
+    SIGNAGE_MAIL_MAX_TOTAL_MB: z.coerce.number().positive().max(12).default(12),
+    /** GST lookup service (gst.getbusiness.co.in): legal name, trade name, status, address and PAN of a GST number. Sent in the X-API-Key header. Empty key = the lookup is off and only the number-based checks run. */
+    GST_VERIFY_URL: z.string().trim().url().default('https://gst.getbusiness.co.in/api/v1/verify'),
+    GST_VERIFY_KEY: optional,
     /**
      * Signage email API for the project code request email (JSON POST with the X-API-Key header). Both URL and key are
      * needed; without them the email is recorded as not sent. The key stays on the server (never sent to the web app).
@@ -104,6 +122,8 @@ const schema = z
     /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
     ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
     ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),
+    /** Which Zoho vendors the Zoho vendors list keeps: those whose custom field "Contact Code" (cf_contact_code) equals this. */
+    ZOHO_VENDOR_CONTACT_CODE: z.string().trim().min(1).default('Creditors - Signage'),
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -137,6 +157,10 @@ if (!parsed.success) {
 
 export const env = {
   ...parsed.data,
+  // The project mail is the same PHP API as the vendor / forgot-password mails (mailtype "project"), so the shared
+  // SIGNAGE_MAIL_URL / SIGNAGE_MAIL_KEY are used unless a separate API URL / key is set.
+  SIGNAGE_MAIL_API_URL: parsed.data.SIGNAGE_MAIL_API_URL ?? parsed.data.SIGNAGE_MAIL_URL,
+  SIGNAGE_MAIL_API_KEY: parsed.data.SIGNAGE_MAIL_API_KEY ?? parsed.data.SIGNAGE_MAIL_KEY,
   corsOrigins: parsed.data.CORS_ORIGINS.split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean),
   cookieSecure: parsed.data.COOKIE_SECURE === 'true',
   dnsServers: parsed.data.DNS_SERVERS.split(',').map((x) => x.trim()).filter(Boolean),
@@ -150,7 +174,10 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
-  signageMailEnabled: !!(parsed.data.SIGNAGE_MAIL_API_URL && parsed.data.SIGNAGE_MAIL_API_KEY),
+  /** Code Requests / vendor / auth mails: the signage PHP mail API (SIGNAGE_MAIL_URL + SIGNAGE_MAIL_KEY). */
+  signageMailEnabled: !!(parsed.data.SIGNAGE_MAIL_URL && parsed.data.SIGNAGE_MAIL_KEY),
+  /** Project code request email (Recce Assign): the signage email API (SIGNAGE_MAIL_API_URL + SIGNAGE_MAIL_API_KEY). */
+  signageProjectMailEnabled: !!((parsed.data.SIGNAGE_MAIL_API_URL ?? parsed.data.SIGNAGE_MAIL_URL) && (parsed.data.SIGNAGE_MAIL_API_KEY ?? parsed.data.SIGNAGE_MAIL_KEY)),
   zohoCustomersLive: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoCanRefresh: !!(parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN),
   zohoEnabled: !!(parsed.data.ZOHO_ORGANIZATION_ID && (parsed.data.ZOHO_ACCESS_TOKEN || (parsed.data.ZOHO_CLIENT_ID && parsed.data.ZOHO_CLIENT_SECRET && parsed.data.ZOHO_REFRESH_TOKEN))),

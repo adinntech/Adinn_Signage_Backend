@@ -65,5 +65,6 @@ export const rows = asyncHandler(async (req, res) => {
   ok(res, items, meta);
 });
 export const patchRow = asyncHandler(async (req, res) => ok(res, await imp.patchRow(p(req), p(req, 'batchId'), p(req, 'rowId'), v.rowPatch.parse(req.body))));
+export const bulkSkip = asyncHandler(async (req, res) => ok(res, await imp.bulkSkip(p(req), p(req, 'batchId'), v.bulkSkipBody.parse(req.body))));
 export const commit = asyncHandler(async (req, res) => ok(res, await imp.commitImport(p(req), p(req, 'batchId'), v.commitBody.parse(req.body ?? {}), actorOf(req))));
 export const discard = asyncHandler(async (req, res) => { await imp.discardImport(p(req), p(req, 'batchId')); ok(res, { discarded: true }); });

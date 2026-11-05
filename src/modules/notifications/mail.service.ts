@@ -7,6 +7,9 @@ export interface OutgoingMail {
   text: string;
   html: string;
   cc?: string[];
+  bcc?: string[];
+  /** Overrides MAIL_FROM; callers must only pass an allowed sender identity. */
+  from?: string;
   attachments?: { filename: string; content: Buffer; contentType?: string }[];
 }
 export type MailSender = (mail: OutgoingMail) => Promise<void>;
@@ -23,12 +26,13 @@ function smtpSender(): MailSender {
   });
   return async (m) => {
     await transport.sendMail({
-      from: env.MAIL_FROM!,
+      from: m.from ?? env.MAIL_FROM!,
       to: m.to,
       subject: m.subject,
       text: m.text,
       html: m.html,
       ...(m.cc?.length ? { cc: m.cc } : {}),
+      ...(m.bcc?.length ? { bcc: m.bcc } : {}),
       ...(m.attachments?.length ? { attachments: m.attachments } : {}),
     });
   };

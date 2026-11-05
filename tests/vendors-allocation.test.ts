@@ -91,7 +91,7 @@ describe('vendor management', () => {
     vendorId = r.body.data._id;
     expect((await api().post('/api/v1/vendors').set(as('OPS')).send(vendorBody({ name: 'Someone Else' }))).status).toBe(409);
     expect((await api().post('/api/v1/vendors').set(as('BD')).send(vendorBody({ name: 'X Y Z', mobile: '9000000001' }))).status).toBe(403);
-    orgId = (await api().post('/api/v1/vendors').set(as('OPS')).send(vendorBody({ name: 'SRN Media Pvt Ltd', type: 'ORGANIZATION', mobile: '9000000002', district: 'Theni', ratePerShop: 220, farRatePerShop: 300 }))).body.data._id;
+    orgId = (await api().post('/api/v1/vendors').set(as('OPS')).send(vendorBody({ name: 'SRN Media Pvt Ltd', type: 'ORGANIZATION', contactPerson: 'Srinivasan', gstin: '33ABCDE1234F1Z5', mobile: '9000000002', district: 'Theni', ratePerShop: 220, farRatePerShop: 300 }))).body.data._id;
   });
 
   it('activates only after the KYC checklist is complete', async () => {

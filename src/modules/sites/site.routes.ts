@@ -29,6 +29,7 @@ siteRouter.post(`${P}/imports/from-file`, ...writeP, c.extractFromFile);
 siteRouter.get(`${P}/imports/:batchId`, ...readP, c.getImport);
 siteRouter.post(`${P}/imports/:batchId/preview`, ...writeP, c.preview);
 siteRouter.get(`${P}/imports/:batchId/rows`, ...readP, c.rows);
+siteRouter.post(`${P}/imports/:batchId/rows/skip`, ...writeP, c.bulkSkip);
 siteRouter.patch(`${P}/imports/:batchId/rows/:rowId`, ...writeP, c.patchRow);
 siteRouter.post(`${P}/imports/:batchId/commit`, ...writeP, c.commit);
 siteRouter.delete(`${P}/imports/:batchId`, ...writeP, c.discard);

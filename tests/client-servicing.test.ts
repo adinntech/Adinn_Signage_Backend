@@ -35,17 +35,16 @@ afterAll(async () => {
 });
 
 describe('Client Servicing (handed-over orders only)', () => {
-  it('reads sales orders and clients only, and lands on its own page', () => {
-    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read']);
+  it('reads sales orders and clients, creates projects with the BD wizard (plus Adinn Connect), and lands on its own page', () => {
+    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read', 'clients:write', 'projects:read', 'projects:write', 'connect:use']);
     expect(ROLE_HOME.CLIENT_SERVICING).toBe('/client-servicing/dashboard');
   });
 
-  it('cannot reach projects, the BD Kanban, templates or any write', async () => {
+  it('cannot reach the BD Kanban, templates or the sales writes (projects and clients are open for the Create Project wizard)', async () => {
     const as = { Authorization: `Bearer ${token}` };
-    for (const url of ['/api/v1/projects', '/api/v1/projects/summary', '/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
+    for (const url of ['/api/v1/sales/orders/board', '/api/v1/email-templates/company-profile']) {
       expect((await api().get(url).set(as)).status, url).toBe(403);
     }
-    expect((await api().post('/api/v1/clients').set(as).send({ name: 'X', code: 'XX' })).status).toBe(403);
     expect((await api().post('/api/v1/sales/orders').set(as).send({})).status).toBe(403);
   });
 
@@ -54,6 +53,24 @@ describe('Client Servicing (handed-over orders only)', () => {
     const list = await api().get('/api/v1/sales/orders').set(as);
     expect(list.status).toBe(200);
     expect(list.body.data).toEqual([]);
+  });
+
+  it('gets dashboard counts for their own orders only; BD gets 403', async () => {
+    const res = await api().get('/api/v1/sales/cs/summary').set({ Authorization: `Bearer ${token}` });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ total: 0, unseen: 0, newClient: 0, existingClient: 0, thisWeek: 0, recent: [] });
+    expect((await api().get('/api/v1/sales/cs/summary').set({ Authorization: `Bearer ${bdToken}` })).status).toBe(403);
+  });
+
+  it('finds a client by client ID, GST number or PAN', async () => {
+    const { Client } = await import('../src/modules/clients/client.model');
+    await Client.create({ name: 'Finder Co', code: 'FIND1', clientNo: 'CLI-9001', gstin: '33AAACU5678G1Z2', onboarding: { pan: 'AAACU5678G' }, contacts: [], status: 'ACTIVE' });
+    const as = { Authorization: `Bearer ${token}` };
+    for (const q of ['CLI-9001', '33AAACU5678G1Z2', 'AAACU5678G', 'finder']) {
+      const res = await api().get(`/api/v1/clients?q=${q}`).set(as);
+      expect(res.body.data.map((c: { code: string }) => c.code), q).toContain('FIND1');
+    }
+    expect((await api().get('/api/v1/clients?q=ZZZNOPE').set(as)).body.data).toEqual([]);
   });
 
   it('leaves BD untouched', async () => {

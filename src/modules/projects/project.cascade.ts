@@ -8,7 +8,11 @@ import { Requirement, Project } from './project.model';
 import { BoardOption } from '../boards/boardOption.model';
 import { CostPlan } from '../costing/costing.model';
 import { Expense } from '../expenses/expense.model';
+import { RecceTrip, VendorRecceCost } from '../recce-cost/recceCost.model';
 import { SurveyArea } from './surveyArea.model';
+import { ConnectChannel, ConnectMessage } from '../connect/connect.model';
+import { JourneyComment } from '../journey/journeyComment.model';
+import { NoteDraft, ProjectNote, ProjectVoiceNote } from '../workspace/workspace.model';
 
 /**
  * EVERYTHING that belongs to a project and must disappear with it.
@@ -25,15 +29,22 @@ export const PROJECT_OWNED: { name: string; model: Model<any>; field: string }[]
   { name: 'Board options', model: BoardOption, field: 'project' },
   { name: 'Cost plans', model: CostPlan, field: 'project' },
   { name: 'Expense claims', model: Expense, field: 'project' },
+  { name: 'Recce trip claims', model: RecceTrip, field: 'project' },
+  { name: 'Vendor recce costs', model: VendorRecceCost, field: 'project' },
   { name: 'Requirements', model: Requirement, field: 'project' },
   { name: 'Chat messages', model: CommunicationMessage, field: 'project' },
   { name: 'Chat channels', model: CommunicationChannel, field: 'project' },
+  { name: 'Adinn Connect channels', model: ConnectChannel, field: 'project' },
+  { name: 'Project notes', model: ProjectNote, field: 'project' },
+  { name: 'Note drafts', model: NoteDraft, field: 'project' },
+  { name: 'Voice notes', model: ProjectVoiceNote, field: 'project' },
+  { name: 'Journey comments', model: JourneyComment, field: 'project' },
   { name: 'Notifications', model: Notification, field: 'project' },
   { name: 'Audit history', model: AuditLog, field: 'project' },
 ];
 
 /** Models that hang off a project's child (not the project itself), listed so the coverage test knows they are handled. */
-export const HANDLED_VIA_PARENT = ['ImportRow'];
+export const HANDLED_VIA_PARENT = ['ImportRow', 'ConnectMessage'];
 
 /**
  * Deletes the project and every record that belongs to it. Returns how many records were removed per kind.
@@ -45,6 +56,8 @@ export async function purgeProjectData(projectId: string): Promise<Record<string
   const batches = await ImportBatch.find({ project: id }).select('_id').lean();
   removed['Import rows'] = (await (ImportRow as Model<any>).deleteMany({ batch: { $in: batches.map((b) => b._id) } })).deletedCount ?? 0;
   removed['Import batches'] = (await ImportBatch.deleteMany({ project: id })).deletedCount ?? 0;
+  const channels = await ConnectChannel.find({ project: id }).select('_id').lean();
+  removed['Adinn Connect messages'] = (await ConnectMessage.deleteMany({ channel: { $in: channels.map((c) => c._id) } })).deletedCount ?? 0;
   for (const s of PROJECT_OWNED) removed[s.name] = (await s.model.deleteMany({ [s.field]: id })).deletedCount ?? 0;
   removed.Project = (await Project.deleteOne({ _id: id })).deletedCount ?? 0;
   return removed;

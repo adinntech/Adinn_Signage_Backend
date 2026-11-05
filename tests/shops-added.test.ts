@@ -43,7 +43,7 @@ beforeAll(async () => {
     tokens[key] = (await api().post('/api/v1/auth/login').send({ email: `${key.toLowerCase()}@t.com`, password: 'Passw0rd!x' })).body.data.accessToken;
   }
   clientId = (await api().post('/api/v1/clients').set(as('BD')).send({ name: 'Notify Client', code: 'NTF' })).body.data._id;
-  vendorId = (await api().post('/api/v1/vendors').set(as('OPS')).send({ name: 'Madurai Boards', type: 'ORGANIZATION', mobile: '9000000031', district: 'Madurai' })).body.data._id;
+  vendorId = (await api().post('/api/v1/vendors').set(as('OPS')).send({ name: 'Madurai Boards', type: 'ORGANIZATION', contactPerson: 'Contact', gstin: '33ABCDE1234F1Z5', mobile: '9000000031', district: 'Madurai' })).body.data._id;
   await api().put(`/api/v1/vendors/${vendorId}/kyc`).set(as('OPS')).send({ pan: true, gst: true, bank: true, address: true });
   await api().post(`/api/v1/vendors/${vendorId}/status`).set(as('OPS')).send({ status: 'ACTIVE' });
   await User.updateOne({ _id: uid.VEND }, { vendorId }); // this vendor login belongs to Madurai Boards; VEND2 belongs to nobody

@@ -15,8 +15,12 @@ import { Project } from '../projects/project.model';
 import { changeStatus } from '../projects/project.service';
 import { normKey } from '../sites/site.fields';
 import { Site } from '../sites/site.model';
+import { clusterShops } from './costing.cluster';
+import { NO_ADDRESS, verifiedFilter } from '../sites/site.ready';
+import { ZohoVendor } from '../zoho/zohoVendor.model';
+import { VendorPrice } from '../vendors/vendorPrice.model';
 import { Vendor } from '../vendors/vendor.model';
-import { calculateLeg, DEFAULT_RATES, totalsOf, type Channel, type CostRates, type LegInput } from './costing.calc';
+import { calculateLeg, DEFAULT_RATES, estimateTrip, PLANNING, totalsOf, type Channel, type CostRates, type LegInput } from './costing.calc';
 import { CHANNELS, CostPlan, CostPolicy } from './costing.model';
 
 const money = z.coerce.number().min(0).max(100_000_000);
@@ -77,7 +81,7 @@ export async function updatePolicy(body: z.infer<typeof policyBody>, actor: Acto
   return ratesOf(d);
 }
 
-const PROJECT_FIELDS = 'code client clientDetails siteCount status targetDate owner createdBy assignedTo originName originLat originLng';
+const PROJECT_FIELDS = 'code client clientDetails siteCount status targetDate owner createdBy assignedTo originName originLat originLng requirementType';
 async function requireProject(projectId: string) {
   const p = await Project.findOne({ _id: projectId, deletedAt: null }).select(PROJECT_FIELDS).lean();
   if (!p) throw AppError.notFound('Project not found');
@@ -90,7 +94,7 @@ const districtRe = (name: string) => new RegExp(`^\\s*${escapeRegex(name.trim())
 type LegDoc = {
   key: string; name: string; district?: string | null; shops: number; distanceKm?: number | null; routeKm?: number | null; deadline?: string | null;
   channel?: Channel | null; vendor?: Types.ObjectId | null; vendorName?: string | null; vendorRate?: number | null; cardRate?: number | null; cardFarRate?: number | null;
-  vendorOther?: number | null; tripStart?: string | null; tripEnd?: string | null; clientsShared?: number | null; otherAmount?: number | null;
+  vendorOther?: number | null; tripStart?: string | null; tripEnd?: string | null; clientsShared?: number | null; otherAmount?: number | null; clustered?: boolean | null; autoSelected?: boolean | null;
 };
 const legInput = (l: LegDoc): LegInput => ({
   shops: l.shops, distanceKm: l.distanceKm ?? 0, routeKm: l.routeKm, tripStart: l.tripStart, tripEnd: l.tripEnd, clientsShared: l.clientsShared ?? 1,
@@ -206,11 +210,15 @@ export async function saveLegs(projectId: string, body: z.infer<typeof legsBody>
   const ids = [...new Set(body.legs.map((l) => l.vendorId).filter(Boolean))] as string[];
   const vendors = await Vendor.find({ _id: { $in: ids }, deletedAt: null }).select('name status ratePerShop farRatePerShop').lean();
   const byId = new Map(vendors.map((v) => [String(v._id), v]));
+  const before = new Map((plan.legs as unknown as { toObject: () => LegDoc }[]).map((l) => [l.toObject().key, l.toObject()]));
   const legs = body.legs.map(({ vendorId, ...l }) => {
     const v = vendorId ? byId.get(vendorId) : undefined;
     if (vendorId && !v) throw AppError.notFound('Vendor not found');
     if (l.channel === 'VENDOR' && v && v.status !== 'ACTIVE') throw AppError.conflict(`${v.name} is not an active vendor`);
-    return { ...l, vendor: v?._id ?? null, vendorName: v?.name ?? null, cardRate: v?.ratePerShop ?? null, cardFarRate: v?.farRatePerShop ?? null, channel: l.channel ?? null };
+    const was = before.get(l.key);
+    // A choice stays "auto-selected" until a person changes the channel or the vendor.
+    const sameChoice = !!was && (was.channel ?? null) === (l.channel ?? null) && String(was.vendor ?? '') === String(v?._id ?? '');
+    return { ...l, clustered: !!was?.clustered, autoSelected: sameChoice && !!was?.autoSelected, vendor: v?._id ?? null, vendorName: v?.name ?? null, cardRate: v?.ratePerShop ?? null, cardFarRate: v?.farRatePerShop ?? null, channel: l.channel ?? null };
   });
   if (body.refreshRates) plan.set({ rates: (await getPolicy()) as unknown as Record<string, number> });
   plan.set({ legs, updatedBy: actor.id });
@@ -316,7 +324,7 @@ export async function assignPlan(projectId: string, actor: Actor) {
     }
     const now = new Date();
     const r = await Site.updateMany(
-      { project: projectId, deletedAt: null, district: districtRe(leg.district) },
+      { project: projectId, deletedAt: null, ...(leg.clustered ? { planArea: leg.key } : { district: districtRe(leg.district) }) },
       leg.channel === 'VENDOR'
         ? { $set: { channel: 'VENDOR', vendor: leg.vendor, allocatedAt: now, allocatedBy: actor.id } }
         : { $set: { channel: 'IN_HOUSE', allocatedAt: now, allocatedBy: actor.id }, $unset: { vendor: 1 } },
@@ -342,4 +350,180 @@ export async function clientDecision(projectId: string, body: z.infer<typeof cli
   await recordAudit({ actor, action: 'CLIENT_COST_DECISION', entity: 'CostPlan', entityId: plan._id, project: projectId, changes: [{ field: 'clientDecision', oldValue: null, newValue: body.decision }], reason: body.remark });
   if (body.decision === 'REJECTED') await changeStatus(projectId, 'LOSS', `Client rejected the cost: ${body.remark}`, actor);
   return getPlan(projectId);
+}
+
+// ---------- Smart plan: who should do which area ----------
+export const suggestBody = z.object({
+  /** Skills the recce needs (e.g. "measurement"). Vendors that have them rank first. */
+  skills: z.array(z.string().trim().min(1).max(60)).max(10).default([]),
+  /** When true, vendors without every listed skill are left out. */
+  requireSkills: z.boolean().default(false),
+  /** `area` groups nearby shops (one trip covers them); `district` keeps whole districts together. */
+  groupBy: z.enum(['area', 'district']).default('area'),
+  /** When true, the groups and the best choice for each are saved into the plan (as a draft). */
+  apply: z.boolean().default(false),
+});
+
+const sameName = (a?: string | null, b?: string | null) => !!a && !!b && normKey(a) === normKey(b);
+const tomorrow = () => new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+
+/**
+ * 1. Groups the project's shops into work areas: nearby shops together (one trip covers them, so the in-house team's travel,
+ *    food and stay are shared), or whole districts.
+ * 2. Prices each area for the in-house team (travel + food + stay only, from the area's real tour km and the days it needs)
+ *    and for every active vendor that works there (price per shop, skills respected).
+ * 3. Recommends the cheaper one; a choice that breaks a limit loses to one that does not. Also says from how many shops in one
+ *    trip the in-house team beats the vendor.
+ */
+export async function suggestPlan(projectId: string, body: z.infer<typeof suggestBody>, actor: Actor) {
+  const project = await requireProject(projectId);
+  const readiness = await verificationOf(projectId, project.requirementType);
+  if (!readiness.total) throw AppError.conflict('This project has no shops yet. Extract the shops from the attached sheet first');
+  if (!readiness.verified) throw AppError.conflict(`None of the ${readiness.total} shops is verified yet. Check the shop details in Shop verification first (shops without an address cannot be verified), then analyse`);
+  // The smart plan works on verified shops; the others wait and are reported.
+  const sites = await Site.find({ project: projectId, deletedAt: null, ...verifiedFilter(project.requirementType) }).select('district location address1 address2 address3 pincode lat lng').lean();
+  const saved = await CostPlan.findOne({ project: projectId }).select('rates').lean();
+  const rates = saved?.rates ? ratesOf(saved.rates as Record<string, unknown>) : await getPolicy();
+  const origin = originOf(project);
+  const vendors = await Vendor.find({ status: 'ACTIVE', deletedAt: null }).select('name district serviceAreas skills ratePerShop farRatePerShop address zohoContactId').lean();
+  const wanted = body.skills.map((s) => s.toLowerCase());
+  const zoho = await zohoVendorsWithPlace();
+  const startDay = tomorrow();
+
+  const shops = sites.map((s) => ({ id: String(s._id), district: (s.district ?? '').trim(), location: s.location ?? null, lat: s.lat ?? null, lng: s.lng ?? null, pincode: s.pincode ?? null }));
+  // `district` mode: a radius so large that nothing splits inside a district.
+  const clusters = clusterShops(shops, origin, body.groupBy === 'district' ? 100000 : undefined);
+
+  const proposals = clusters.map((g) => {
+    const count = g.shops.length;
+    const warnings: string[] = [];
+    if (!origin) warnings.push('No start point is set, so in-house travel cost is not counted. Set the start point in Shop Allocation.');
+    else if (g.located === 0) warnings.push('None of these shops are on the map, so travel is not counted. Use "Locate shops from address" in Shop Allocation.');
+    else if (g.located < count) warnings.push(`${count - g.located} of ${count} shops are not on the map; their travel is not counted.`);
+    const est = estimateTrip(count, g.distanceKm, g.routeKm || undefined, startDay);
+    const inHouse = calculateLeg({ shops: count, distanceKm: g.distanceKm, routeKm: est.routeKm, tripStart: est.tripStart, tripEnd: est.tripEnd }, rates);
+
+    const options = vendors
+      .map((v) => {
+        const local = sameName(v.district, g.district) || g.towns.some((t) => sameName(v.district, t));
+        const places = [g.district, ...g.towns, ...g.pincodes].filter(Boolean);
+        const covers = local || (v.serviceAreas ?? []).some((a) => places.some((p) => sameName(a, p))) || (!!v.address && places.some((p) => normKey(p).length >= 4 && normKey(v.address ?? '').includes(normKey(p))));
+        const have = (v.skills ?? []).map((s) => s.toLowerCase());
+        const skillMatch = wanted.length === 0 || wanted.every((w) => have.some((h) => h.includes(w)));
+        const calc = calculateLeg({ shops: count, distanceKm: g.distanceKm, cardRate: v.ratePerShop, cardFarRate: v.farRatePerShop }, rates);
+        return { vendorId: String(v._id), name: v.name, covers, local, skillMatch, skills: v.skills ?? [], perShopRate: calc.vendor.perShopRate, total: calc.vendor.total, perShop: calc.vendor.perShop, needsApproval: calc.needsApproval.VENDOR, cardRate: v.ratePerShop ?? null, cardFarRate: v.farRatePerShop ?? null };
+      })
+      .filter((o) => o.covers && (o.skillMatch || !body.requireSkills))
+      .sort((a, b) => Number(a.needsApproval) - Number(b.needsApproval) || Number(b.skillMatch) - Number(a.skillMatch) || a.total - b.total || Number(b.local) - Number(a.local));
+    const best = options[0];
+    const registered = new Set(vendors.map((v) => v.zohoContactId).filter(Boolean));
+    const zohoNear = zohoMatches(zoho, [g.district, ...g.towns], g.pincodes).filter((z) => !registered.has(z.zohoContactId)).slice(0, 5);
+
+    const reasons: string[] = [];
+    let channel: Channel = 'IN_HOUSE';
+    if (!best) {
+      reasons.push(`No registered vendor covers ${g.name}${body.requireSkills && wanted.length ? ' with the needed skills' : ''}, so the in-house team is suggested.`);
+      if (zohoNear.length) reasons.push(`Zoho vendors near this area (not registered yet): ${zohoNear.slice(0, 3).map((z) => `${z.name} (${z.city || z.match.toLowerCase()})`).join(', ')}. Register one in Vendor master to give them these shops.`);
+    }
+    else {
+      const hNeeds = inHouse.needsApproval.IN_HOUSE;
+      const vNeeds = best.needsApproval;
+      channel = hNeeds === vNeeds ? (inHouse.inHouse.total <= best.total ? 'IN_HOUSE' : 'VENDOR') : hNeeds ? 'VENDOR' : 'IN_HOUSE';
+      const gap = Math.round(Math.abs(inHouse.inHouse.total - best.total));
+      reasons.push(channel === 'IN_HOUSE'
+        ? `In-house ₹${Math.round(inHouse.inHouse.total)} against ${best.name} ₹${Math.round(best.total)}: ${hNeeds === vNeeds ? `saves ₹${gap}` : 'the vendor price breaks a limit'}.`
+        : `${best.name} ₹${Math.round(best.total)} against in-house ₹${Math.round(inHouse.inHouse.total)}: ${hNeeds === vNeeds ? `saves ₹${gap}` : 'in-house breaks a limit'}.`);
+      // The in-house trip cost is mostly fixed (travel, food, stay); the vendor charges for every shop.
+      const breakEven = best.perShopRate > 0 ? Math.ceil(inHouse.inHouse.total / best.perShopRate) : 0;
+      if (breakEven > 0) reasons.push(channel === 'IN_HOUSE' ? `The team stays cheaper while one trip has at least ${breakEven} shops here (this area has ${count}).` : `The team would beat ${best.name} only with ${breakEven}+ shops in one trip (this area has ${count}).`);
+      if (best.local) reasons.push(`${best.name} is based in ${g.district}.`);
+      if (wanted.length && best.skillMatch) reasons.push(`Has the skills: ${body.skills.join(', ')}.`);
+      if (wanted.length && !best.skillMatch) reasons.push('No covering vendor has every needed skill; the cheapest is shown.');
+    }
+    reasons.push(`In-house trip: ${est.days} field day${est.days > 1 ? 's' : ''}, ${Math.max(0, est.days - 1)} night${est.days > 2 ? 's' : ''}, about ${Math.round(est.routeKm)} km (travel ₹${Math.round(inHouse.inHouse.fuel)}, food ₹${Math.round(inHouse.inHouse.food)}, stay ₹${Math.round(inHouse.inHouse.stay)}).`);
+    if (channel === 'IN_HOUSE' && inHouse.needsApproval.IN_HOUSE) reasons.push(...inHouse.reasons.filter((r) => /In-house/.test(r)));
+    const chosenTotal = channel === 'IN_HOUSE' ? inHouse.inHouse.total : best!.total;
+    return {
+      key: g.key, name: g.name, district: g.district, towns: g.towns, shops: count, located: g.located, distanceKm: g.distanceKm, routeKm: est.routeKm, siteIds: g.shops.map((s) => s.id),
+      tripStart: est.tripStart, tripEnd: est.tripEnd,
+      inHouse: { total: inHouse.inHouse.total, perShop: inHouse.inHouse.perShop, needsApproval: inHouse.needsApproval.IN_HOUSE, days: est.days, nights: Math.max(0, est.days - 1), travel: inHouse.inHouse.fuel, food: inHouse.inHouse.food, stay: inHouse.inHouse.stay },
+      vendors: options.slice(0, 3),
+      zohoNearby: zohoNear,
+      recommended: { channel, vendorId: channel === 'VENDOR' ? best!.vendorId : null, vendorName: channel === 'VENDOR' ? best!.name : null, total: chosenTotal, perShop: Math.round((chosenTotal / count) * 100) / 100 },
+      reasons, warnings,
+    };
+  });
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const totals = {
+    shops: proposals.reduce((a, p) => a + p.shops, 0),
+    areas: proposals.length,
+    suggested: round(proposals.reduce((a, p) => a + p.recommended.total, 0)),
+    allInHouse: round(proposals.reduce((a, p) => a + p.inHouse.total, 0)),
+    allVendor: round(proposals.reduce((a, p) => a + (p.vendors[0]?.total ?? p.inHouse.total), 0)),
+    inHouseShops: proposals.filter((p) => p.recommended.channel === 'IN_HOUSE').reduce((a, p) => a + p.shops, 0),
+    vendorShops: proposals.filter((p) => p.recommended.channel === 'VENDOR').reduce((a, p) => a + p.shops, 0),
+  };
+  const slim = proposals.map(({ siteIds: _ids, tripStart: _a, tripEnd: _b, ...rest }) => rest);
+  if (!body.apply) return { applied: false, groupBy: body.groupBy, proposals: slim, totals, verification: readiness };
+
+  const plan = await loadEditable(projectId, actor);
+  const legs = proposals.map((p) => {
+    const v = p.recommended.channel === 'VENDOR' ? p.vendors.find((o) => o.vendorId === p.recommended.vendorId) : undefined;
+    return {
+      key: p.key, name: p.name, district: p.district, shops: p.shops, distanceKm: p.distanceKm, routeKm: p.routeKm, deadline: isoDay(project.targetDate),
+      channel: p.recommended.channel, vendor: v ? new Types.ObjectId(v.vendorId) : null, vendorName: v?.name ?? null, cardRate: v?.cardRate ?? null, cardFarRate: v?.cardFarRate ?? null,
+      vendorOther: 0, tripStart: p.tripStart, tripEnd: p.tripEnd, clientsShared: 1, otherAmount: 0, clustered: body.groupBy === 'area', autoSelected: true,
+    };
+  });
+  // Shops carry their area so that "Confirm and assign" gives each group to its team or vendor.
+  await Site.updateMany({ project: projectId, deletedAt: null }, { $unset: { planArea: 1 } });
+  if (body.groupBy === 'area') for (const p of proposals) await Site.updateMany({ _id: { $in: p.siteIds } }, { $set: { planArea: p.key } });
+  plan.set({ legs, updatedBy: actor.id });
+  reopen(plan);
+  await plan.save();
+  await recordAudit({ actor, action: 'COST_SUGGEST_APPLY', entity: 'CostPlan', entityId: plan._id, project: projectId, reason: `${legs.length} area(s): ${totals.inHouseShops} shops in-house, ${totals.vendorShops} to vendors, ₹${totals.suggested}` });
+  return { applied: true, groupBy: body.groupBy, proposals: slim, totals, verification: readiness, plan: await getPlan(projectId) };
+}
+
+// ---------- Shop verification status and Zoho vendors near an area ----------
+
+/** How many shops are verified (Operations, and BD for a measurement project) and how many cannot be verified yet. */
+export async function verificationOf(projectId: string, requirementType?: string | null) {
+  const base = { project: projectId, deletedAt: null };
+  const [total, verified, noAddress] = await Promise.all([
+    Site.countDocuments(base),
+    Site.countDocuments({ ...base, ...verifiedFilter(requirementType) }),
+    Site.countDocuments({ ...base, ...NO_ADDRESS }),
+  ]);
+  return { total, verified, unverified: total - verified, noAddress, allVerified: total > 0 && verified === total };
+}
+export async function planReadiness(projectId: string) {
+  const project = await requireProject(projectId);
+  return verificationOf(projectId, project.requirementType);
+}
+
+interface ZohoPlace { zohoContactId: string; vendorNo?: string | null; name: string; city: string; address: string; mobile?: string | null; ratePerShop: number | null }
+/** Active Zoho vendors that have a city or address, with the price per shop typed for them (if any). */
+async function zohoVendorsWithPlace(): Promise<ZohoPlace[]> {
+  const rows = await ZohoVendor.find({ zohoStatus: 'active', $or: [{ city: { $nin: [null, ''] } }, { address: { $nin: [null, ''] } }] }).select('zohoContactId vendorNo name city address mobile').lean();
+  const prices = await VendorPrice.find({ zohoContactId: { $in: rows.map((r) => r.zohoContactId) } }).select('zohoContactId ratePerShop').lean();
+  const price = new Map(prices.map((p) => [p.zohoContactId, p.ratePerShop ?? null]));
+  return rows.map((r) => ({ zohoContactId: r.zohoContactId, vendorNo: r.vendorNo ?? null, name: r.name, city: r.city ?? '', address: r.address ?? '', mobile: r.mobile ?? null, ratePerShop: price.get(r.zohoContactId) ?? null }));
+}
+
+/**
+ * Zoho vendors that work near an area, found from the shops' area (town), district and pincode against the vendor's city and
+ * address: the same town or pincode first, then the same district. Used when an address cannot be placed on the map.
+ */
+function zohoMatches(list: ZohoPlace[], places: string[], pincodes: string[]) {
+  const [district, ...towns] = places;
+  const out: (ZohoPlace & { match: 'AREA' | 'DISTRICT' })[] = [];
+  const has = (hay: string, needle?: string) => !!needle && normKey(needle).length >= 4 && normKey(hay).includes(normKey(needle));
+  for (const z of list) {
+    const hay = `${z.city} ${z.address}`;
+    const area = towns.some((t) => has(hay, t)) || pincodes.some((p) => p.length >= 6 && hay.replace(/\s/g, '').includes(p));
+    if (area) out.push({ ...z, match: 'AREA' });
+    else if (has(hay, district)) out.push({ ...z, match: 'DISTRICT' });
+  }
+  return out.sort((a, b) => Number(b.match === 'AREA') - Number(a.match === 'AREA') || (a.ratePerShop ?? Infinity) - (b.ratePerShop ?? Infinity) || a.name.localeCompare(b.name));
 }

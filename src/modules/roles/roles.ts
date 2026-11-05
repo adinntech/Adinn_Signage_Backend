@@ -44,6 +44,11 @@ export const PERMISSIONS = [
   'jobs:read',
   // Import existing clients from Zoho Books into the client master (SUPER_ADMIN).
   'zoho:sync',
+  // Adinn Connect: team channels, project channels and direct messages. Every web role has it; what each person can see is decided per channel.
+  'connect:use',
+  // Recce cost module: submit own trip claims / review them (Admin edits the rates with finance:manage).
+  'recce-cost:submit',
+  'recce-cost:review',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -51,18 +56,18 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: PERMISSIONS,
   // Client Servicing: the orders BD hands over to them (scoped to their own orders in the sales module) and the clients.
   // Add more permissions here as its modules are built.
-  // ratecards:create: Rate Card Creation (master rates are read, never changed: no ratecards:manage); not sales:write.
-  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:create'],
-  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client'],
+  // projects:* and clients:write let Client Servicing use the same Create & Assign Project wizard BD has (new client, project, assignment).
+  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:create', 'clients:write', 'projects:read', 'projects:write', 'connect:use'],
+  BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client', 'connect:use'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',
-    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read',
+    'assignments:manage', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use', 'recce-cost:submit', 'recce-cost:review',
   ],
-  RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute'],
+  RECCE_EXECUTIVE: ['dashboard:view', 'jobs:read', 'sites:read', 'sites:capture', 'field:execute', 'recce-cost:submit'],
   VENDOR: ['dashboard:view', 'sites:read', 'field:execute'],
-  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read'],
-  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read'],
-  MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read'],
+  OPERATIONS: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'verification:manage', 'vendors:manage', 'reports:read', 'connect:use', 'recce-cost:submit', 'recce-cost:review'],
+  FINANCE: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'finance:manage', 'reports:read', 'connect:use', 'recce-cost:review'],
+  MANAGEMENT: ['dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'sites:read', 'reports:read', 'connect:use'],
 };
 
 export const permissionsFor = (role: Role): readonly Permission[] => ROLE_PERMISSIONS[role];
@@ -114,3 +119,18 @@ export const LOGIN_ROLE_GROUPS: Record<LoginRoleKey, readonly Role[]> = {
   CLIENT_SERVICING: ['CLIENT_SERVICING'],
   ADMIN: ['SUPER_ADMIN', 'MANAGEMENT'],
 };
+
+// Numeric user type shown to clients, derived from the role (never stored): 0 Admin, 1 Operations / Recce operations,
+// 2 BD, 3 Client Servicing, 4 field staff (Recce executive, Vendor). Finance has no login card, so no type.
+export const USER_TYPE_BY_ROLE: Record<Role, 0 | 1 | 2 | 3 | 4 | null> = {
+  SUPER_ADMIN: 0,
+  MANAGEMENT: 0,
+  OPERATIONS: 1,
+  RECCE_COORDINATOR: 1,
+  BD: 2,
+  CLIENT_SERVICING: 3,
+  RECCE_EXECUTIVE: 4,
+  VENDOR: 4,
+  FINANCE: null,
+};
+export const userTypeOf = (role: Role) => USER_TYPE_BY_ROLE[role];
