@@ -150,6 +150,14 @@ export function latestDetails(x: { clientDetails?: unknown }): ClientDetails | n
   return d ? (d.toObject?.() ?? { ...d }) : null;
 }
 
+type ContactLike = { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null };
+/**
+ * The contact persons of an order: the client's own (Zoho / Client Management) when it has any, otherwise the ones
+ * saved for this order only (orderContacts, Assign Type & Details). SO contacts are never part of this.
+ */
+export const contactPersonsOf = (client: { contacts?: ContactLike[] | null } | null | undefined, o: { orderContacts?: ContactLike[] | null }): ContactLike[] =>
+  client?.contacts?.length ? client.contacts : (o.orderContacts ?? []);
+
 /** The client's name only (notifications, file folders). */
 export const clientNameOf = async (x: WithClient) => (await clientOf(x))?.name ?? null;
 

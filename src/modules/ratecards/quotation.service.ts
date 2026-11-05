@@ -6,7 +6,7 @@ import { AppError } from '../../common/errors';
 import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { clientOf } from '../clients/clientDetails';
+import { clientOf, contactPersonsOf } from '../clients/clientDetails';
 import { discardStoredFiles, storeEmbeddedFile } from '../files/file.service';
 import { mailAvailable } from '../notifications/mail.service';
 import { orderArray } from '../sales/order.service';
@@ -163,7 +163,10 @@ export async function getQuotation(orderId: string, actor: Actor) {
   const labelled = revisions.map((r) => ({ ...r, label: revisionLabel(r.revision) }));
   const latest = labelled[0] ?? null;
   const me = await User.findById(actor.id).select('name email phone').lean();
-  const primary = client.contacts?.find((c) => c.isPrimary) ?? client.contacts?.[0];
+  // Contact Person prefill: the client's primary contact (else its first); a Zoho client without contacts uses this
+  // order's saved contact persons the same way (primary, else the first). SO contacts are not used here.
+  const persons = contactPersonsOf(client, order);
+  const primary = persons.find((c) => c.isPrimary) ?? persons[0];
   // Rate Card step (Client Servicing): Bill To is the full address; elsewhere the city, as on the ADINN rate card.
   const fullAddress = fullAddressOf(client);
   const step = !!order.recce?.rateCardRequired;
@@ -173,7 +176,7 @@ export async function getQuotation(orderId: string, actor: Actor) {
         clientName: client.name,
         // "Bill To" shows the city under the company name, as on the ADINN rate card.
         clientAddress: step ? fullAddress || client.city || '' : client.city || addressOf(client),
-        contact: primary ? { name: primary.name, designation: primary.designation ?? '', phone: primary.phone ?? '', email: primary.email ?? '' } : { name: '', designation: '', phone: '', email: '' },
+        contact: primary ? { name: primary.name ?? '', designation: primary.designation ?? '', phone: primary.phone ?? '', email: primary.email ?? '' } : { name: '', designation: '', phone: '', email: '' },
         quotationDate: new Date(),
         subject: 'Signage Rate Card',
         items: [],

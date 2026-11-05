@@ -5,7 +5,7 @@ import { AppError } from '../../common/errors';
 import { type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { clientNameOf, clientOf } from '../clients/clientDetails';
+import { clientNameOf, clientOf, contactPersonsOf } from '../clients/clientDetails';
 import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
@@ -285,12 +285,8 @@ export async function setSoContacts(id: string, contacts: SoContact[], actor: Ac
 type OrderContact = { name: string; designation?: string | undefined; phone: string; email?: string | undefined; isPrimary: boolean };
 type ContactLike = { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null };
 
-/**
- * The contact persons of an order: the client's own (Zoho / Client Management) when it has any, otherwise the ones
- * saved for this order only (orderContacts).
- */
-export const contactPersonsOf = (client: { contacts?: ContactLike[] | null } | null | undefined, o: { orderContacts?: ContactLike[] | null }): ContactLike[] =>
-  client?.contacts?.length ? client.contacts : (o.orderContacts ?? []);
+/** The client's contact persons, or this order's own when the client has none (shared with recce.service). */
+export { contactPersonsOf };
 
 /**
  * Zoho client without contact persons: saves this order's contact persons (validated and given one primary by
