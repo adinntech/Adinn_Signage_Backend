@@ -1,5 +1,6 @@
 import { Types } from 'mongoose';
 import type { z } from 'zod';
+import { COMPANY } from '../../config/company';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { escapeHtml, sanitizeHtml } from '../../common/html';
@@ -23,7 +24,7 @@ import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
 import type { recceAssignBody, recceCodesBody, sendEmailBody } from './sales.validators';
-import { signageMailAvailable } from './signageMail';
+import { safeNames, signageMailAvailable } from './signageMail';
 
 /** Recce / Operations people a project can be assigned to (same rule as the projects module). */
 export const recceUsers = () =>
@@ -179,9 +180,40 @@ export async function getRecce(id: string, actor: Actor) {
   // Active Client Servicing flow: their clients are all Zoho clients, shown as "Client" (no Existing / New flag).
   const csWording = isCs(actor) && existing;
   const typeLabel = o.handoverType ? HANDOVER_TYPE_LABELS[o.handoverType as HandoverType] : 'To be confirmed';
-  const shops = shopRows ? `${shopRows} shops` : o.handoverType === 'ASO' ? 'ASO (shop details to be collected)' : 'To be confirmed';
-  // Plain lines (no table): the composer's rich-text editor keeps paragraphs, line breaks and bold only.
-  const row = (k: string, v: string) => `${k}: <strong>${escapeHtml(v)}</strong>`;
+  const shops = shopRows ? `${shopRows} shop${shopRows === 1 ? '' : 's'}${o.handoverType === 'SHOP_MEASUREMENT' ? ' (with sizes)' : ''}` : o.handoverType === 'ASO' ? 'Shop details to be collected' : null;
+  // Email body: plain headings, paragraphs and label / value tables (no attributes); the send adds the email styling.
+  const esc = (v: string) => escapeHtml(v);
+  const filled = (v: string | null | undefined): v is string => !!v && !!String(v).trim();
+  /** Label / value rows; empty values are left out (no table when none is left). */
+  const rows = (list: [string, string | null | undefined][]) => {
+    const kept = list.filter((x): x is [string, string] => filled(x[1]));
+    return kept.length ? `<table><tbody>${kept.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('')}</tbody></table>` : '';
+  };
+  /** One row per person; a column nobody has a value for is left out. */
+  const grid = <T,>(list: T[], cols: [string, (x: T) => string | null | undefined][]) => {
+    const used = cols.filter(([, f]) => list.some((x) => filled(f(x))));
+    if (!list.length || !used.length) return '';
+    const head = `<tr>${used.map(([h]) => `<th>${esc(h)}</th>`).join('')}</tr>`;
+    const body = list.map((x) => `<tr>${used.map(([, f]) => `<td>${filled(f(x)) ? esc(f(x)!) : '—'}</td>`).join('')}</tr>`).join('');
+    return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  };
+  const section = (title: string, inner: string) => (inner ? `<h3>${esc(title)}</h3>${inner}` : '');
+  const mobile = (p?: string | null) => (p ? `+91 ${p}` : null);
+  // Full address: the street, then city / state / PIN when the street does not already contain them.
+  const street = client?.address?.trim() ?? '';
+  const address = [street, ...[client?.city, client?.state, client?.pincode].map((p) => p?.trim()).filter((p): p is string => !!p && !street.toLowerCase().includes(p.toLowerCase()))]
+    .filter(Boolean)
+    .join(', ');
+  // Attachments as the API names them (same order as the send: rate card, shop Excel, documents, GST certificates).
+  const shopExcel = shopRows ? { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } : null;
+  const files = [
+    ...(rcPdf ? [{ file: rcPdf, note: `Rate Card ${revisionLabel(inc!.revision)}` }] : []),
+    ...(shopExcel ? [{ file: shopExcel, note: `Shop list, ${shops}` }] : []),
+    ...docs.map((f) => ({ file: f, note: soDocs.some((x) => String(x.fileId) === String(f.fileId)) ? 'SO document' : null })),
+    ...certs.map((f) => ({ file: f, note: 'GST certificate' })),
+  ];
+  const fileNames = safeNames(files.map((x) => x.file));
+  const team = isCs(actor) ? 'Client Servicing Team' : 'Business Development Team';
   return {
     orderId: String(o._id),
     orderNo: o.orderNo,
@@ -244,36 +276,53 @@ export async function getRecce(id: string, actor: Actor) {
       cc: [] as string[],
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
       subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
-      // Formal layout: greeting, the request, client details, project details, contacts, attachments, sign-off. Plain
-      // paragraphs and line breaks only (no lists), so the editor keeps it as written.
+      // Heading, greeting and request, client details, project details, contacts (SO contacts for SO), attachments,
+      // closing and sign-off. Empty sections and fields are left out.
       body:
+        `<h2>${existing ? 'Project &amp; Estimation Code Request' : 'Client ID, Project &amp; Estimation Code Request'}</h2>` +
         `<p>Dear Team,</p>` +
         (existing
-          ? `<p>Kindly create the project code and estimation code for the order below, under the ${csWording ? '' : 'existing '}Client ID <strong>${escapeHtml(zohoNo ?? '-')}</strong>.</p>`
+          ? `<p>Kindly create the project code and estimation code for the following order under ${csWording ? '' : 'the existing '}Client ID <strong>${escapeHtml(zohoNo ?? '-')}</strong>.</p>`
           : `<p>This is a new client. Kindly create the <strong>client ID in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below. The GST certificate and the client's details are included for the client ID.</p>`) +
-        `<p><strong>Client details</strong><br>${[
-          row('Client', client?.name ?? '-'),
-          // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
-          ...(existing ? [row('Client ID', zohoNo ?? '-')] : [row('Client ID', 'To be created in Zoho'), row('CRM Reference (temporary)', client?.clientNo ?? '-')]),
-          ...(csWording ? [] : [row('Client Flag', existing ? 'Existing Client' : 'New Client')]),
-          row('Email', client?.email ?? '-'),
-          row('Phone', client?.phone ?? '-'),
-          row('GST Number', client?.gstin ?? '-'),
-          ...custom.map((f) => row(f.label!, f.value!)),
-        ].join('<br>')}</p>` +
-        `<p><strong>Project details</strong><br>${[row('Order No', o.orderNo), row('Assign Type', typeLabel), row('Shops', shops)].join('<br>')}</p>` +
-        `<p><strong>Contact persons</strong><br>${
-          contacts.length
-            ? contacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.designation, k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')
-            : 'None added'
-        }</p>` +
-        (o.handoverType === 'ASO' && o.soContacts?.length
-          ? `<p><strong>SO contacts</strong><br>${o.soContacts.map((k) => escapeHtml([k.name + (k.isPrimary ? ' (primary)' : ''), k.phone ? `+91 ${k.phone}` : null, k.email].filter(Boolean).join(' · '))).join('<br>')}</p>`
+        section(
+          'Client Details',
+          rows([
+            ['Company Name', client?.name],
+            // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
+            ...(existing ? [['Client ID', zohoNo] as [string, string | null | undefined]] : [['Client ID', 'To be created in Zoho'] as [string, string], ['CRM Reference (temporary)', client?.clientNo] as [string, string | null | undefined]]),
+            ...(csWording ? [] : [['Client Flag', existing ? 'Existing Client' : 'New Client'] as [string, string]]),
+            ['Email', client?.email],
+            ['Phone', client?.phone],
+            ['GST Number', client?.gstin],
+            ['Address', address],
+            ...custom.map((f) => [f.label!, f.value!] as [string, string]),
+          ]),
+        ) +
+        section('Project Details', rows([['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]])) +
+        section(
+          'Contact Persons',
+          grid(contacts, [
+            ['Name', (k) => k.name],
+            ['Designation', (k) => k.designation],
+            ['Mobile', (k) => mobile(k.phone)],
+            ['Email', (k) => k.email],
+            ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+          ]),
+        ) +
+        (o.handoverType === 'ASO'
+          ? section(
+              'SO Contacts',
+              grid(o.soContacts ?? [], [
+                ['Name', (k) => k.name],
+                ['Mobile', (k) => mobile(k.phone)],
+                ['Email', (k) => k.email],
+                ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+              ]),
+            )
           : '') +
-        (shopRows || docs.length || certs.length || rcPdf
-          ? `<p><strong>Attachments</strong><br>${[rcPdf ? `Rate Card (${revisionLabel(inc!.revision)}) PDF` : null, shopRows ? `Shop list Excel (${shopRows} shops${o.handoverType === 'SHOP_MEASUREMENT' ? ', with sizes' : ''})` : null, certs.length ? `GST certificate${certs.length === 1 ? '' : 's'}` : null, soDocs.length ? `${soDocs.length} SO additional document${soDocs.length === 1 ? '' : 's'}` : null, docs.length > soDocs.length ? `${docs.length - soDocs.length} document${docs.length - soDocs.length === 1 ? '' : 's'} from the communication` : null].filter(Boolean).join('<br>')}</p>`
-          : '') +
-        `<p>Regards,<br>${escapeHtml(bd?.name ?? 'BD Team')}</p>`,
+        section('Attachments', files.length ? `<ul>${files.map((x, i) => `<li>${esc(fileNames[i]!)}${x.note ? ` (${esc(x.note)})` : ''}</li>`).join('')}</ul>` : '') +
+        `<p>Kindly share the generated codes to proceed with the Recce/Operations assignment.</p>` +
+        `<p>Regards,<br><strong>${esc(bd?.name ?? team)}</strong><br>${team}<br>${esc(COMPANY.name)}</p>`,
     },
   };
 }

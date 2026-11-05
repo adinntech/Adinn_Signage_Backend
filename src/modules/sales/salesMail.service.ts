@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import type { z } from 'zod';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
-import { escapeHtml, htmlToText, sanitizeHtml } from '../../common/html';
+import { escapeHtml, htmlToText, sanitizeHtml, styledEmailHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
@@ -87,7 +87,8 @@ async function deliverOnce(rec: DeliverInput) {
   const php = rec.kind === 'ONBOARDING';
   // Project code request: the signage email API (not SMTP).
   const signage = rec.kind === 'PROJECT_CODE_REQUEST';
-  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
+  // Project code request: the email-safe layout (inline styles, tables); the others as before.
+  const html = signage ? styledEmailHtml(rec.body) : `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#102449">${rec.body}</div>`;
   let requestId: string | undefined;
   let apiPayload: ReturnType<typeof signagePayload> | undefined;
   let apiResponse: string | undefined;

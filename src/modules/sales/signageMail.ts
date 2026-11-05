@@ -41,7 +41,7 @@ const EXT_OF: Record<string, string> = {
  * plus one lowercase extension, e.g. "ADINN-QTN-2026-1_v1.0.pdf" -> "ADINN-QTN-2026-1_v1_0.pdf",
  * "Shop list (12).xlsx" -> "Shop_list_12.xlsx". Names are made unique within the email.
  */
-function safeNames(files: { name?: string | null; mimeType?: string | null }[]) {
+export function safeNames(files: { name?: string | null; mimeType?: string | null }[]) {
   const used = new Set<string>();
   return files.map((f) => {
     const raw = (f.name ?? '').trim();
