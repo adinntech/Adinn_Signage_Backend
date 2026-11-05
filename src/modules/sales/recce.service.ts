@@ -18,7 +18,7 @@ import { revisionLabel } from '../ratecards/ratecard.model';
 import type { quotationBody } from '../ratecards/ratecard.validators';
 import { User } from '../users/user.model';
 import { getZohoClient } from '../zoho/zoho.customers';
-import { claimRoute, clientSnapshot, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, routeOf } from './handover.service';
+import { claimRoute, clientSnapshot, contactPersonsOf, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, routeOf } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -125,7 +125,7 @@ async function includedRateCard(orderId: Types.ObjectId, r: RateCardFlow) {
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientDetails clientType lead recce csAssignee assignRoute handoverFull handoverType handoverUpdatedAt soContacts shopList declaredShopTotal handoverMessagesArray.attachments handoverDocumentsArray salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientDetails clientType lead recce csAssignee assignRoute handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopList declaredShopTotal handoverMessagesArray.attachments handoverDocumentsArray salesprofile.kind salesprofile.status salesprofile.sentAt')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -141,7 +141,8 @@ export async function getRecce(id: string, actor: Actor) {
     : null;
   const existing = o.clientType === 'EXISTING';
   const zohoNo = existing ? await zohoClientIdOf(client) : (client?.zohoCustomerNo ?? null);
-  const contacts = client?.contacts ?? [];
+  // The client's contact persons, or this order's own when the Zoho client has none.
+  const contacts = contactPersonsOf(client, o);
   // The Recce team always gets the full handover (there is no "client details only" option here).
   const handoverMissing = handoverGaps({ ...o, handoverFull: true });
   const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
@@ -538,7 +539,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
   // Contact persons are optional. Those with a mobile and an email go on the project (ASO: the SO contacts too).
   const so = o.handoverType === 'ASO' ? (o.soContacts ?? []) : [];
-  const contacts = [...(client?.contacts ?? []), ...so]
+  const contacts = [...contactPersonsOf(client, o), ...so]
     .filter((k) => k.name && k.phone && k.email)
     .map((k) => ({ name: k.name!, email: k.email!, phone: k.phone! }))
     .filter((k, i, all) => all.findIndex((x) => x.phone === k.phone || x.email === k.email) === i)

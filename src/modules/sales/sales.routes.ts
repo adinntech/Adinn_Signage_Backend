@@ -67,6 +67,8 @@ salesRouter.patch('/orders/:id/handover/scope', write, c.handoverScope);
 salesRouter.patch('/orders/:id/handover/type', csFlow, c.handoverType);
 // SO (stored as ASO): the client's SO contacts (saved as one list)
 salesRouter.put('/orders/:id/handover/so-contacts', csFlow, c.soContacts);
+// Contact persons for this order only (Zoho client without contact persons)
+salesRouter.put('/orders/:id/handover/order-contacts', csFlow, c.orderContacts);
 // SO: Additional Documents (optional, apart from the chat files)
 salesRouter.post('/orders/:id/handover/so-documents', csFlow, receive, c.addSoDocuments);
 salesRouter.delete('/orders/:id/handover/so-documents/:fileId', csFlow, c.removeSoDocument);

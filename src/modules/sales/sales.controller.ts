@@ -29,6 +29,7 @@ import {
   shopRowBody,
   shopUploadBody,
   soContactsBody,
+  orderContactsBody,
   leadCandidatesQuery,
   leadListQuery,
   leadMoveBody,
@@ -146,6 +147,7 @@ export const removeMessage = asyncHandler(async (req, res) => ok(res, await hand
 export const handoverScope = asyncHandler(async (req, res) => ok(res, await handover.setHandoverScope(id(req), handoverScopeBody.parse(req.body).full, actorOf(req))));
 export const handoverType = asyncHandler(async (req, res) => ok(res, await handover.setHandoverType(id(req), handoverTypeBody.parse(req.body).type, actorOf(req))));
 export const soContacts = asyncHandler(async (req, res) => ok(res, await handover.setSoContacts(id(req), soContactsBody.parse(req.body).contacts, actorOf(req))));
+export const orderContacts = asyncHandler(async (req, res) => ok(res, await handover.setOrderContacts(id(req), orderContactsBody.parse(req.body).contacts, actorOf(req))));
 export const addSoDocuments = asyncHandler(async (req, res) => ok(res, await handover.addSoDocuments(id(req), uploaded(req), actorOf(req)), undefined, 201));
 export const removeSoDocument = asyncHandler(async (req, res) => ok(res, await handover.removeSoDocument(id(req), objectId.parse(req.params.fileId), actorOf(req))));
 export const addShopFiles = asyncHandler(async (req, res) => ok(res, await handover.addShopFiles(id(req), rowId(req), uploaded(req), actorOf(req)), undefined, 201));

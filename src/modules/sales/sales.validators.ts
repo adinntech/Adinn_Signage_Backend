@@ -154,6 +154,34 @@ export const soContactsBody = z.object({
       return list.map((c, i) => ({ ...c, isPrimary: i === p }));
     }),
 });
+/**
+ * Contact persons of this order (Zoho client without contact persons). Completely blank rows are dropped; a contact
+ * that is kept needs a name and a mobile number, designation and email are optional. One is primary (the first one
+ * when none is marked). An empty list is fine: the section is optional.
+ */
+export const orderContactsBody = z.object({
+  contacts: z
+    .array(z.object({ name: z.string().optional(), designation: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional() }))
+    .max(50, 'Up to 50 contact persons')
+    .transform((list) => list.filter((c) => [c.name, c.designation, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
+    .pipe(
+      z
+        .array(
+          z.object({
+            name: z.string().trim().min(1, 'Enter the contact person').max(120),
+            designation: z.string().trim().max(120).optional().transform((v) => v || undefined),
+            phone: mobileRule,
+            email: optionalEmail,
+            isPrimary: z.boolean().optional(),
+          }),
+        )
+        .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),
+    )
+    .transform((list) => {
+      const p = Math.max(0, list.findIndex((c) => c.isPrimary));
+      return list.map((c, i) => ({ ...c, isPrimary: i === p }));
+    }),
+});
 export const rowIdParam = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid row id');
 export const assignCsBody = z.object({
   csUserId: objectId,

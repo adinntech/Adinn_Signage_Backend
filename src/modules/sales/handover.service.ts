@@ -94,7 +94,7 @@ export function handoverGaps(o: GapInput): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
@@ -122,6 +122,8 @@ export async function getHandover(id: string) {
     messages: o.handoverMessagesArray ?? [],
     /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
     soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** Contact persons saved for this order only (used while the Zoho client has none). */
+    orderContacts: (o.orderContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
     /** SO: Additional Documents (kept apart from chat files; kept when the type changes, shown for SO only), oldest first. */
     soDocuments: o.handoverType === 'ASO' ? soDocumentsOf(o) : [],
     updatedAt: o.handoverUpdatedAt ?? null,
@@ -276,6 +278,40 @@ export async function setSoContacts(id: string, contacts: SoContact[], actor: Ac
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   if (before.join('\n') !== after.join('\n')) {
     await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `SO contacts saved (${contacts.length})` });
+  }
+  return getHandover(id);
+}
+
+type OrderContact = { name: string; designation?: string | undefined; phone: string; email?: string | undefined; isPrimary: boolean };
+type ContactLike = { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null };
+
+/**
+ * The contact persons of an order: the client's own (Zoho / Client Management) when it has any, otherwise the ones
+ * saved for this order only (orderContacts).
+ */
+export const contactPersonsOf = (client: { contacts?: ContactLike[] | null } | null | undefined, o: { orderContacts?: ContactLike[] | null }): ContactLike[] =>
+  client?.contacts?.length ? client.contacts : (o.orderContacts ?? []);
+
+/**
+ * Zoho client without contact persons: saves this order's contact persons (validated and given one primary by
+ * orderContactsBody). Kept on the order only; Zoho and the client record are not changed. Optional (an empty list
+ * clears them) and never needed to continue or assign.
+ */
+export async function setOrderContacts(id: string, contacts: OrderContact[], actor: Actor) {
+  const o = await liveOrder(id);
+  assertEditable(o, actor);
+  // Only while the client itself has no contact persons (Zoho's are used then, and this section is hidden).
+  if ((await clientOf(o))?.contacts?.length) throw AppError.conflict('This client already has contact persons in Zoho; they are used for this order.');
+  await handoverRoute(o);
+  const line = (k: ContactLike) => [k.name, k.designation, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
+  const before = (o.orderContacts ?? []).map(line);
+  const after = contacts.map(line);
+  const r = await SalesOrder.updateOne(openFilter(o, actor), {
+    $set: { orderContacts: contacts.map((k) => ({ ...k, designation: k.designation ?? null, email: k.email ?? null })), updatedBy: actor.id },
+  });
+  if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
+  if (before.join('\n') !== after.join('\n')) {
+    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'orderContacts', oldValue: before, newValue: after }], reason: `Order contact persons saved (${contacts.length})` });
   }
   return getHandover(id);
 }
@@ -1200,7 +1236,7 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
-export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null }) {
+export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null; orderContacts?: ContactLike[] | null }) {
   // The Client record, or the client kept on the order (Client Servicing).
   const c = await clientOf(o);
   if (!c) return null;
@@ -1217,7 +1253,8 @@ export async function clientSnapshot(o: { client: unknown; clientDetails?: unkno
     gstin: c.gstin,
     gstCertificates: crm ? (c.gstCertificates ?? []) : undefined,
     customFields: crm ? (c.customFields ?? []).map((f) => ({ label: f.label, value: f.value })) : undefined,
-    contacts: (c.contacts ?? []).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
+    // The client's contact persons, or this order's own when the Zoho client has none.
+    contacts: contactPersonsOf(c, o).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
     soContacts: o.handoverType === 'ASO' ? (o.soContacts ?? []).map((k) => ({ name: k.name, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
     takenAt: new Date(),
   };
@@ -1246,7 +1283,7 @@ export async function assignClientServicing(id: string, input: { csUserId: strin
   const note = `Handed over to ${cs.name} (Client Servicing) · ${typeLabel}`;
   const now = new Date();
   // Toggle off: client details and contact persons only (no SO contacts).
-  const snapshot = await clientSnapshot({ client: o.client, clientType: o.clientType, handoverType: full ? o.handoverType : null, soContacts: o.soContacts });
+  const snapshot = await clientSnapshot({ client: o.client, clientType: o.clientType, handoverType: full ? o.handoverType : null, soContacts: o.soContacts, orderContacts: o.orderContacts });
   // Assigning is the Project Assign step: the lead is completed in the same write.
   const lead = o.lead?.status === 'OPEN' && o.lead.stage === 'PROJECT_ASSIGN';
   // Conditional on the checked state: a list replaced, a type or the toggle changed meanwhile is not handed over unverified.

@@ -291,6 +291,11 @@ const orderSchema = new Schema(
     /** ASO: the client's SO (sales officer) contacts, kept apart from the client's contact persons. */
     soContacts: { type: [new Schema({ name: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
     /**
+     * Contact persons added for this order only, when the Zoho client has none (Client Servicing, Recce Team > Assign
+     * Type & Details). Never written to Zoho or the client record; used only while the Zoho client has no contacts.
+     */
+    orderContacts: { type: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
+    /**
      * Project Assign route, taken by the first save on it: HANDOVER (Client Servicing: handover details) or RECCE
      * (Recce team: project code request email). The other route is then disabled.
      */
