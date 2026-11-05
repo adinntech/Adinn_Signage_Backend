@@ -17,7 +17,9 @@ echo '<div style="font-size:11px;color:#6a7890;margin-bottom:6px;letter-spacing:
 echo '<div style="display:inline-block;background:#ffffff;border:1px solid #d6e4fa;border-radius:8px;padding:10px 12px 10px 22px"><span style="font-family:Consolas,\'Courier New\',monospace;font-size:30px;font-weight:600;letter-spacing:10px;color:#10244a;-webkit-user-select:all;user-select:all;cursor:copy">'.esc($code).'</span></div>';
 /* A mail cannot copy by itself: the button opens copy.html (a static page next to index_signage.php) that copies the code from the #fragment, which never reaches a server log. */
 $copyUrl=rtrim((string)($config['copy_url']??''),'#').'#'.$code;
-echo '<div style="margin-top:12px"><a href="'.esc($copyUrl).'" target="_blank" style="display:inline-block;background-color:#7c3aed;background-image:linear-gradient(90deg,#7c3aed,#f26b3a);color:#ffffff;font-size:13px;font-weight:600;text-decoration:none;border-radius:8px;padding:10px 22px">Copy code &nbsp;&#128203;</a></div>';
+/* Where the mail client runs inline script (a few do; Gmail, Outlook and Apple Mail strip it) the click copies the code right here; everywhere else the link opens copy.html. */
+$onclick="try{navigator.clipboard.writeText('".$code."');this.innerHTML='Copied! &#10003;';return false;}catch(e){}";
+echo '<div style="margin-top:12px"><a href="'.esc($copyUrl).'" onclick="'.esc($onclick).'" target="_blank" style="display:inline-block;background-color:#7c3aed;background-image:linear-gradient(90deg,#7c3aed,#f26b3a);color:#ffffff;font-size:13px;font-weight:600;text-decoration:none;border-radius:8px;padding:10px 22px">Copy code &nbsp;&#128203;</a></div>';
 echo '<div style="font-size:11px;color:#6a7890;margin-top:8px">Opens a page that copies the code. You can also select the code above.</div>';
 echo '<div style="font-size:11px;color:#6a7890;margin-top:4px">Valid for '.esc((string)$mins).' minutes &middot; can be used once</div>';
 echo '</td></tr></table>';
