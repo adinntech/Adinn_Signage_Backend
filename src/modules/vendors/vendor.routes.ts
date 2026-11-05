@@ -11,6 +11,7 @@ import { exportZohoVendors, listZohoVendors, startZohoVendorSync, zohoExportQuer
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
+import { lookupPincode, pincodeParam } from './pincode.service';
 import { addVendorSkill, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
@@ -34,6 +35,7 @@ const sheet = (res: import('express').Response, buffer: Buffer, name: string) =>
 export const vendorRouter = Router();
 vendorRouter.get('/', ...read, asyncHandler(async (req, res) => { const r = await svc.listVendors(svc.vendorListQuery.parse(req.query)); ok(res, r.items, { ...r.meta, summary: r.summary }); }));
 vendorRouter.get('/gst/:gstin', ...read, asyncHandler(async (req, res) => ok(res, await svc.verifyGstin(String(req.params.gstin)))));
+vendorRouter.get('/pincode/:pin', ...read, asyncHandler(async (req, res) => ok(res, await lookupPincode(pincodeParam.parse(req.params).pin))));
 vendorRouter.get('/types', ...read, asyncHandler(async (_req, res) => ok(res, await svc.listVendorTypes())));
 vendorRouter.post('/types', ...write, asyncHandler(async (req, res) => ok(res, await svc.addVendorType(svc.vendorTypeBody.parse(req.body), actorOf(req)), undefined, 201)));
 vendorRouter.get('/skills', ...read, asyncHandler(async (_req, res) => ok(res, await listVendorSkills())));

@@ -18,9 +18,12 @@ import { User } from '../users/user.model';
 import { ZohoVendor } from '../zoho/zohoVendor.model';
 import { VendorPrice } from './vendorPrice.model';
 import { VendorTypeOption } from './vendorType.model';
+import { lookupGst } from './gstPortal.service';
 
 const PAN_RE = /^[A-Z]{5}\d{4}[A-Z]$/;
 const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+const PINCODE_RE = /^[1-9]\d{5}$/;
+const AADHAAR_RE = /^[2-9]\d{11}$/;
 const opt = (max: number) => z.string().trim().max(max).optional().or(z.literal('').transform(() => undefined));
 const rate = z.coerce.number().min(0).max(100000).optional().or(z.literal('').transform(() => undefined));
 
@@ -30,13 +33,21 @@ export const vendorBody = z.object({
   /** The vendor type chosen in the form (a VendorTypeOption name). Its rule class overrides `type`. */
   typeName: opt(60),
   contactPerson: opt(120),
+  designation: opt(80),
   mobile: z.string().trim().min(1, 'Enter the mobile number').max(40),
   mobileAlt: opt(40),
   email: z.string().trim().toLowerCase().email('Enter a valid email').optional().or(z.literal('').transform(() => undefined)),
   gstin: opt(30),
   pan: opt(20),
   address: opt(400),
+  pincode: opt(10),
+  state: opt(60),
   district: opt(120),
+  aadhaar: opt(20),
+  /** Does the vendor have a GST number? Sent by the registration form; it decides the mandatory documents. */
+  hasGst: z.boolean().optional(),
+  /** The full registration form (not quick registration): every detail below is mandatory. Not stored. */
+  fullDetails: z.boolean().optional(),
   serviceAreas: z.array(z.string().trim().min(1).max(80)).max(60).optional(),
   skills: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
   bank: z.object({ accountName: opt(120), accountNo: opt(30), ifsc: opt(20) }).optional(),
@@ -63,7 +74,7 @@ export const vendorListQuery = listQuery.extend({
 export const statusBody = z
   .object({ status: z.enum(VENDOR_STATUSES), reason: z.string().trim().max(500).optional() })
   .refine((v) => !['INACTIVE', 'BLACKLISTED'].includes(v.status) || !!v.reason, { path: ['reason'], message: 'Give the reason' });
-export const kycBody = z.object({ pan: z.boolean().optional(), gst: z.boolean().optional(), bank: z.boolean().optional(), address: z.boolean().optional() });
+export const kycBody = z.object({ pan: z.boolean().optional(), gst: z.boolean().optional(), bank: z.boolean().optional(), address: z.boolean().optional(), aadhaar: z.boolean().optional() });
 
 export type VendorInput = z.infer<typeof vendorBody>;
 export type Issue = { field: string; message: string };
@@ -78,6 +89,8 @@ export function checkVendor(raw: Partial<VendorInput>): { value: Partial<VendorI
   else { v.mobile = phone.primary; if (phone.alt && !v.mobileAlt) v.mobileAlt = phone.alt; }
   if (raw.mobileAlt) { const a = normalisePhone(raw.mobileAlt); if (a.primary) v.mobileAlt = a.primary; else errors.push({ field: 'mobileAlt', message: 'Invalid alternate mobile number' }); }
   if (raw.gstin) { const g = raw.gstin.toUpperCase().replace(/\s/g, ''); if (GST_RE.test(g)) v.gstin = g; else errors.push({ field: 'gstin', message: `Invalid GST number "${raw.gstin}"` }); }
+  if (raw.pincode) { const p = raw.pincode.replace(/\s/g, ''); if (PINCODE_RE.test(p)) v.pincode = p; else errors.push({ field: 'pincode', message: 'Enter a 6-digit pincode' }); }
+  if (raw.aadhaar) { const a = raw.aadhaar.replace(/[\s-]/g, ''); if (AADHAAR_RE.test(a)) v.aadhaar = a; else errors.push({ field: 'aadhaar', message: 'Aadhaar number must be 12 digits' }); }
   if (raw.pan) { const p = raw.pan.toUpperCase().replace(/\s/g, ''); if (PAN_RE.test(p)) v.pan = p; else errors.push({ field: 'pan', message: `Invalid PAN "${raw.pan}"` }); }
   if (raw.bank?.ifsc) { const i = raw.bank.ifsc.toUpperCase().replace(/\s/g, ''); if (IFSC_RE.test(i)) v.bank = { ...raw.bank, ifsc: i }; else errors.push({ field: 'bank.ifsc', message: 'Invalid IFSC code' }); }
   if (raw.bank?.accountNo && !/^\d{9,18}$/.test(raw.bank.accountNo)) errors.push({ field: 'bank.accountNo', message: 'Account number must be 9 to 18 digits' });
@@ -109,18 +122,43 @@ export function organizationIssues(v: { type?: string | undefined; contactPerson
 }
 
 /**
- * Checks a typed GST number against what the company already has: the Zoho Books vendors and the registered vendors.
- * It shows the name the number is known by, and warns when the vendor is already there. (The GST portal itself is not called.)
+ * New registration form (it sends `hasGst`): the GST number when the vendor has GST, otherwise the Aadhaar number; with the
+ * full form also the contact person, designation, email, address, pincode, state, city and the PAN number. Older vendors and
+ * imports (no `hasGst`) keep the organization rule above.
+ */
+export function onboardingIssues(v: { hasGst?: boolean | undefined; fullDetails?: boolean | undefined; gstin?: string | undefined; pan?: string | undefined; aadhaar?: string | undefined; contactPerson?: string | undefined; designation?: string | undefined; email?: string | undefined; address?: string | undefined; pincode?: string | undefined; state?: string | undefined; district?: string | undefined }): Issue[] {
+  const e: Issue[] = [];
+  const need = (field: string, ok: unknown, message: string) => { if (!String(ok ?? '').trim()) e.push({ field, message }); };
+  if (v.hasGst) need('gstin', v.gstin, 'Enter the GST number');
+  if (!v.fullDetails) return e;
+  need('contactPerson', v.contactPerson, 'Enter the contact person name');
+  need('designation', v.designation, 'Enter the designation');
+  need('email', v.email, 'Enter the email');
+  need('address', v.address, 'Enter the address');
+  need('pincode', v.pincode, 'Enter the pincode');
+  need('state', v.state, 'Choose the state');
+  need('district', v.district, 'Enter the city / district');
+  need('pan', v.pan, 'Enter the PAN number');
+  if (!v.hasGst) need('aadhaar', v.aadhaar, 'Enter the Aadhaar number');
+  return e;
+}
+
+/**
+ * Checks a typed GST number against what the company already has (the Zoho Books vendors and the registered vendors) and,
+ * when GST_VERIFY_KEY is set, against the GST portal through a paid lookup service (legal name, status, address, PAN).
  */
 export async function verifyGstin(raw: string) {
   const gstin = raw.trim().toUpperCase();
   if (!GST_RE.test(gstin)) throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', [{ path: 'gstin', message: 'Enter a valid GST number' }]);
-  const [zoho, registered] = await Promise.all([
+  const [zoho, registered, portal] = await Promise.all([
     ZohoVendor.findOne({ gstin }).select('name vendorNo zohoStatus city zohoContactId').lean(),
     Vendor.findOne({ gstin, deletedAt: null }).select('name code status').lean(),
+    lookupGst(gstin),
   ]);
   return {
     gstin,
+    /** The GST portal's own details (legal name, status, address, PAN) when the paid lookup is set up (GST_VERIFY_KEY). */
+    portal,
     zoho: zoho ? { name: zoho.name, vendorNo: zoho.vendorNo ?? null, status: zoho.zohoStatus, city: zoho.city ?? null, zohoContactId: zoho.zohoContactId } : null,
     registered: registered ? { id: String(registered._id), name: registered.name, code: registered.code, status: registered.status } : null,
   };
@@ -162,9 +200,9 @@ async function resolveType<T extends { type?: string | undefined; typeName?: str
 }
 
 export async function createVendor(rawBody: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' | 'ZOHO' = 'MANUAL') {
-  const body = await resolveType(rawBody);
+  const { fullDetails, ...body } = await resolveType(rawBody);
   const { value, errors } = checkVendor(body);
-  if (source !== 'IMPORT') errors.push(...organizationIssues(value));
+  if (source !== 'IMPORT') errors.push(...(value.hasGst !== undefined ? onboardingIssues({ ...value, fullDetails }) : organizationIssues(value)));
   if (errors.length) fail(errors);
   const dup = await duplicateOf(value as never);
   if (dup) throw AppError.conflict(dup);
@@ -182,20 +220,21 @@ export async function createVendor(rawBody: z.infer<typeof vendorBody>, actor: A
   return v.toObject();
 }
 
-const AUDIT = ['name', 'type', 'contactPerson', 'mobile', 'email', 'gstin', 'pan', 'address', 'district', 'ratePerShop', 'farRatePerShop'];
+const AUDIT = ['name', 'type', 'contactPerson', 'designation', 'mobile', 'email', 'gstin', 'pan', 'address', 'pincode', 'state', 'district', 'hasGst', 'ratePerShop', 'farRatePerShop'];
 export async function updateVendor(id: string, rawPatch: z.infer<typeof vendorPatch>, actor: Actor) {
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
   if (!v) throw AppError.notFound('Vendor not found');
-  const patch = await resolveType(rawPatch);
+  const { fullDetails, ...patch } = await resolveType(rawPatch);
   const before = v.toObject() as Record<string, unknown>;
   const merged = { ...before, ...strip(patch) } as Partial<VendorInput>;
   const { value, errors } = checkVendor(merged);
   // Older vendors may lack these; the organization rules are checked only when the type, contact person or GST is being changed.
-  if (patch.type || patch.typeName || patch.contactPerson !== undefined || patch.gstin !== undefined) errors.push(...organizationIssues(value));
+  if (value.hasGst !== undefined) { if (patch.hasGst !== undefined || patch.gstin !== undefined) errors.push(...onboardingIssues({ ...value, fullDetails })); }
+  else if (patch.type || patch.typeName || patch.contactPerson !== undefined || patch.gstin !== undefined) errors.push(...organizationIssues(value));
   if (errors.length) fail(errors);
   const dup = await duplicateOf({ mobile: value.mobile }, id);
   if (dup) throw AppError.conflict(dup);
-  v.set({ ...strip(patch), ...(patch.mobile ? { mobile: value.mobile } : {}), ...(patch.gstin ? { gstin: value.gstin } : {}), ...(patch.pan ? { pan: value.pan } : {}), ...(patch.bank ? { bank: value.bank } : {}), ...(patch.name ? { nameKey: normKey(patch.name) } : {}), updatedBy: actor.id });
+  v.set({ ...strip(patch), ...(patch.pincode ? { pincode: value.pincode } : {}), ...(patch.aadhaar ? { aadhaar: value.aadhaar } : {}), ...(patch.mobile ? { mobile: value.mobile } : {}), ...(patch.gstin ? { gstin: value.gstin } : {}), ...(patch.pan ? { pan: value.pan } : {}), ...(patch.bank ? { bank: value.bank } : {}), ...(patch.name ? { nameKey: normKey(patch.name) } : {}), updatedBy: actor.id });
   await v.save();
   await recordAudit({ actor, action: 'UPDATE', entity: 'Vendor', entityId: v._id, changes: diff(before, v.toObject() as Record<string, unknown>, AUDIT) });
   return v.toObject();
@@ -213,10 +252,21 @@ export async function setKyc(id: string, body: z.infer<typeof kycBody>, actor: A
   return v.toObject();
 }
 
-/** PAN and bank proof are always needed; GST is needed for an organization. Address proof is optional. */
-export function kycComplete(v: { type?: string; kyc?: Record<string, unknown> | null }) {
+/**
+ * The documents that must be uploaded. Registered with the new form (`hasGst` set): PAN, cancelled cheque (bank) and the GST
+ * certificate when the vendor has GST, otherwise the Aadhaar. Older vendors: PAN and bank, plus GST for an organization.
+ * Address proof and other documents (for example the vendor agreement) are always optional.
+ */
+export function requiredKycDocs(v: { type?: string | undefined; hasGst?: boolean | null | undefined }): ('pan' | 'gst' | 'bank' | 'aadhaar')[] {
+  if (v.hasGst === true) return ['pan', 'gst', 'bank'];
+  if (v.hasGst === false) return ['pan', 'aadhaar', 'bank'];
+  return v.type === 'ORGANIZATION' ? ['pan', 'gst', 'bank'] : ['pan', 'bank'];
+}
+
+/** The KYC checklist is complete when every required document is ticked. */
+export function kycComplete(v: { type?: string; hasGst?: boolean | null; kyc?: Record<string, unknown> | null }) {
   const k = v.kyc ?? {};
-  return !!(k.pan && k.bank && (v.type !== 'ORGANIZATION' || k.gst));
+  return requiredKycDocs(v).every((d) => !!k[d]);
 }
 
 export async function setStatus(id: string, body: z.infer<typeof statusBody>, actor: Actor) {
@@ -259,11 +309,10 @@ const MAX_KYC_FILES_PER_ITEM = 3;
 const MAX_OTHER_FILES = 5;
 const vendorOwner = (id: unknown) => ({ entity: 'Vendor' as const, id: String(id) });
 
-/** Documents that must be uploaded before the registration mail goes: PAN, bank proof, and GST for an organization. Address proof is optional. */
-export function missingKycDocs(v: { type?: string; kycFiles?: ArrayLike<object> | null }) {
+/** Documents still to be uploaded before the registration mail goes (see requiredKycDocs). */
+export function missingKycDocs(v: { type?: string; hasGst?: boolean | null; kycFiles?: ArrayLike<object> | null }) {
   const have = new Set(Array.from(v.kycFiles ?? [], (f) => (f as { docType?: string }).docType));
-  const need = KYC_ITEMS.filter((k) => k !== 'address' && (k !== 'gst' || v.type === 'ORGANIZATION'));
-  return need.filter((k) => !have.has(k));
+  return requiredKycDocs(v).filter((k) => !have.has(k));
 }
 
 /** KYC scans for one document type (up to three per type, five under "other"). They do not tick the checklist: Operations ticks it after viewing them. */

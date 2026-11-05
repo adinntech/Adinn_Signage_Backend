@@ -13,12 +13,12 @@ function ic(string $k,int $w=16,string $prefix=''):string{return '<img src="'.es
 function fileSizeText(array $a):string{
  $raw=(string)($a['base64']??'');
  $at=strpos($raw,'base64,');if($at!==false)$raw=substr($raw,$at+7);
- $b=(int)(strlen($raw)*3/4);
+ $b=isset($a['size'])?(int)$a['size']:(int)(strlen($raw)*3/4);
  return $b>=1048576?round($b/1048576,1).' MB':max(1,(int)round($b/1024)).' KB';
 }
 function fileBadge(string $name):array{
  $e=strtolower(pathinfo($name,PATHINFO_EXTENSION));
- return match($e){'pdf'=>['PDF','#e11d48'],'xls','xlsx'=>['XLS','#16a34a'],'doc','docx'=>['DOC','#2563eb'],'zip'=>['ZIP','#2563eb'],'png','jpg','jpeg'=>['IMG','#f59e0b'],default=>['FILE','#64748b']};
+ return match($e){'pdf'=>['PDF','#e11d48'],'xls','xlsx'=>['XLS','#16a34a'],'doc','docx'=>['DOC','#2563eb'],'zip'=>['ZIP','#2563eb'],'png','jpg','jpeg','webp','gif'=>['IMG','#f59e0b'],default=>['FILE','#64748b']};
 }
 
 function pageStart(string $title,string $subtitle,array $config):void{

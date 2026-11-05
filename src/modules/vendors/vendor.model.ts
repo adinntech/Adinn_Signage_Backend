@@ -4,9 +4,9 @@ import { storedFileSchema } from '../files/storedFile.schema';
 export const VENDOR_TYPES = ['ONE_MAN', 'ORGANIZATION'] as const;
 export const VENDOR_STATUSES = ['PENDING_KYC', 'ACTIVE', 'INACTIVE', 'BLACKLISTED'] as const;
 export type VendorStatus = (typeof VENDOR_STATUSES)[number];
-export const KYC_ITEMS = ['pan', 'gst', 'bank', 'address'] as const;
+export const KYC_ITEMS = ['pan', 'gst', 'bank', 'address', 'aadhaar'] as const;
 /** Scans can also be filed under "other" (a missed document): they are not part of the checklist. */
-export const KYC_DOC_TYPES = [...KYC_ITEMS, 'other'] as const;
+export const KYC_DOC_TYPES = [...KYC_ITEMS, 'aadhaar', 'other'] as const;
 
 /** A KYC scan: the stored-file details plus the checklist item it proves. */
 const kycFileSchema = storedFileSchema.clone().add({ docType: { type: String, enum: KYC_DOC_TYPES, required: true } });
@@ -25,13 +25,21 @@ const vendorSchema = new Schema(
     /** The vendor type the person chose (see VendorTypeOption); its rule class is `type`. */
     typeName: String,
     contactPerson: String,
+    designation: String,
     mobile: { type: String, required: true },
     mobileAlt: String,
     email: { type: String, lowercase: true, trim: true },
     gstin: String,
     pan: String,
     address: String,
+    pincode: String,
+    state: String,
+    /** City / district (the pincode lookup fills it). */
     district: String,
+    /** Aadhaar number (12 digits). Needed instead of a GST number when the vendor has no GST. */
+    aadhaar: String,
+    /** Registered with GST? Set by the registration form; decides which documents are mandatory. Older vendors have no value. */
+    hasGst: Boolean,
     serviceAreas: [String],
     skills: [String],
     bank: { accountName: String, accountNo: String, ifsc: String },
@@ -44,6 +52,7 @@ const vendorSchema = new Schema(
       gst: { type: Boolean, default: false },
       bank: { type: Boolean, default: false },
       address: { type: Boolean, default: false },
+      aadhaar: { type: Boolean, default: false },
       verifiedAt: Date,
       verifiedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     },

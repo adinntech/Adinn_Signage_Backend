@@ -29,7 +29,7 @@ export function buildFilter(projectId: string, f: Filter, ids?: string[]) {
   const q: Record<string, any> = { project: new Types.ObjectId(projectId), deletedAt: null };
   if (ids?.length) q._id = { $in: ids.map((i) => new Types.ObjectId(i)) };
   if (f.district) q.district = new RegExp(`^${escapeRegex(f.district)}$`, 'i');
-  if (f.location) q.location = new RegExp('^\s*' + escapeRegex(f.location.trim()) + '\s*$', 'i');
+  if (f.location) q.location = new RegExp('^\\s*' + escapeRegex(f.location.trim()) + '\\s*$', 'i');
   if (f.planArea) q.planArea = f.planArea;
   if (f.status) q.status = f.status;
   if (f.scenario) q.scenario = f.scenario;

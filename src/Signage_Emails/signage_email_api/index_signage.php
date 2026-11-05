@@ -34,6 +34,18 @@ if((int)($_SERVER['CONTENT_LENGTH']??0)>18*1024*1024)respond(413,['status'=>'err
 try{
  $data=json_decode(file_get_contents('php://input'),true,64,JSON_THROW_ON_ERROR);
  if(!is_array($data))throw new InvalidArgumentException('JSON object required');
+ /* Big files: the CRM sends each file in small pieces first (action "stage", under 1 MB per request so a small web-server limit never refuses it), then the mail refers to them by uploadId. */
+ if(clean($data['action']??'')==='stage'){
+  $uid=clean($data['uploadId']??'');$idx=(int)($data['index']??-1);$cnt=(int)($data['total']??0);
+  if(!preg_match('/^[a-f0-9]{32}$/',$uid)||$idx<0||$cnt<1||$idx>=$cnt||$cnt>40)throw new InvalidArgumentException('Invalid upload piece');
+  $piece=base64_decode(clean($data['base64']??''),true);
+  if($piece===false||$piece===''||strlen($piece)>900*1024)throw new InvalidArgumentException('Invalid upload piece size');
+  $root=sys_get_temp_dir().'/signage_stage';if(!is_dir($root))@mkdir($root,0700,true);
+  foreach(glob($root.'/*',GLOB_ONLYDIR)?:[] as $old){if(filemtime($old)<time()-7200){array_map('unlink',glob($old.'/*')?:[]);@rmdir($old);}}
+  $dir=$root.'/'.$uid;if(!is_dir($dir)&&!@mkdir($dir,0700))throw new RuntimeException('Cannot stage upload');
+  if(file_put_contents($dir.'/'.$idx.'.part',$piece)===false)throw new RuntimeException('Cannot stage upload');
+  respond(200,['status'=>'success','message'=>'Piece stored','index'=>$idx]);
+ }
  $type=clean($data['mailtype']??'');
  $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','vendor'=>'signage_vendor_registration_request.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
  if(!isset($templates[$type]))throw new InvalidArgumentException('Invalid mailtype');
@@ -65,9 +77,17 @@ try{
   $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
   $allowed=['pdf'=>'application/pdf','xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xls'=>'application/vnd.ms-excel','docx'=>'application/vnd.openxmlformats-officedocument.wordprocessingml.document','png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','zip'=>'application/zip','doc'=>'application/msword','ppt'=>'application/vnd.ms-powerpoint','pptx'=>'application/vnd.openxmlformats-officedocument.presentationml.presentation','csv'=>'text/csv','txt'=>'text/plain','gif'=>'image/gif','webp'=>'image/webp'];
   if(!$name||!isset($allowed[$ext])||strlen($name)>160)throw new InvalidArgumentException('Unsupported attachment filename');
-  $encoded=clean($a['base64']??'');
-  if(str_contains($encoded,'base64,'))$encoded=explode('base64,',$encoded,2)[1];
-  $binary=base64_decode($encoded,true);
+  if(!empty($a['uploadId'])){
+   $uid=clean($a['uploadId']);$cnt=(int)($a['chunks']??0);
+   if(!preg_match('/^[a-f0-9]{32}$/',$uid)||$cnt<1||$cnt>40)throw new InvalidArgumentException('Invalid attachment upload');
+   $dir=sys_get_temp_dir().'/signage_stage/'.$uid;$binary='';
+   for($i=0;$i<$cnt;$i++){$p=@file_get_contents($dir.'/'.$i.'.part');if($p===false)throw new InvalidArgumentException('An uploaded piece is missing. Send the mail again');$binary.=$p;if(strlen($binary)>8*1024*1024)break;}
+   array_map('unlink',glob($dir.'/*')?:[]);@rmdir($dir);
+  }else{
+   $encoded=clean($a['base64']??'');
+   if(str_contains($encoded,'base64,'))$encoded=explode('base64,',$encoded,2)[1];
+   $binary=base64_decode($encoded,true);
+  }
   if($binary===false||strlen($binary)===0||strlen($binary)>8*1024*1024)throw new InvalidArgumentException('Invalid attachment content or size');
   if($ext==='pdf'&&!str_starts_with($binary,'%PDF'))throw new InvalidArgumentException('Invalid PDF');
   if(in_array($ext,['xlsx','docx','pptx','zip'],true)&&!str_starts_with($binary,'PK'))throw new InvalidArgumentException('Invalid ZIP-based file');

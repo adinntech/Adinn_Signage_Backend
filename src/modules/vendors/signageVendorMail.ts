@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { AppError } from '../../common/errors';
 import { env } from '../../config/env';
 import { postSignageMail } from '../codeRequests/signageCodeMail';
@@ -7,6 +8,14 @@ import { postSignageMail } from '../codeRequests/signageCodeMail';
  * signage_vendor_registration_request.php), the same service the code requests use. The PHP side renders the branded
  * mail around the text written in the CRM mail screen and attaches the real files.
  */
+export interface SignageVendorData {
+  vendorName: string; vendorType?: string | undefined; vendorCode: string;
+  contactPerson?: string | undefined; designation?: string | undefined; mobile?: string | undefined; email?: string | undefined;
+  address?: string | undefined; district?: string | undefined; state?: string | undefined; pincode?: string | undefined;
+  pan?: string | undefined; gstin?: string | undefined; hasGst?: boolean | undefined; aadhaar?: string | undefined;
+  bank?: { accountName?: string | undefined; accountNo?: string | undefined; ifsc?: string | undefined } | undefined;
+  serviceAreas?: string[] | undefined;
+}
 export interface SignageVendorMail {
   to: string[];
   cc?: string[];
@@ -16,9 +25,10 @@ export interface SignageVendorMail {
   requestId: string;
   requestDate: string;
   replyTo?: string | undefined;
-  vendor: { vendorName: string; vendorType?: string | undefined; vendorCode: string };
-  /** The mail text written on screen (already cleaned to simple tags). */
-  bodyHtml: string;
+  /** Only data: the PHP template lays out the mail (headings, rows, documents) itself. */
+  vendor: SignageVendorData;
+  /** An optional note typed on the mail screen (already cleaned to simple tags). Empty when the default text was not changed. */
+  bodyHtml?: string | undefined;
   attachments: { filename: string; content: Buffer; label?: string | undefined }[];
 }
 
@@ -60,9 +70,27 @@ export function buildSignageVendorPayload(m: SignageVendorMail): Record<string, 
     source: 'Operations Team',
     ...(m.replyTo ? { replyTo: m.replyTo } : {}),
     vendor: m.vendor,
-    bodyHtml: m.bodyHtml,
-    attachments: m.attachments.map((a) => ({ filename: safeFileName(a.filename), base64: a.content.toString('base64'), ...(a.label ? { label: a.label } : {}) })),
+    ...(m.bodyHtml ? { bodyHtml: m.bodyHtml } : {}),
+    attachments: m.attachments.map((a) => ({ filename: safeFileName(a.filename), size: a.content.length, base64: a.content.toString('base64'), ...(a.label ? { label: a.label } : {}) })),
   };
+}
+
+/** Up to this much of files goes inside the mail request itself; more is sent in pieces first (a web server in front of the PHP API may take only about 1 MB per request). */
+export const INLINE_BYTES = 400 * 1024;
+const PIECE_BYTES = 512 * 1024;
+
+/** Sends every file to the PHP API in pieces (action "stage") and returns the attachment list that refers to them. */
+async function stageAttachments(files: SignageVendorMail['attachments']) {
+  const out: Record<string, unknown>[] = [];
+  for (const a of files) {
+    const uploadId = randomBytes(16).toString('hex');
+    const total = Math.max(1, Math.ceil(a.content.length / PIECE_BYTES));
+    for (let i = 0; i < total; i++) {
+      await postSignageMail({ action: 'stage', uploadId, index: i, total, base64: a.content.subarray(i * PIECE_BYTES, (i + 1) * PIECE_BYTES).toString('base64') });
+    }
+    out.push({ filename: safeFileName(a.filename), size: a.content.length, uploadId, chunks: total, ...(a.label ? { label: a.label } : {}) });
+  }
+  return out;
 }
 
 /** Turns the PHP API's short refusals into what the person can do about them. */
@@ -73,7 +101,7 @@ export function explainSignageError(message: string, m: Pick<SignageVendorMail, 
     return `The mail service did not accept one of the files (${names}). It takes PDF, PNG, JPG, WEBP, XLS/XLSX, DOC/DOCX, ZIP, CSV, TXT. If a WEBP or another newer type was refused, the cPanel copy of index_signage.php is older than this CRM: upload the latest one, or use PNG / JPG. (${message})`;
   }
   if (/413|payload too large|request too large|entity too large/i.test(message)) {
-    return `The mail service refused the size of this mail (${mb} MB of documents). The web server in front of it allows less than the CRM: raise its upload limit (nginx client_max_body_size / PHP post_max_size), or attach fewer or smaller documents, or set SIGNAGE_MAIL_MAX_TOTAL_MB lower. (${message})`;
+    return `The mail service refused the size of this mail (${mb} MB of documents). The web server in front of it allows less than the CRM: upload the latest index_signage.php (it receives big files in small pieces), or attach fewer or smaller documents. (${message})`;
   }
   return message;
 }
@@ -82,7 +110,10 @@ export async function sendSignageVendorMail(m: SignageVendorMail) {
   const problem = signageAttachmentProblem(m.attachments.map((a) => ({ name: a.filename, size: a.content.length })));
   if (problem) throw AppError.badRequest(problem);
   try {
-    return await postSignageMail(buildSignageVendorPayload(m));
+    const payload = buildSignageVendorPayload(m);
+    // Small mails (and every mail outside production, which only logs) go in one request; bigger ones are staged piece by piece.
+    if (env.isProd && m.attachments.reduce((n, a) => n + a.content.length, 0) > INLINE_BYTES) payload.attachments = await stageAttachments(m.attachments);
+    return await postSignageMail(payload);
   } catch (e) {
     throw new Error(explainSignageError(e instanceof Error ? e.message : 'Sending failed', m));
   }

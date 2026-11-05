@@ -12,7 +12,7 @@ import { mailAvailable, sendMail } from '../notifications/mail.service';
 import { User } from '../users/user.model';
 import { Vendor } from './vendor.model';
 import { sendSignageVendorMail, signageAttachmentProblem } from './signageVendorMail';
-import { getVendor, missingKycDocs } from './vendor.service';
+import { getVendor, missingKycDocs, requiredKycDocs } from './vendor.service';
 
 const EMAIL = z.string().trim().toLowerCase().email();
 export const registrationDraftBody = z.object({
@@ -33,7 +33,9 @@ export const registrationMailBody = z.object({
 });
 
 const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
-const DOC_LABEL: Record<string, string> = { pan: 'PAN card', gst: 'GST certificate', bank: 'Bank proof', address: 'Address proof', other: 'Other document' };
+const DOC_LABEL: Record<string, string> = { pan: 'PAN card', gst: 'GST certificate', bank: 'Cancelled cheque', aadhaar: 'Aadhaar card', address: 'Address proof', other: 'Other document' };
+/** Aadhaar number with only the last four digits shown (the full scan is attached). */
+const maskAadhaar = (a?: string | null) => (a ? `XXXX XXXX ${a.slice(-4)}` : '');
 /** "Name <a@b.com>" or "a@b.com" to the bare address (the reply-to of the PHP mail). */
 const addressOf = (s?: string) => (s ? (/<([^>]+)>/.exec(s)?.[1] ?? s).trim() : undefined);
 const group = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -47,13 +49,36 @@ function defaultContent(v: Awaited<ReturnType<typeof getVendor>>) {
     `<p>Hi Team,</p>` +
     `<p>Please register the new vendor below in Zoho Books and reply to this mail with the <strong>Vendor ID</strong>.</p>` +
     `<ul>` +
-    row('Vendor / firm', v.name) + row('Type', v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer')) + row('Contact person', v.contactPerson) +
-    row('Mobile', [v.mobile, v.mobileAlt].filter(Boolean).join(' / ')) + row('Email', v.email) + row('Address', [v.address, v.district].filter(Boolean).join(', ')) +
-    row('PAN', v.pan) + row('GST', v.gstin) + row('Bank', bank) + row('Service area', (v.serviceAreas ?? []).join(', ')) +
+    row('Vendor / firm', v.name) + row('Type', v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer')) + row('Contact person', [v.contactPerson, v.designation].filter(Boolean).join(', ')) +
+    row('Mobile', [v.mobile, v.mobileAlt].filter(Boolean).join(' / ')) + row('Email', v.email) + row('Address', [v.address, v.district, v.state, v.pincode].filter(Boolean).join(', ')) +
+    row('PAN', v.pan) + row('GST', v.gstin ?? (v.hasGst === false ? 'Not registered for GST' : null)) + row('Aadhaar', maskAadhaar(v.aadhaar)) + row('Bank', bank) + row('Service area', (v.serviceAreas ?? []).join(', ')) +
     `</ul>` +
     `<p>The KYC documents are attached to this mail.</p>` +
     `<p>Regards,</p>`;
   return { subject: `Vendor registration request: ${v.name} (${v.code})`, body };
+}
+
+/** The vendor's data for the PHP mail template (data only: the template decides the wording and layout). */
+function signageVendorData(v: Awaited<ReturnType<typeof getVendor>>) {
+  return {
+    vendorName: v.name,
+    vendorType: v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer'),
+    vendorCode: v.code,
+    contactPerson: v.contactPerson ?? undefined,
+    designation: v.designation ?? undefined,
+    mobile: [v.mobile, v.mobileAlt].filter(Boolean).join(' / ') || undefined,
+    email: v.email ?? undefined,
+    address: v.address ?? undefined,
+    district: v.district ?? undefined,
+    state: v.state ?? undefined,
+    pincode: v.pincode ?? undefined,
+    pan: v.pan ?? undefined,
+    gstin: v.gstin ?? undefined,
+    hasGst: v.hasGst ?? undefined,
+    aadhaar: maskAadhaar(v.aadhaar) || undefined,
+    bank: v.bank?.accountNo ? { accountName: v.bank.accountName ?? undefined, accountNo: v.bank.accountNo, ifsc: v.bank.ifsc ?? undefined } : undefined,
+    serviceAreas: v.serviceAreas?.length ? v.serviceAreas : undefined,
+  };
 }
 
 /** Names for the people ids that appear in the mail records. */
@@ -78,6 +103,9 @@ export async function registrationMailDraft(id: string) {
   return {
     mail: { enabled: mailAvailable() || signageMailAvailable(), identities: senderIdentities() },
     vendorType: v.type,
+    hasGst: v.hasGst ?? null,
+    /** The documents this vendor must have before the mail can go (the attachment slots mark these Required). */
+    required: requiredKycDocs(v),
     groups: group(env.VENDOR_REGISTRATION_RECIPIENTS),
     to: draft?.to?.length ? draft.to : group(env.VENDOR_REGISTRATION_RECIPIENTS),
     cc: draft?.cc ?? [],
@@ -157,8 +185,9 @@ export async function sendRegistrationMail(id: string, input: z.infer<typeof reg
           requestId: v.code,
           requestDate: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
           replyTo: addressOf(input.from ?? env.MAIL_FROM),
-          vendor: { vendorName: v.name, vendorType: v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer'), vendorCode: v.code },
-          bodyHtml: body,
+          vendor: signageVendorData(v.toObject() as never),
+          // The PHP template writes the mail from the data above. Only a note the person changed on screen is sent as text.
+          bodyHtml: sanitizeHtml(defaultContent(v.toObject() as never).body) === body ? undefined : body,
           attachments: files.map((f, i) => ({ filename: f.name, content: f.content, label: labelOf(i) })),
         });
       } else await sendMail({

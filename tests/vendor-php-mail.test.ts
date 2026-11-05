@@ -89,7 +89,7 @@ describe('vendor registration mail through the PHP mail service', () => {
     expect(p.bodyHtml).toContain('<strong>this vendor</strong>');
     expect(p.bodyHtml).not.toMatch(/<script|alert/); // cleaned before it leaves the server
     const files = p.attachments as { filename: string; base64: string; label?: string }[];
-    expect(files.map((f) => [f.filename, f.label]).sort()).toEqual([['address-scan.png', 'Address proof'], ['agreement.png', 'Other document'], ['bank-scan.png', 'Bank proof'], ['pan-scan.png', 'PAN card']]);
+    expect(files.map((f) => [f.filename, f.label]).sort()).toEqual([['address-scan.png', 'Address proof'], ['agreement.png', 'Other document'], ['bank-scan.png', 'Cancelled cheque'], ['pan-scan.png', 'PAN card']]);
     expect(files.every((f) => Buffer.from(f.base64, 'base64').equals(png))).toBe(true); // the real bytes, not names
 
     expect(res.body.data.history[0]).toMatchObject({ status: 'SENT', to: ['accounts@t.com'], cc: ['ops@t.com'], bcc: ['boss@t.com'], sentBy: 'OPS' });
@@ -116,7 +116,7 @@ describe('vendor registration mail through the PHP mail service', () => {
     await upload(v._id, 'pan'); // bank proof missing
     const res = await send(v._id, mailBody());
     expect(res.status).toBe(409);
-    expect(res.body.error.message).toMatch(/Bank proof/);
+    expect(res.body.error.message).toMatch(/Cancelled cheque/);
     expect(posted.calls).toHaveLength(0);
   });
 

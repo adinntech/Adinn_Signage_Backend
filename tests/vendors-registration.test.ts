@@ -80,7 +80,7 @@ describe('registration mail and vendor ID', () => {
     const v = (await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', name: 'Kumar Boards', mobile: '9876500010', contactPerson: undefined })).body.data;
 
     const draft = await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'));
-    expect(draft.body.data).toMatchObject({ to: ['accounts@t.com'], missing: ['PAN card', 'Bank proof'] });
+    expect(draft.body.data).toMatchObject({ to: ['accounts@t.com'], missing: ['PAN card', 'Cancelled cheque'] });
     // Save as Draft keeps the text being written; the next open starts from it
     expect((await api().put(`/api/v1/vendors/${v._id}/registration-mail/draft`).set(as('OPS')).send({ to: ['a@t.com'], subject: 'My subject', body: '<p>Hello</p>' })).status).toBe(200);
     expect((await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data).toMatchObject({ hasDraft: true, to: ['a@t.com'], subject: 'My subject', draft: { createdBy: 'OPS', updatedBy: 'OPS' } });
