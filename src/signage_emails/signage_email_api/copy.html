@@ -101,7 +101,7 @@
             }
             /* The mail button click is the user's action, so most browsers let the page copy at once on load: no second click.
                After a successful copy the tab closes itself (browsers allow that only for tabs a script opened; otherwise it simply stays). */
-            function copied() { done(); msg.textContent = 'Copied. Paste it in the Signage app. You can close this tab.'; setTimeout(function () { try { window.close(); } catch (e) { } }, 1200); }
+            function copied() { done(); msg.textContent = 'Copied. Paste it in the Signage app. You can close this tab.'; setTimeout(function () { try { window.close(); } catch (e) { } }, 100); }
             function copyNow(auto) {
                 if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(code).then(auto ? copied : done, auto ? function () { } : fallback);
                 else if (!auto) fallback();

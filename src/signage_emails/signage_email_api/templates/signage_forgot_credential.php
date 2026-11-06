@@ -17,13 +17,13 @@ echo '<div style="font-size:11px;color:#6a7890;margin-bottom:6px;letter-spacing:
 /* One white box per digit (table cells, so it holds in Outlook too). The cells sit inside one user-select:all span, so a click still selects the whole code. */
 $cells='';
 foreach(str_split($code) as $d)$cells.='<td align="center" width="38" style="width:38px;height:48px;background:#ffffff;border:1px solid #d6e4fa;border-radius:8px;font-family:Consolas,\'Courier New\',monospace;font-size:28px;font-weight:600;color:#10244a;-webkit-user-select:all;user-select:all;cursor:copy">'.esc($d).'</td><td width="6" style="width:6px;font-size:0">&nbsp;</td>';
-echo '<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>'.$cells.'</tr></table>';
-/* A mail cannot copy by itself: the button opens copy.html (a static page next to index_signage.php) that copies the code from the #fragment, which never reaches a server log. */
+/* No redirect: the code itself is the copy target. One click copies it where the mail client runs inline script (rare: Gmail, Outlook and Apple Mail strip it); everywhere else one click / long-press selects the whole code (user-select:all), then Copy. */
+$onclick="try{navigator.clipboard.writeText('".$code."');var h=this.parentNode.querySelector('.hint');if(h){h.innerHTML='Copied! &#10003;';h.style.color='#059669';}}catch(e){}";
+echo '<table role="presentation" align="center" cellpadding="0" cellspacing="0" title="Click to copy" onclick="'.esc($onclick).'" style="margin:0 auto;cursor:copy"><tr>'.$cells.'</tr></table>';
+echo '<div class="hint" style="font-size:11px;color:#6a7890;margin-top:10px">Click the code to select it, then copy</div>';
+/* Fallback for clients that strip script (Gmail, Outlook, Apple Mail): opens copy.html, which copies the code from the #fragment (never sent to a server) and closes itself. */
 $copyUrl=rtrim((string)($config['copy_url']??''),'#').'#'.$code;
-/* Where the mail client runs inline script (a few do; Gmail, Outlook and Apple Mail strip it) the click copies the code right here; everywhere else the link opens copy.html. */
-$onclick="try{navigator.clipboard.writeText('".$code."');this.innerHTML='Copied! &#10003;';return false;}catch(e){}";
-echo '<div style="margin-top:12px"><a href="'.esc($copyUrl).'" onclick="'.esc($onclick).'" target="_blank" style="display:inline-block;background-color:#7c3aed;background-image:linear-gradient(90deg,#7c3aed,#f26b3a);color:#ffffff;font-size:13px;font-weight:600;text-decoration:none;border-radius:8px;padding:10px 22px">Copy code &nbsp;&#128203;</a></div>';
-echo '<div style="font-size:11px;color:#6a7890;margin-top:8px">Opens a page that copies the code. You can also select the code above.</div>';
+echo '<div style="margin-top:10px"><a href="'.esc($copyUrl).'" target="_blank" rel="noopener" style="display:inline-block;background-color:#7c3aed;background-image:linear-gradient(90deg,#7c3aed,#f26b3a);color:#ffffff;font-size:12px;font-weight:600;text-decoration:none;border-radius:8px;padding:8px 18px">Copy code &nbsp;&#128203;</a></div>';
 echo '<div style="font-size:11px;color:#6a7890;margin-top:4px">Valid for '.esc((string)$mins).' minutes &middot; can be used once</div>';
 echo '</td></tr></table>';
 
