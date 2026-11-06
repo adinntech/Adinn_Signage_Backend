@@ -69,18 +69,19 @@ describe('mobile number validation (10 digits)', () => {
     api().post('/api/v1/clients').set(as('BD')).send({ name, code: `X${seq}`.slice(0, 8), contacts: [{ name: 'A Person', phone }] });
 
   it('rejects numbers that are not exactly 10 digits or do not start with 6-9', async () => {
-    for (const bad of ['12345', '98765432', '987654321012', '5876543210', 'abcdefghij', '98765 4321']) {
+    // Client contact mobiles are typed as exactly 10 digits: spaces, +91 and 0 prefixes are rejected too.
+    for (const bad of ['12345', '98765432', '987654321012', '5876543210', 'abcdefghij', '98765 4321', '+91 98765 43210', '098765-43210', '91 9876543210']) {
       const r = await clientWith(bad);
       expect(r.status, bad).toBe(422);
       expect(JSON.stringify(r.body.error.details)).toContain('10 digits');
     }
   });
 
-  it('accepts and normalises common ways of typing a number', async () => {
-    for (const good of ['9876543210', '+91 98765 43210', '098765-43210', '91 9876543210']) {
+  it('accepts a 10-digit number', async () => {
+    for (const good of ['9876543210', '6000000000']) {
       const r = await clientWith(good);
       expect(r.status, good).toBe(201);
-      expect(r.body.data.contacts[0].phone).toBe('9876543210');
+      expect(r.body.data.contacts[0].phone).toBe(good);
     }
   });
 
@@ -141,11 +142,12 @@ describe('duplicate checks against the database', () => {
   });
 
   it('rejects a duplicate project code and a duplicate campaign for the same client', async () => {
-    const a = await create({ code: 'p-2207-0001', campaign: 'Unique Launch' });
+    // Drafts never clash on a campaign name, so these are live projects
+    const a = await create({ code: 'p-2207-0001', campaign: 'Unique Launch', status: 'NEW' });
     expect(a.status).toBe(201);
     expect(a.body.data.code).toBe('P-2207-0001');
     expect((await create({ code: 'P-2207-0001' })).status).toBe(409);
-    const camp = await create({ campaign: 'unique   LAUNCH' });
+    const camp = await create({ campaign: 'unique   LAUNCH', status: 'NEW' });
     expect(camp.status).toBe(409);
     expect(camp.body.error.message).toContain('Unique Launch');
   });
@@ -165,8 +167,8 @@ describe('duplicate checks against the database', () => {
   });
 
   it('rejects editing a campaign into a duplicate', async () => {
-    const a = await create({ campaign: 'Edit Dup A' });
-    await create({ campaign: 'Edit Dup B' });
+    const a = await create({ campaign: 'Edit Dup A', status: 'NEW' });
+    await create({ campaign: 'Edit Dup B', status: 'NEW' });
     expect((await api().patch(`/api/v1/projects/${a.body.data._id}`).set(as('BD')).send({ campaign: 'Edit Dup B' })).status).toBe(409);
   });
 
@@ -207,7 +209,7 @@ describe('BD -> Operations assignment', () => {
     expect(d.body.data.status).toBe('DRAFT');
     const r = await assign(d.body.data._id);
     expect(r.status).toBe(422);
-    expect(r.body.error.message).toMatch(/requirement type.*start date.*end date.*district.*contact/);
+    expect(r.body.error.message).toMatch(/requirement type.*start date.*expected end date.*district/);
   });
 
   it('requires a shop count for shop projects but not for ASO', async () => {

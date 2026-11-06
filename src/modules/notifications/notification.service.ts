@@ -96,7 +96,7 @@ export async function notifyProjectParty(
     const recipient = to === 'assignee' ? p.assignedTo : (p.owner ?? p.createdBy);
     if (!recipient) return;
     const client = { name: await clientNameOf(p) };
-    await notify({ ...spec, recipients: [recipient], project: { _id: p._id, code: p.code, clientName: client?.name }, actorId });
+    await notify({ ...spec, recipients: [recipient], project: { _id: p._id, code: p.code, clientName: client?.name ?? undefined }, actorId });
   } catch (e) {
     console.error('notification failed', e);
   }

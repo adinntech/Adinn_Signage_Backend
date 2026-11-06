@@ -80,7 +80,7 @@
 
 <body>
     <div class="card">
-        <p class="title">1VERIFICATION CODE</p>
+        <p class="title">VERIFICATION CODE</p>
         <div class="code" id="code">------</div>
         <button id="copy" type="button">Copy code <span>&#128203;</span></button>
         <div class="msg" id="msg" role="status"></div>
@@ -99,9 +99,15 @@
                 try { if (document.execCommand('copy')) return done(); } catch (e) { }
                 msg.textContent = 'Code selected. Press Ctrl+C to copy.';
             }
-            btn.addEventListener('click', function () {
-                if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(code).then(done, fallback); else fallback();
-            });
+            /* The mail button click is the user's action, so most browsers let the page copy at once on load: no second click.
+               After a successful copy the tab closes itself (browsers allow that only for tabs a script opened; otherwise it simply stays). */
+            function copied() { done(); msg.textContent = 'Copied. Paste it in the Signage app. You can close this tab.'; setTimeout(function () { try { window.close(); } catch (e) { } }, 1200); }
+            function copyNow(auto) {
+                if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(code).then(auto ? copied : done, auto ? function () { } : fallback);
+                else if (!auto) fallback();
+            }
+            btn.addEventListener('click', function () { copyNow(false); });
+            copyNow(true);
         })();
     </script>
 </body>

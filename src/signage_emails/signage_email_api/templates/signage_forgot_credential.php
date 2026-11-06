@@ -14,7 +14,10 @@ echo '<p style="font-size:13px;line-height:1.7;color:#394d6b;margin:0 0 14px">Hi
 echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 14px"><tr><td align="center" style="background:#f4f8fd;border:1px dashed #9fb3d9;border-radius:10px;padding:18px 10px">';
 echo '<div style="font-size:11px;color:#6a7890;margin-bottom:6px;letter-spacing:1px">VERIFICATION CODE</div>';
 /* Email clients cannot run a copy button (no scripts). user-select:all makes one click / long-press select the whole code, then Copy. */
-echo '<div style="display:inline-block;background:#ffffff;border:1px solid #d6e4fa;border-radius:8px;padding:10px 12px 10px 22px"><span style="font-family:Consolas,\'Courier New\',monospace;font-size:30px;font-weight:600;letter-spacing:10px;color:#10244a;-webkit-user-select:all;user-select:all;cursor:copy">'.esc($code).'</span></div>';
+/* One white box per digit (table cells, so it holds in Outlook too). The cells sit inside one user-select:all span, so a click still selects the whole code. */
+$cells='';
+foreach(str_split($code) as $d)$cells.='<td align="center" width="38" style="width:38px;height:48px;background:#ffffff;border:1px solid #d6e4fa;border-radius:8px;font-family:Consolas,\'Courier New\',monospace;font-size:28px;font-weight:600;color:#10244a;-webkit-user-select:all;user-select:all;cursor:copy">'.esc($d).'</td><td width="6" style="width:6px;font-size:0">&nbsp;</td>';
+echo '<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>'.$cells.'</tr></table>';
 /* A mail cannot copy by itself: the button opens copy.html (a static page next to index_signage.php) that copies the code from the #fragment, which never reaches a server log. */
 $copyUrl=rtrim((string)($config['copy_url']??''),'#').'#'.$code;
 /* Where the mail client runs inline script (a few do; Gmail, Outlook and Apple Mail strip it) the click copies the code right here; everywhere else the link opens copy.html. */

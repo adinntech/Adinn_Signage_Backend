@@ -68,7 +68,7 @@ try{
  if($type==='vendor'&&clean($vendor['vendorName']??'')==='')throw new InvalidArgumentException('vendor.vendorName required');
  $data['bodyHtml']=safeHtml($data['bodyHtml']??'');
  $subject=clean($data['subject']??'');
- if($subject==='')$subject=$isAuth?'Reset your Signage '.($type==='forgot_mpin'?'MPIN':'password'):($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId);
+ if($subject==='')$subject=$isAuth?'Your Signage verification code':($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId);
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
  $attachments=[];
  foreach(($data['attachments']??[]) as $a){

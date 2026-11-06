@@ -48,7 +48,7 @@ export async function notifyNewShops(projectId: string, target: ShopTarget, adde
       body: first
         ? `${s(added)} in project ${project.code}${client?.name ? ` (${client.name})` : ''} are assigned to you.`
         : `${s(added)} were added to project ${project.code}${client?.name ? ` (${client.name})` : ''}. You now have ${s(total)} in this project.`,
-      project: { _id: project._id, code: project.code, clientName: client?.name },
+      project: { _id: project._id, code: project.code, clientName: client?.name ?? undefined },
       actorId: actor.id,
       dedupe: (r) => `shops-added:${projectId}:${r}:${when}`,
     });

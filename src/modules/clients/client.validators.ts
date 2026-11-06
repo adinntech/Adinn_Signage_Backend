@@ -11,7 +11,7 @@ const pincode = z.string().trim().regex(/^\d{6}$/, 'Pincode must be 6 digits').o
 const LETTERS = /^[A-Za-z ]+$/;
 const LETTERS_MSG = 'Use letters and spaces only';
 const strictMobile = z.string().trim().regex(/^\d{10}$/, 'Mobile number must be exactly 10 digits').pipe(mobileRule);
-const optionalStrictMobile = z.union([z.literal('').transform(() => undefined), strictMobile]).optional();
+const optionalStrictMobile = z.string().trim().optional().transform((v) => v || undefined).pipe(strictMobile.optional());
 
 const contact = z.object({
   name: z.string().trim().min(1, 'Enter the contact name').max(120).regex(LETTERS, LETTERS_MSG),

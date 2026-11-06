@@ -302,7 +302,7 @@ export async function decideApproval(projectId: string, body: z.infer<typeof dec
     kind: 'COST_APPROVAL', recipients: [plan.requestedBy, project.assignedTo], actorId: actor.id,
     title: `Special approval ${body.approve ? 'granted' : 'rejected'}: ${project.code}`,
     body: body.approve ? `Your recce plan was approved.${body.remark ? ` ${body.remark}` : ''}` : `Your recce plan was rejected: ${body.remark}. Change it and submit again.`,
-    project: { _id: project._id, code: project.code, clientName: client?.name }, dedupe: (r) => `cost-decision:${plan._id}:${plan.reviewedAt?.getTime()}:${r}`,
+    project: { _id: project._id, code: project.code, clientName: client?.name ?? undefined }, dedupe: (r) => `cost-decision:${plan._id}:${plan.reviewedAt?.getTime()}:${r}`,
   });
   return getPlan(projectId);
 }
