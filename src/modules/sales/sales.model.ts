@@ -311,6 +311,8 @@ const orderSchema = new Schema(
           projectCode: String,
           /** EST- and 6 digits, e.g. EST-323343. */
           estimationCode: String,
+          /** Zoho Books estimate the codes were chosen from. */
+          zohoEstimateId: String,
           codesSavedAt: Date,
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */

@@ -36,6 +36,7 @@ salesRouter.post('/orders/:id/recce/handover-done', csFlow, c.confirmRecceHandov
 salesRouter.put('/orders/:id/recce/rate-card', csFlow, c.saveRecceRateCard);
 salesRouter.post('/orders/:id/recce/rate-card/skip', csFlow, c.skipRecceRateCard);
 salesRouter.post('/orders/:id/recce/code-request', csFlow, receive, c.sendCodeRequest);
+salesRouter.get('/orders/:id/recce/zoho-estimates', csFlow, c.recceEstimates);
 salesRouter.put('/orders/:id/recce/codes', csFlow, c.saveRecceCodes);
 salesRouter.post('/orders/:id/recce/assign', csFlow, c.assignRecce);
 salesRouter.get('/shop-list-template', read, c.shopTemplate);

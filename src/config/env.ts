@@ -119,6 +119,15 @@ const schema = z
     ZOHO_ORGANIZATION_ID: optional,
     /** Quick start only: a pasted access token works for about 1 hour. For permanent use set the client id, secret and refresh token instead. */
     ZOHO_ACCESS_TOKEN: optional,
+    /**
+     * Zoho login for estimates (project code = reference_number, estimation code = estimate_number), scope
+     * ZohoBooks.estimates.READ. Access token alone works for about 1 hour; add ZOHO_REFRESH_TOKEN_projectcode for permanent use.
+     * Not set: the main ZOHO_* login is used.
+     */
+    ZOHO_ACCESS_TOKEN_projectcode: optional,
+    ZOHO_CLIENT_ID_Projectcode: optional,
+    ZOHO_CLIENT_SECRET_Projectcode: optional,
+    ZOHO_REFRESH_TOKEN_projectcode: optional,
     /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
     ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
     ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),

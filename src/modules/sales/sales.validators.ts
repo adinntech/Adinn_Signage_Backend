@@ -6,6 +6,11 @@ import { clientRegistration } from '../clients/client.validators';
 import { PRIORITIES } from '../projects/project.model';
 import { APPROVAL_DOC_TYPES, EMAIL_KINDS, HANDOVER_TYPES, LEAD_STAGES, ORDER_STAGES } from './sales.model';
 
+/** Codes step: the Client ID typed for a New client, to list its Zoho estimates. */
+export const recceEstimatesQuery = z.object({
+  clientId: z.string().trim().regex(/^[A-Za-z0-9-]{2,20}$/, 'Client ID: 2-20 letters, digits or -').optional().or(z.literal('').transform(() => undefined)),
+});
+
 /** Assign to Recce Team: the codes the BD received for the project. */
 export const recceCodesBody = z.object({
   projectCode: z.string().trim().regex(/^\d{8}$/, 'Project code must be exactly 8 digits'),
@@ -14,6 +19,8 @@ export const recceCodesBody = z.object({
     .trim()
     .toUpperCase()
     .regex(/^EST-\d{6}$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343'),
+  /** The Zoho Books estimate the codes were chosen from (reference_number = project code, estimate_number = estimation code). */
+  zohoEstimateId: z.string({ message: 'Choose the project code from Zoho' }).trim().regex(/^\d{10,25}$/, 'Choose the project code from Zoho'),
   /** New client: the Client ID created in Zoho. Existing clients take theirs from Zoho. */
   clientId: z
     .string()

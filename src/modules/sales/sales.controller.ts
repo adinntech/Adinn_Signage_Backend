@@ -45,6 +45,7 @@ import {
   zohoClientQuery,
   recceAssignBody,
   recceCodesBody,
+  recceEstimatesQuery,
 } from './sales.validators';
 import { Client } from '../clients/client.model';
 import { linkedZohoClients } from '../clients/client.service';
@@ -264,6 +265,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
 export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
 export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), csQuotationBody.parse(req.body), flowActor(req))));
 export const skipRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.skipRateCard(id(req), flowActor(req))));
+export const recceEstimates = asyncHandler(async (req, res) => ok(res, await recce.recceEstimates(id(req), recceEstimatesQuery.parse(req.query).clientId, flowActor(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 

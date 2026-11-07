@@ -19,6 +19,7 @@ import { revisionLabel } from '../ratecards/ratecard.model';
 import type { quotationBody } from '../ratecards/ratecard.validators';
 import { User } from '../users/user.model';
 import { getZohoClient } from '../zoho/zoho.customers';
+import { belongsTo, getZohoEstimate, listClientEstimates, type EstimateOwner } from '../zoho/zoho.estimates';
 import { claimRoute, clientSnapshot, contactPersonsOf, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, routeOf } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
@@ -520,12 +521,66 @@ export async function confirmHandover(id: string, actor: Actor) {
   return getRecce(id, actor);
 }
 
+/** Whose Zoho estimates: an Existing client by its Zoho contact id; a New client by the Client ID created in Zoho (typed or saved). */
+async function estimateOwnerOf(o: OrderDoc, typedClientId?: string): Promise<EstimateOwner> {
+  const c = await clientOf(o);
+  if (o.clientType === 'EXISTING') return { contactId: c?.zohoId ?? c?.zohoContactId ?? null, customerNo: await zohoClientIdOf(c) };
+  return { contactId: null, customerNo: typedClientId || o.recce?.clientId || c?.zohoCustomerNo || null };
+}
+
+/**
+ * Codes step: the client's Zoho estimates. Each row is one project code (reference_number) with its estimation code
+ * (estimate_number); codes already used by a project or another order come back with usedBy.
+ */
+export async function recceEstimates(id: string, typedClientId: string | undefined, actor: Actor) {
+  const o = await liveOrder(id);
+  assertBranchOpen(o, actor);
+  const owner = await estimateOwnerOf(o, typedClientId);
+  const rows = (await listClientEstimates(owner)).filter((e) => e.reference_number?.trim());
+  const projectCodes = [...new Set(rows.map((e) => e.reference_number!.trim()))];
+  const estCodes = [...new Set(rows.map((e) => (e.estimate_number ?? '').trim().toUpperCase()).filter(Boolean))];
+  const [projects, orders] = await Promise.all([
+    Project.find({ code: { $in: projectCodes } }).select('code').lean(),
+    SalesOrder.find({ _id: { $ne: o._id }, deletedAt: null, $or: [{ 'recce.projectCode': { $in: projectCodes } }, { 'recce.estimationCode': { $in: estCodes } }] })
+      .select('orderNo recce.projectCode recce.estimationCode')
+      .lean(),
+  ]);
+  const usedBy = (pc: string, est: string) => {
+    const ord = orders.find((x) => x.recce?.projectCode === pc || x.recce?.estimationCode === est);
+    if (ord) return 'order ' + ord.orderNo;
+    return projects.some((p) => p.code === pc) ? 'an existing project' : null;
+  };
+  const items = rows.map((e) => {
+    const projectCode = e.reference_number!.trim();
+    const estimationCode = (e.estimate_number ?? '').trim().toUpperCase();
+    return {
+      estimateId: e.estimate_id,
+      projectCode,
+      estimationCode,
+      date: e.date ?? null,
+      total: e.total ?? null,
+      status: e.status_formatted || e.status || null,
+      salesperson: e.salesperson_name ?? null,
+      location: e.location_name ?? null,
+      /** The codes the CRM accepts: 8-digit project code, EST- and 6 digits. */
+      valid: /^\d{8}$/.test(projectCode) && /^EST-\d{6}$/.test(estimationCode),
+      usedBy: usedBy(projectCode, estimationCode),
+    };
+  });
+  return { clientId: owner.customerNo ?? null, searchedBy: owner.contactId ? 'ZOHO_CONTACT' : owner.customerNo ? 'CLIENT_ID' : null, items };
+}
+
 export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody>, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
   await claimRecce(o, actor);
   if (!(await emailDone(o._id))) throw invalid('projectCode', 'Send the project code request email first');
   await assertCodesFree(o._id, input.projectCode, input.estimationCode);
+  // The codes come only from the client's Zoho estimate: it is read again and must match.
+  const est = await getZohoEstimate(input.zohoEstimateId);
+  if (!belongsTo(est, await estimateOwnerOf(o, input.clientId))) throw invalid('projectCode', 'This Zoho estimate does not belong to this client. Choose the project code again.');
+  if (est.reference_number?.trim() !== input.projectCode || (est.estimate_number ?? '').trim().toUpperCase() !== input.estimationCode)
+    throw invalid('projectCode', 'The estimate changed in Zoho. Reload the project code list and choose again.');
   // Client ID in Zoho: an Existing client's comes from Zoho; a New client's is typed (created in Zoho after the email).
   const c = await clientOf(o);
   const fromZoho = o.clientType === 'EXISTING' ? await zohoClientIdOf(c) : null;
@@ -540,7 +595,7 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
     const r = await SalesOrder.updateOne(
       branchFilter(o, actor),
       {
-        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
+        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, zohoEstimateId: input.zohoEstimateId, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
         $push: {
           leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode} / ${input.estimationCode}${clientId ? ` · Client ID ${clientId}` : ''}`, {
             step: 'codes',
