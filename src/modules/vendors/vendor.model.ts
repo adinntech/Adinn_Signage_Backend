@@ -65,6 +65,8 @@ const vendorSchema = new Schema(
     registration: {
       mailSentAt: Date,
       vendorIdAt: Date,
+      /** The reply from Accounts read from the reply mailbox, with the vendor ID found in it (a person still confirms it). */
+      reply: { messageId: String, from: String, receivedAt: Date, snippet: String, detectedVendorNo: String },
       vendorIdBy: { type: Schema.Types.ObjectId, ref: 'User' },
       /** The mail being written (Save as Draft / autosave), kept until it is sent. */
       /** createdAt / createdBy: when and by whom it was first saved; savedAt / savedBy: the last save. */
@@ -82,6 +84,8 @@ const vendorSchema = new Schema(
           status: { type: String, enum: ['SENT', 'FAILED', 'SKIPPED'], required: true },
           error: String,
           requestKey: String,
+          /** ADN-Signage-vnd-06122601: the ID in the subject, used to match the reply. */
+          requestId: String,
           attachmentNames: [String],
           /** When and by whom the mail was first written (its draft), and its last edit before sending. */
           writtenAt: Date,

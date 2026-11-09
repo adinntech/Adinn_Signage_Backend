@@ -1,0 +1,74 @@
+import { ImapFlow } from 'imapflow';
+import { simpleParser } from 'mailparser';
+import { AppError } from '../../common/errors';
+import { env } from '../../config/env';
+import { processReply, type ReplyOutcome } from './mailReply.service';
+
+let running = false;
+
+export interface CheckResult {
+  checked: number;
+  /** Replies that belong to a request of ours, by what happened to them. */
+  outcomes: Partial<Record<ReplyOutcome, number>>;
+}
+
+/** Out-of-office and bounce mails must never be read as an answer. */
+const automatic = (headers: Map<string, unknown>, subject: string) => {
+  const auto = String(headers.get('auto-submitted') ?? '').toLowerCase();
+  return (auto && auto !== 'no') || headers.has('x-autoreply') || /^(automatic reply|auto[- ]?reply|out of office|undeliverable|delivery status)/i.test(subject.trim());
+};
+
+/**
+ * Reads the unread mails whose subject carries a request ID from the reply mailbox (IMAP), hands each to processReply,
+ * and marks as read only the ones that name one of our requests. Other mail in the mailbox is never touched.
+ */
+export async function checkReplies(): Promise<CheckResult> {
+  if (!env.imapEnabled) throw AppError.conflict('The reply mailbox is not configured on the server (IMAP_HOST, IMAP_USER, IMAP_PASS).');
+  if (running) throw AppError.conflict('The reply mailbox is already being checked. Try again in a moment.');
+  running = true;
+  const client = new ImapFlow({ host: env.IMAP_HOST!, port: env.IMAP_PORT, secure: env.IMAP_SECURE === 'true', auth: { user: env.IMAP_USER!, pass: env.IMAP_PASS! }, logger: false });
+  const result: CheckResult = { checked: 0, outcomes: {} };
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock(env.IMAP_MAILBOX);
+    try {
+      const uids = (await client.search({ seen: false, subject: 'ADN-Signage-' }, { uid: true })) || [];
+      for (const uid of uids) {
+        const raw = await client.fetchOne(String(uid), { source: true }, { uid: true });
+        if (!raw || !raw.source) continue;
+        const mail = await simpleParser(raw.source);
+        result.checked += 1;
+        const subject = mail.subject ?? '';
+        if (automatic(mail.headers, subject)) continue;
+        const outcome = await processReply({
+          messageId: mail.messageId ?? `uid-${uid}`,
+          from: (mail.from?.value ?? []).map((a) => a.address ?? '').filter(Boolean),
+          subject,
+          text: mail.text ?? '',
+          ...(mail.date ? { receivedAt: mail.date } : {}),
+        });
+        result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
+        if (outcome !== 'unknown') await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+      }
+    } finally {
+      lock.release();
+    }
+    await client.logout();
+  } catch (e) {
+    if (e instanceof AppError) throw e;
+    client.close();
+    throw new AppError(502, 'MAILBOX_ERROR', `The reply mailbox could not be read: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown error'}`);
+  } finally {
+    running = false;
+  }
+  return result;
+}
+
+/** Checks the mailbox on a timer (MAIL_REPLY_POLL_SECONDS). Does nothing when the mailbox is not configured. */
+export function startReplyPoller() {
+  if (!env.imapEnabled || env.MAIL_REPLY_POLL_SECONDS <= 0) return;
+  const run = () => void checkReplies().catch((e) => console.error('reply mailbox check failed:', e instanceof Error ? e.message : e));
+  setTimeout(run, 15_000).unref();
+  setInterval(run, env.MAIL_REPLY_POLL_SECONDS * 1000).unref();
+  console.log(`Reply mailbox: checked every ${env.MAIL_REPLY_POLL_SECONDS}s`);
+}

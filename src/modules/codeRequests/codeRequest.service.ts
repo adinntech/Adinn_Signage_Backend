@@ -10,6 +10,8 @@ import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { discardStoredFiles, readStoredFile, storedFileUrl, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
+import { routingOf } from '../mailSettings/mailRouting.service';
+import { newRequestId, subjectWithId } from '../mailSettings/requestId';
 import { mailAvailable } from '../notifications/mail.service';
 import { Project } from '../projects/project.model';
 import { liveOrder } from '../sales/order.service';
@@ -35,7 +37,6 @@ const day = (d?: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
 
 /** Sender identities Client Servicing may choose: MAIL_FROM plus the configured extras. */
 export const senderIdentities = () => [...new Set([env.MAIL_FROM, ...(env.MAIL_FROM_IDENTITIES ?? '').split(';')].map((s) => s?.trim()).filter(Boolean) as string[])];
-const group = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 const mailKindOf = (kinds: CodeKind[]): Kind => (kinds.length === 2 ? 'COMBINED_CODE_REQUEST' : kinds[0] === 'CLIENT_CODE' ? 'CLIENT_CODE_REQUEST' : 'PROJECT_CODE_REQUEST');
 
@@ -133,6 +134,7 @@ export async function overview(orderId: string, actor: Actor) {
   ]);
   if (!client) throw AppError.notFound('Client not found');
   const requests = await present(rowsRaw);
+  const routing = { CLIENT_CODE: await routingOf('CLIENT_CODE'), PROJECT_CODE: await routingOf('PROJECT_CODE') };
   const stateOf = async (kind: CodeKind) => {
     const code = await confirmedCodeOf(kind, o._id, client, o.recce?.projectCode);
     const rows = requests.filter((r) => r.kind === kind);
@@ -169,7 +171,9 @@ export async function overview(orderId: string, actor: Actor) {
       enabled: mailAvailable() || signageMailAvailable(),
       from: env.MAIL_FROM ?? null,
       identities: senderIdentities(),
-      groups: { CLIENT_CODE: group(env.CODE_REQUEST_CLIENT_RECIPIENTS), PROJECT_CODE: group(env.CODE_REQUEST_PROJECT_RECIPIENTS) },
+      groups: { CLIENT_CODE: routing.CLIENT_CODE.to, PROJECT_CODE: routing.PROJECT_CODE.to },
+      /** Admin panel > Mail settings: the To / CC / BCC each request email opens with. */
+      routing,
     },
     defaults: defaultDrafts(o, client, me?.name ?? 'Client Servicing'),
     drafts: rowsRaw.filter((r) => r.status === 'DRAFT' && r.draft).map((r) => ({ kind: r.kind, ...r.draft })),
@@ -267,6 +271,8 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
     const mailBatchId = randomUUID();
     const mode = m.kinds.length === 2 ? ('COMBINED' as const) : multi ? ('SEPARATE' as const) : ('SINGLE' as const);
     const rowIds: Types.ObjectId[] = [];
+    const idType = m.kinds.length === 2 ? ('COMBINED_CODE' as const) : m.kinds[0]!;
+    const routing = await routingOf(m.kinds.includes('PROJECT_CODE') ? 'PROJECT_CODE' : 'CLIENT_CODE');
     for (const kind of m.kinds) {
       const set = { client: o.client, mailBatchId, mode, requestKey: keyOf(i), bcc: m.bcc, source: 'CS' as const, createdBy: actor.id };
       const r =
@@ -275,6 +281,9 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
         (await CodeRequest.create({ order: o._id, kind, status: 'DRAFT', ...set }));
       rowIds.push(r._id);
     }
+    // The ID is taken once per email: a failed email that is retried keeps it.
+    const requestId = (await CodeRequest.findOne({ _id: { $in: rowIds }, requestId: { $type: 'string' } }).select('requestId').lean())?.requestId ?? (await newRequestId(idType));
+    await CodeRequest.updateMany({ _id: { $in: rowIds } }, { $set: { requestId } });
     const entry = await deliver({
       order: o._id,
       client: o.client,
@@ -283,10 +292,10 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
       cc: m.cc,
       bcc: m.bcc,
       from: m.from,
-      subject: m.subject,
+      subject: subjectWithId(m.subject, requestId),
       body: signageMailAvailable() ? sanitizeHtml(m.body) : sanitizeHtml(m.body) + footer(),
       attachments: stored,
-      ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, m.kinds, mailBatchId, m.body) } : {}),
+      ...(signageMailAvailable() ? { signage: { ...buildCodeMail({ order: o, client }, m.kinds, requestId, m.body), ...(routing.replyTo ? { replyTo: routing.replyTo } : {}) } } : {}),
       requestKey: keyOf(i),
       actor,
     });
@@ -332,6 +341,9 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
   if (!prior) throw AppError.notFound('The original email was not found');
   const client = await Client.findById(o.client).select('name clientNo gstin address email phone approvedCode onboarding.pan contacts').lean();
   if (!client) throw AppError.notFound('Client not found');
+  const requestId = rows.find((r) => r.requestId)?.requestId ?? (await newRequestId(rows.length === 2 ? 'COMBINED_CODE' : rows[0]!.kind));
+  await CodeRequest.updateMany({ _id: { $in: rows.map((r) => r._id) } }, { $set: { requestId } });
+  const routing = await routingOf(rows.some((r) => r.kind === 'PROJECT_CODE') ? 'PROJECT_CODE' : 'CLIENT_CODE');
   const entry = await deliver({
     order: o._id,
     client: o.client,
@@ -339,11 +351,11 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
     to: prior.to,
     cc: prior.cc,
     bcc: rows[0]!.bcc,
-    subject: prior.subject ?? '',
+    subject: subjectWithId(prior.subject ?? '', requestId),
     body: prior.body ?? '',
     attachments: (prior.attachments ?? []).filter((a) => a.fileId) as StoredFile[],
     resentFrom: prior._id,
-    ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, rows.map((r) => r.kind), rows[0]!.mailBatchId ?? String(rows[0]!._id), prior.body ?? '') } : {}),
+    ...(signageMailAvailable() ? { signage: { ...buildCodeMail({ order: o, client }, rows.map((r) => r.kind), requestId, prior.body ?? ''), ...(routing.replyTo ? { replyTo: routing.replyTo } : {}) } } : {}),
     actor,
   });
   if (!entry) throw new AppError(500, 'INTERNAL', 'The email record could not be saved');

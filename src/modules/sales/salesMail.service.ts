@@ -19,16 +19,10 @@ import { sendSignageCodeMail, signageMailAvailable, type SignageCodeMailInput } 
 import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
 import { sendViaSignageMail, signagePayload } from './signageMail';
-import { nextSeq } from '../../common/counter.model';
+import { newRequestId, subjectWithId } from '../mailSettings/requestId';
 
 /** Sends in progress (order + request key): a second click while the first is still sending is refused, not sent twice. */
 const inFlight = new Set<string>();
-
-/** Project code request reference, e.g. PCR-2026-0105 (numbered per year in India). */
-const nextRequestId = async () => {
-  const year = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric' }).format(new Date());
-  return `PCR-${year}-${String(await nextSeq(`projectCodeRequest:${year}`)).padStart(4, '0')}`;
-};
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
@@ -106,11 +100,11 @@ async function deliverOnce(rec: DeliverInput) {
   let apiPayload: ReturnType<typeof signagePayload> | undefined;
   let apiResponse: string | undefined;
   if (projectRequest) {
-    requestId = await nextRequestId();
+    requestId = await newRequestId('PROJECT_CODE');
     apiPayload = signagePayload({
       to: rec.to,
       cc: rec.cc,
-      subject: rec.subject,
+      subject: subjectWithId(rec.subject, requestId),
       requestId,
       text: htmlToText(rec.body),
       html: rec.body,
@@ -133,7 +127,7 @@ async function deliverOnce(rec: DeliverInput) {
         apiResponse = await sendViaSignageMail({
           to: rec.to,
           cc: rec.cc,
-          subject: rec.subject,
+          subject: subjectWithId(rec.subject, requestId!),
           requestId: requestId!,
           text: htmlToText(rec.body),
           html,

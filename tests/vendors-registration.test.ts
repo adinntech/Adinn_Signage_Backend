@@ -118,8 +118,9 @@ describe('registration mail and vendor ID', () => {
 
 describe('vendor price management', () => {
   it('stores a price for a Zoho vendor, shows it in the list, and carries it over when the vendor is registered', async () => {
-    const { ZohoVendor } = await import('../src/modules/zoho/zohoVendor.model');
-    await ZohoVendor.create({ zohoContactId: '777000000000111', vendorNo: '12600', name: 'Price Test Signs', zohoStatus: 'active', syncedAt: new Date() });
+    // The Zoho list is not stored; a vendor is kept only because it has a cost. Zoho is not reachable in this test, so the snapshot of an earlier save is used.
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    await VendorPrice.create({ zohoContactId: '777000000000111', vendorNo: '12600', name: 'Price Test Signs', zohoStatus: 'active' });
     const put = (b: unknown) => api().put('/api/v1/vendors/zoho-directory/777000000000111/price').set(as('OPS')).send(b);
     expect((await put({ ratePerShop: 320, farRatePerShop: 280 })).status).toBe(400); // far cannot be below normal
     // skills come from the list: an unknown one is refused until it is added
@@ -130,7 +131,6 @@ describe('vendor price management', () => {
     expect((await put({ ratePerShop: 320, farRatePerShop: 380, skills: ['flex printing'] })).body.data).toMatchObject({ ratePerShop: 320, farRatePerShop: 380, skills: ['Flex printing'], source: 'ZOHO' });
     const list = await api().get('/api/v1/vendors/zoho-directory?price=set').set(as('OPS'));
     expect(list.body.data[0]).toMatchObject({ vendorNo: '12600', price: { ratePerShop: 320 } });
-    expect((await api().get('/api/v1/vendors/zoho-directory?price=missing').set(as('OPS'))).body.data).toHaveLength(0);
     expect((await api().put('/api/v1/vendors/zoho-directory/777000000000111/price').set(as('BD')).send({ ratePerShop: 1 })).status).toBe(403);
 
     const reg = await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', name: 'Price Test Signs', mobile: '9876500030', zohoContactId: '777000000000111', zohoVendorNo: '12600' });
@@ -143,8 +143,8 @@ describe('vendor price management', () => {
 
 describe('GST check', () => {
   it('shows the name a GST number is known by in Zoho and in the registered vendors', async () => {
-    const { ZohoVendor } = await import('../src/modules/zoho/zohoVendor.model');
-    await ZohoVendor.create({ zohoContactId: '777000000000222', vendorNo: '12700', name: 'GST Known Traders', gstin: '33AAGCA2094M1ZK', zohoStatus: 'active', syncedAt: new Date() });
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    await VendorPrice.create({ zohoContactId: '777000000000222', vendorNo: '12700', name: 'GST Known Traders', gstin: '33AAGCA2094M1ZK', zohoStatus: 'active', ratePerShop: 200 });
     const hit = await api().get('/api/v1/vendors/gst/33aagca2094m1zk').set(as('OPS'));
     expect(hit.body.data).toMatchObject({ gstin: '33AAGCA2094M1ZK', zoho: { name: 'GST Known Traders', vendorNo: '12700' }, registered: null });
     expect((await api().get('/api/v1/vendors/gst/29ABCDE1234F1Z5').set(as('OPS'))).body.data).toMatchObject({ zoho: null, registered: null });

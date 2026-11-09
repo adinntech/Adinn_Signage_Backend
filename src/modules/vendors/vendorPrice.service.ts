@@ -3,7 +3,8 @@ import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { normKey } from '../sites/site.fields';
-import { ZohoVendor } from '../zoho/zohoVendor.model';
+import { zohoGet } from '../zoho/zoho.client';
+import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from '../zoho/zoho.mapper';
 import { Vendor } from './vendor.model';
 import type { priceBody, skillBody } from './vendor.service';
 import { VendorPrice } from './vendorPrice.model';
@@ -62,14 +63,12 @@ export async function pricedZohoContactIds(): Promise<string[]> {
  * price removes the cost (the vendor leaves the "cost added" list and the company rate applies). Skills left out stay as they are.
  */
 export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof priceBody>, actor: Actor) {
-  const zoho = await ZohoVendor.findOne({ zohoContactId: contactId }).select('name').lean();
-  if (!zoho) throw AppError.notFound('Zoho vendor not found');
+  const vendor = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null });
   const far = body.farRatePerShop ?? null;
   if (body.ratePerShop == null && far != null) throw AppError.badRequest('Enter the price per shop first');
   if (body.ratePerShop != null && far != null && far < body.ratePerShop) throw AppError.badRequest('The far-distance price cannot be lower than the normal price');
   const skills = body.skills ? await checkedSkills(body.skills) : undefined;
   const set = { ratePerShop: body.ratePerShop, farRatePerShop: far };
-  const vendor = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null });
   if (vendor) {
     const old = { ratePerShop: vendor.ratePerShop ?? null, farRatePerShop: vendor.farRatePerShop ?? null };
     // An empty value removes the field: the vendor falls back to the company rate.
@@ -79,8 +78,21 @@ export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof
     await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'Vendor', entityId: vendor._id, changes: [{ field: 'ratePerShop', oldValue: old.ratePerShop, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: old.farRatePerShop, newValue: set.farRatePerShop }] });
   } else {
     const prior = await VendorPrice.findOne({ zohoContactId: contactId }).lean();
-    const row = await VendorPrice.findOneAndUpdate({ zohoContactId: contactId }, { $set: { ...set, ...(skills ? { skills } : {}), updatedBy: actor.id } }, { upsert: true, new: true });
-    await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: row._id, reason: zoho.name, changes: [{ field: 'ratePerShop', oldValue: prior?.ratePerShop ?? null, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: prior?.farRatePerShop ?? null, newValue: set.farRatePerShop }] });
+    const keepSkills = skills ?? prior?.skills ?? [];
+    // No price and no skills: nothing is kept for this vendor (the Zoho list itself is never stored).
+    if (set.ratePerShop == null && !keepSkills.length) {
+      if (prior) {
+        await VendorPrice.deleteOne({ _id: prior._id });
+        await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: prior._id, reason: prior.name ?? contactId, changes: [{ field: 'ratePerShop', oldValue: prior.ratePerShop ?? null, newValue: null }, { field: 'farRatePerShop', oldValue: prior.farRatePerShop ?? null, newValue: null }] });
+      }
+      return NONE;
+    }
+    // Who the vendor is, read from Zoho now (the browser never supplies it); an earlier snapshot is kept when Zoho cannot be reached.
+    const detail = await zohoGet<{ contact: ZohoContact & { created_by_name?: string; cf_contact_code?: string; created_time?: string; last_modified_time?: string } }>(`/contacts/${encodeURIComponent(contactId)}`).then((d) => d.contact, (e) => { if (prior?.name) return null; throw e; });
+    const snap = detail ? { ...toZohoVendorRow(detail), ...toZohoVendorDetail(detail) } : null;
+    const snapshot = snap ? { vendorNo: snap.vendorNo, name: snap.name, email: snap.email, mobile: snap.mobile, gstin: snap.gstin, pan: snap.pan, city: snap.city, address: snap.address, createdByName: snap.createdByName, contactCode: snap.contactCode, zohoStatus: snap.zohoStatus, zohoCreatedAt: snap.zohoCreatedAt, snapshotAt: new Date() } : {};
+    const row = await VendorPrice.findOneAndUpdate({ zohoContactId: contactId }, { $set: { ...set, ...snapshot, skills: keepSkills, updatedBy: actor.id } }, { upsert: true, new: true });
+    await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: row._id, reason: row.name ?? contactId, changes: [{ field: 'ratePerShop', oldValue: prior?.ratePerShop ?? null, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: prior?.farRatePerShop ?? null, newValue: set.farRatePerShop }] });
   }
   return (await pricesOfZohoVendors([contactId])).get(contactId) ?? NONE;
 }

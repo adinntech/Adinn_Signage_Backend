@@ -4,7 +4,7 @@ vi.mock('../src/config/env', () => ({
   env: { SIGNAGE_MAIL_URL: 'https://mail.example/index_signage.php', SIGNAGE_MAIL_KEY: 'test-key', signageMailEnabled: true },
 }));
 
-import { buildCodeMail, mailDate, requestIdOf, signageMailTypeOf } from '../src/modules/codeRequests/codeRequestMail';
+import { buildCodeMail, mailDate, signageMailTypeOf } from '../src/modules/codeRequests/codeRequestMail';
 import { sendSignageCodeMail } from '../src/modules/codeRequests/signageCodeMail';
 
 const src = {
@@ -29,21 +29,21 @@ describe('buildCodeMail', () => {
   });
 
   it('combined: client from the primary contact, project from the order, note from the body', () => {
-    const m = buildCodeMail(src, ['CLIENT_CODE', 'PROJECT_CODE'], '123e4567-e89b-12d3-a456-426614174000', '<p>Please create both.</p>');
+    const m = buildCodeMail(src, ['CLIENT_CODE', 'PROJECT_CODE'], 'ADN-Signage-cp-06122601', '<p>Please create both.</p>');
     expect(m.mailType).toBe('combined');
-    expect(m.requestId).toBe('REQ-123E4567');
+    expect(m.requestId).toBe('ADN-Signage-cp-06122601');
     expect(m.client).toMatchObject({ clientName: 'UltraTech Cement Limited', contactPerson: 'Jeeva', email: 'j@x.com', phone: '9789056789', gstNumber: '33AAACU5678G1Z2', panNumber: 'AAACU5678G', clientCode: 'CLI-0018' });
     expect(m.project).toMatchObject({ projectName: 'UltraTech Cement Limited - 20261030ORD#1', projectType: 'Signage', businessUnit: 'Signage Solutions', description: 'Total shops: 12. Urgent' });
     expect(m.message).toBe('Please create both.');
+    expect(m.bodyHtml).toBe('<p>Please create both.</p>');
   });
 
   it('client only: no project block', () => {
-    expect(buildCodeMail(src, ['CLIENT_CODE'], 'abcdefgh-0000', '').project).toBeUndefined();
+    expect(buildCodeMail(src, ['CLIENT_CODE'], 'ADN-Signage-cli-06122601', '').project).toBeUndefined();
   });
 
-  it('formats dates and request ids', () => {
+  it('formats dates', () => {
     expect(mailDate(new Date(2026, 9, 30))).toBe('30 Oct 2026');
-    expect(requestIdOf('abcd-ef12-3456')).toBe('REQ-ABCDEF12');
   });
 });
 

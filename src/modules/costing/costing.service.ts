@@ -17,7 +17,6 @@ import { normKey } from '../sites/site.fields';
 import { Site } from '../sites/site.model';
 import { clusterShops } from './costing.cluster';
 import { NO_ADDRESS, verifiedFilter } from '../sites/site.ready';
-import { ZohoVendor } from '../zoho/zohoVendor.model';
 import { VendorPrice } from '../vendors/vendorPrice.model';
 import { Vendor } from '../vendors/vendor.model';
 import { calculateLeg, DEFAULT_RATES, estimateTrip, PLANNING, totalsOf, type Channel, type CostRates, type LegInput } from './costing.calc';
@@ -503,12 +502,10 @@ export async function planReadiness(projectId: string) {
 }
 
 interface ZohoPlace { zohoContactId: string; vendorNo?: string | null; name: string; city: string; address: string; mobile?: string | null; ratePerShop: number | null }
-/** Active Zoho vendors that have a city or address, with the price per shop typed for them (if any). */
+/** Active Zoho vendors that have a cost (the Zoho list itself is not stored) and a city or address, with their price per shop. */
 async function zohoVendorsWithPlace(): Promise<ZohoPlace[]> {
-  const rows = await ZohoVendor.find({ zohoStatus: 'active', $or: [{ city: { $nin: [null, ''] } }, { address: { $nin: [null, ''] } }] }).select('zohoContactId vendorNo name city address mobile').lean();
-  const prices = await VendorPrice.find({ zohoContactId: { $in: rows.map((r) => r.zohoContactId) } }).select('zohoContactId ratePerShop').lean();
-  const price = new Map(prices.map((p) => [p.zohoContactId, p.ratePerShop ?? null]));
-  return rows.map((r) => ({ zohoContactId: r.zohoContactId, vendorNo: r.vendorNo ?? null, name: r.name, city: r.city ?? '', address: r.address ?? '', mobile: r.mobile ?? null, ratePerShop: price.get(r.zohoContactId) ?? null }));
+  const rows = await VendorPrice.find({ ratePerShop: { $ne: null }, name: { $nin: [null, ''] }, zohoStatus: { $ne: 'inactive' }, $or: [{ city: { $nin: [null, ''] } }, { address: { $nin: [null, ''] } }] }).select('zohoContactId vendorNo name city address mobile ratePerShop').lean();
+  return rows.map((r) => ({ zohoContactId: r.zohoContactId, vendorNo: r.vendorNo ?? null, name: r.name ?? '', city: r.city ?? '', address: r.address ?? '', mobile: r.mobile ?? null, ratePerShop: r.ratePerShop ?? null }));
 }
 
 /**

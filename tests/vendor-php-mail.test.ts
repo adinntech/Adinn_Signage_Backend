@@ -80,8 +80,8 @@ describe('vendor registration mail through the PHP mail service', () => {
       toEmail: ['accounts@t.com'],
       ccEmail: ['ops@t.com'],
       bccEmail: ['boss@t.com'],
-      subject: 'Vendor registration request',
-      requestId: v.code,
+      subject: expect.stringMatching(/^Vendor registration request - ADN-Signage-vnd-\d{8,}$/),
+      requestId: expect.stringMatching(/^ADN-Signage-vnd-\d{8,}$/),
       source: 'Operations Team',
       replyTo: 'ops@adinn.co.in', // "Name <address>" becomes the bare address
       vendor: { vendorName: v.name, vendorType: 'One-man / Freelancer', vendorCode: v.code },
@@ -108,7 +108,11 @@ describe('vendor registration mail through the PHP mail service', () => {
     await send(v._id, mailBody({ subject: 'Second try' }));
     expect(posted.calls).toHaveLength(2);
     const list = (await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data.history;
-    expect(list.map((h: { subject: string }) => h.subject)).toEqual(['Second try', 'Vendor registration request']);
+    const subjects = list.map((h: { subject: string }) => h.subject);
+    expect(subjects[0]).toMatch(/^Second try - ADN-Signage-vnd-/);
+    expect(subjects[1]).toMatch(/^Vendor registration request - ADN-Signage-vnd-/);
+    // Each real send takes its own ID; the repeated click did not use one.
+    expect(new Set(list.map((h: { requestId: string }) => h.requestId)).size).toBe(2);
   });
 
   it('refuses before posting when a required document is missing', async () => {

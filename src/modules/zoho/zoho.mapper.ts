@@ -63,7 +63,7 @@ export function toVendorFields(z: ZohoContact) {
 }
 
 /** One row of the Zoho vendor list (the list call carries these fields; address and contact persons only come with the detail call). */
-export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; created_time?: string }) {
+export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; created_time?: string; cf_contact_code?: string }) {
   const gst = (z.gst_no ?? '').trim().toUpperCase();
   const pan = (z.pan_no ?? '').trim().toUpperCase();
   const modified = z.last_modified_time ? new Date(z.last_modified_time) : undefined;
@@ -76,6 +76,7 @@ export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; 
     mobile: mobile(z.mobile) ?? mobile(z.phone),
     gstin: GSTIN.test(gst) ? gst : undefined,
     pan: PAN.test(pan) ? pan : GSTIN.test(gst) ? gst.slice(2, 12) : undefined,
+    contactCode: clean(z.cf_contact_code, 60),
     zohoStatus: z.status === 'inactive' ? ('inactive' as const) : ('active' as const),
     zohoModifiedAt: modified && !Number.isNaN(modified.getTime()) ? modified : undefined,
     zohoCreatedAt: created && !Number.isNaN(created.getTime()) ? created : undefined,

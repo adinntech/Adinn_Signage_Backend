@@ -18,6 +18,8 @@ export interface SignageCodeMail {
   requestDate?: string;
   source?: string;
   message?: string;
+  /** The note as typed (simple formatting kept); the PHP template shows it instead of the plain `message`. */
+  bodyHtml?: string;
   replyTo?: string;
   client: { clientName?: string; clientCode?: string; contactPerson?: string; email?: string; phone?: string; gstNumber?: string; panNumber?: string; address?: string };
   project?: { projectName?: string; projectType?: string; location?: string; startDate?: string; endDate?: string; businessUnit?: string; remarks?: string };
@@ -42,6 +44,7 @@ export async function sendSignageCodeMail(m: SignageCodeMail) {
     requestDate: m.requestDate,
     source: m.source ?? 'Client Servicing Team',
     message: m.message,
+    ...(m.bodyHtml ? { bodyHtml: m.bodyHtml } : {}),
     ...(m.replyTo ? { replyTo: m.replyTo } : {}),
     client: m.client,
     ...(m.project ? { project: m.project } : {}),

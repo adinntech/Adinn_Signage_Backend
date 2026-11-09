@@ -1,4 +1,4 @@
-import { htmlToText } from '../../common/html';
+import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { CodeKind } from './codeRequest.model';
 import type { SignageCodeMailInput, SignageMailType } from './signageCodeMail';
 
@@ -24,9 +24,6 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 /** 30 Oct 2026 (the format the mail template prints). */
 export const mailDate = (d = new Date()) => `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 
-/** Stable per email, so a retry of a failed email carries the same Request ID. */
-export const requestIdOf = (mailBatchId: string) => `REQ-${mailBatchId.replace(/-/g, '').slice(0, 8).toUpperCase()}`;
-
 const clean = (v?: string | null) => (v ?? '').trim() || undefined;
 
 /**
@@ -34,7 +31,7 @@ const clean = (v?: string | null) => (v ?? '').trim() || undefined;
  * client and order number; type and business unit are fixed for the Signage CRM. `bodyHtml` is the text Client Servicing
  * typed in the composer: it goes out as "Additional Notes".
  */
-export function buildCodeMail(src: CodeMailSource, kinds: CodeKind[], mailBatchId: string, bodyHtml: string): SignageCodeMailInput {
+export function buildCodeMail(src: CodeMailSource, kinds: CodeKind[], requestId: string, bodyHtml: string): SignageCodeMailInput {
   const { order, client } = src;
   const primary = client.contacts?.find((c) => c.isPrimary) ?? client.contacts?.[0];
   const shops = order.declaredShopTotal ?? order.shopList?.total ?? null;
@@ -42,10 +39,10 @@ export function buildCodeMail(src: CodeMailSource, kinds: CodeKind[], mailBatchI
   const note = htmlToText(bodyHtml).trim();
   return {
     mailType: signageMailTypeOf(kinds),
-    requestId: requestIdOf(mailBatchId),
+    requestId,
     requestDate: mailDate(),
     source: 'Client Servicing Team',
-    ...(note ? { message: note } : {}),
+    ...(note ? { message: note, bodyHtml: sanitizeHtml(bodyHtml) } : {}),
     client: {
       clientName: clean(client.name),
       clientCode: clean(client.approvedCode),

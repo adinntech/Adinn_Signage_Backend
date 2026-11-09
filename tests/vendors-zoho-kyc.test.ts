@@ -24,6 +24,8 @@ describe('Zoho vendor -> registration form fields', () => {
 let mongod: MongoMemoryServer;
 let app: Express;
 let disconnectDb: () => Promise<unknown>;
+/** The parsed config, imported inside beforeAll (after the test environment is set), never at the top of the file. */
+let env: { ZOHO_VENDOR_CONTACT_CODE: string; ZOHO_SIGNAGE_CREDITORS_ONLY: 'true' | 'false' };
 let root = '';
 const tokens: Record<string, string> = {};
 const as = (r: string) => ({ Authorization: `Bearer ${tokens[r]}` });
@@ -41,6 +43,7 @@ beforeAll(async () => {
   process.env.LOCAL_UPLOAD_PATH = root;
   process.env.ZOHO_ORGANIZATION_ID = '1';
   process.env.ZOHO_ACCESS_TOKEN = 'test-token';
+  env = (await import('../src/config/env')).env;
   const db = await import('../src/config/db');
   disconnectDb = db.disconnectDb;
   await db.connectDb();
@@ -121,74 +124,99 @@ describe('Vendor KYC documents', () => {
   });
 });
 
-describe('Zoho vendors directory (stored copy of the Zoho vendor list)', () => {
-  const pages: Record<string, unknown[]> = {
-    '1': [
-      { contact_id: '800000000000001', cf_contact_code: 'Creditors - Signage', created_time: '2026-08-04T17:13:28+0530', contact_name: '12543 - SRI MURUGAN SIGNS', company_name: 'SRI MURUGAN SIGNS', gst_no: '33ABCDE1234F1Z5', mobile: '9876543210', status: 'active' },
-      { contact_id: '800000000000002', cf_contact_code: 'Creditors - Signage', contact_name: '20001 - OLD PRINTERS', company_name: 'OLD PRINTERS', status: 'inactive' },
-    ],
-    // not a Signage creditor: Zoho should not return it, and if it does the sync drops it
-    '2': [{ contact_id: '800000000000009', cf_contact_code: 'Creditors - Roadshow', contact_name: '30000 - ROADSHOW ONLY', status: 'active' }, { contact_id: '800000000000003', cf_contact_code: 'Creditors - Signage', contact_name: '*No Number Vendor', status: 'active', mobile: '12345' }],
-  };
+describe('Zoho vendors (read live from Zoho; only vendors with a cost are stored)', () => {
+  const calls: URL[] = [];
+  const listed = (code: string | undefined, id: string, name: string, extra: object = {}) => ({ contact_id: id, contact_name: name, ...(code ? { cf_contact_code: code } : {}), status: 'active', ...extra });
   const stub = () =>
     vi.stubGlobal('fetch', vi.fn(async (url: URL) => {
       if (String(url).includes('/oauth/v2/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }), { status: 200 });
       const u = new URL(String(url));
+      calls.push(u);
       const detail = /\/contacts\/(\d+)$/.exec(u.pathname);
-      if (detail) return new Response(JSON.stringify({ code: 0, contact: { contact_id: detail[1], contact_name: 'x', created_by_name: 'Accounts Manager', billing_address: { city: 'Madurai', state: 'Tamil Nadu', zip: '625001' } } }), { status: 200 });
-      expect(u.searchParams.get('cf_contact_code')).toBe('Creditors - Signage');
-      const page = u.searchParams.get('page') ?? '1';
-      return new Response(JSON.stringify({ code: 0, contacts: pages[page] ?? [], page_context: { has_more_page: page === '1' } }), { status: 200 });
+      if (detail) return new Response(JSON.stringify({ code: 0, contact: { contact_id: detail[1], contact_name: '12543 - SRI MURUGAN SIGNS', company_name: 'SRI MURUGAN SIGNS', cf_contact_code: 'Creditors - Signage', gst_no: '33ABCDE1234F1Z5', mobile: '9876543210', created_by_name: 'Accounts Manager', billing_address: { city: 'Madurai', state: 'Tamil Nadu', zip: '625001' } } }), { status: 200 });
+      const all = [listed('Creditors - Signage', '800000000000001', '12543 - SRI MURUGAN SIGNS', { gst_no: '33ABCDE1234F1Z5', mobile: '9876543210' }), listed('Creditors - Roadshow', '800000000000009', '30000 - ROADSHOW ONLY'), listed(undefined, '800000000000010', '40000 - NO CODE VENDOR')];
+      const only = u.searchParams.get('cf_contact_code');
+      return new Response(JSON.stringify({ code: 0, contacts: only ? all.filter((c) => c.cf_contact_code === only) : all, page_context: { has_more_page: u.searchParams.get('page') === '1' && !only } }), { status: 200 });
     }));
-  const finished = async () => {
-    for (let i = 0; i < 50; i++) {
-      const s = (await api().get('/api/v1/vendors/zoho-directory/status').set(as('OPS'))).body.data;
-      if (!s.sync.running) return s;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    throw new Error('sync did not finish');
-  };
+  const list = (qs = '') => api().get(`/api/v1/vendors/zoho-directory?${qs}`).set(as('OPS'));
+  const last = () => calls[calls.length - 1]!;
 
-  it('syncs every page, keeps them apart from registered vendors, and lists them', async () => {
+  it('reads the list from Zoho when asked and stores nothing', async () => {
     stub();
-    expect((await api().post('/api/v1/vendors/zoho-directory/sync').set(as('BD'))).status).toBe(403);
-    expect((await api().post('/api/v1/vendors/zoho-directory/sync').set(as('OPS'))).status).toBe(202);
-    const s = await finished();
-    expect(s).toMatchObject({ total: 3, active: 2, sync: { fetched: 3, detailsDone: 3, detailsTotal: 3, error: null } });
-    const all = (await api().get('/api/v1/vendors/zoho-directory?limit=50').set(as('OPS'))).body;
-    expect(all.data.map((v: { name: string }) => v.name).sort()).toEqual(['*No Number Vendor', 'OLD PRINTERS', 'SRI MURUGAN SIGNS'].sort());
-    expect(all.data.find((v: { vendorNo?: string }) => v.vendorNo === '12543')).toMatchObject({ gstin: '33ABCDE1234F1Z5', pan: 'ABCDE1234F', mobile: '9876543210', vendor: null, city: 'Madurai', createdByName: 'Accounts Manager' });
-    expect(all.data.some((v: { name: string }) => v.name === 'ROADSHOW ONLY')).toBe(false);
-    expect(all.data.find((v: { name: string }) => v.name === '*No Number Vendor').mobile).toBeFalsy(); // invalid mobile dropped
-    // they are NOT registered vendors
-    const registered = (await api().get('/api/v1/vendors?q=SRI MURUGAN').set(as('OPS'))).body.data.filter((v: { zohoContactId?: string }) => v.zohoContactId === '800000000000001');
-    expect(registered).toHaveLength(0);
+    env.ZOHO_SIGNAGE_CREDITORS_ONLY = 'true';
+    const r = await list('limit=2');
+    expect(r.status).toBe(200);
+    expect(last().searchParams.get('cf_contact_code')).toBe('Creditors - Signage');
+    expect(last().searchParams.get('per_page')).toBe('200'); // the whole Signage group is read once (200 per call) and paged here
+    expect(r.body.data.map((v: { name: string }) => v.name)).toEqual(['SRI MURUGAN SIGNS']);
+    expect(r.body.data[0]).toMatchObject({ vendorNo: '12543', vendor: null, price: { ratePerShop: null } });
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    expect(await VendorPrice.countDocuments()).toBe(0);
+    expect((await api().get('/api/v1/vendors/zoho-directory').set(as('BD'))).status).toBe(403);
   });
 
-  it('filters by search, status and registration; registering links the row back', async () => {
-    const q = (s: string) => api().get(`/api/v1/vendors/zoho-directory?${s}`).set(as('OPS')).then((r) => r.body.data as { vendorNo?: string; vendor: { code: string } | null }[]);
-    expect(await q('q=20001')).toHaveLength(1);
-    expect(await q('status=inactive')).toHaveLength(1);
-    expect(await q('registered=no')).toHaveLength(3);
+  it('signageOnly=false (or ZOHO_SIGNAGE_CREDITORS_ONLY=false) asks Zoho for every vendor and keeps each Contact Code', async () => {
+    stub();
+    const r = await list('signageOnly=false&limit=50');
+    expect(last().searchParams.get('cf_contact_code')).toBeNull();
+    expect(r.body.data.map((v: { name: string }) => v.name).sort()).toEqual(['NO CODE VENDOR', 'ROADSHOW ONLY', 'SRI MURUGAN SIGNS']);
+    expect(r.body.data.find((v: { name: string }) => v.name === 'ROADSHOW ONLY')).toMatchObject({ contactCode: 'Creditors - Roadshow' });
+    expect(r.body.meta.totalPages).toBe(2); // Zoho said another page exists
+    env.ZOHO_SIGNAGE_CREDITORS_ONLY = 'false';
+    await list('limit=5');
+    expect(last().searchParams.get('cf_contact_code')).toBeNull();
+    env.ZOHO_SIGNAGE_CREDITORS_ONLY = 'true';
+  });
+
+  it('sends the search to the Zoho field that fits it, and the status as a Zoho filter', async () => {
+    stub();
+    await list('q=SRI&status=inactive&signageOnly=false');
+    expect(last().searchParams.get('contact_name_contains')).toBe('SRI');
+    expect(last().searchParams.get('filter_by')).toBe('Status.Inactive');
+    await list('q=a%40b.com&signageOnly=false');
+    expect(last().searchParams.get('email_contains')).toBe('a@b.com');
+    await list('q=98765%2043210&signageOnly=false');
+    expect(last().searchParams.get('phone_contains')).toBe('9876543210');
+  });
+
+  it('adding a cost stores only that vendor (name, city, GST... read from Zoho); the cost list and registration read it back', async () => {
+    stub();
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    const put = (b: unknown) => api().put('/api/v1/vendors/zoho-directory/800000000000001/price').set(as('OPS')).send(b);
+    expect((await put({ ratePerShop: 300 })).body.data).toMatchObject({ ratePerShop: 300, source: 'ZOHO' });
+    expect(await VendorPrice.countDocuments()).toBe(1);
+    expect(await VendorPrice.findOne().lean()).toMatchObject({ zohoContactId: '800000000000001', name: 'SRI MURUGAN SIGNS', vendorNo: '12543', city: 'Madurai', gstin: '33ABCDE1234F1Z5', createdByName: 'Accounts Manager' });
+    const withCost = await list('price=set');
+    expect(withCost.body.data).toHaveLength(1);
+    expect(withCost.body.data[0]).toMatchObject({ name: 'SRI MURUGAN SIGNS', city: 'Madurai', price: { ratePerShop: 300 }, vendor: null });
+    expect((await list('price=set&q=nobody')).body.data).toHaveLength(0);
+    // the live list shows the cost next to the vendor, and "missing" hides it
+    expect((await list()).body.data[0]).toMatchObject({ price: { ratePerShop: 300 } });
+    expect((await list('price=missing')).body.data).toHaveLength(0);
     const created = await api().post('/api/v1/vendors').set(as('OPS')).send({ name: 'Sri Murugan Signs Reg', type: 'ORGANIZATION', contactPerson: 'Murugan', gstin: '33ABCDE1234F1Z5', mobile: '9876500099', zohoContactId: '800000000000001', zohoVendorNo: '12543' });
     expect(created.status).toBe(201);
-    expect(await q('registered=no')).toHaveLength(2);
-    const yes = await q('registered=yes');
-    expect(yes).toHaveLength(1);
-    expect(yes[0]!.vendor).toMatchObject({ code: created.body.data.code });
+    expect(created.body.data).toMatchObject({ ratePerShop: 300 });
+    expect((await list()).body.data[0].vendor).toMatchObject({ code: created.body.data.code });
+    expect((await list('registered=yes')).body.data.map((v: { zohoContactId: string }) => v.zohoContactId)).toContain('800000000000001');
+    const st = (await api().get('/api/v1/vendors/zoho-directory/status').set(as('OPS'))).body.data;
+    expect(st).toMatchObject({ live: true });
+    expect(st.costed).toBeGreaterThanOrEqual(1);
+    expect(st.registered).toBeGreaterThanOrEqual(1);
   });
 
-  it('a second sync removes vendors that are gone from Zoho and cannot run twice at once', async () => {
-    pages['2'] = [];
-    pages['1'] = (pages['1'] as { contact_id: string }[]).slice(0, 1);
+  it('removing the cost removes what was stored for that vendor', async () => {
     stub();
-    const [a, b] = await Promise.all([api().post('/api/v1/vendors/zoho-directory/sync').set(as('OPS')), api().post('/api/v1/vendors/zoho-directory/sync').set(as('OPS'))]);
-    expect([a.status, b.status].sort()).toEqual([202, 409]);
-    const last = await finished();
-    expect(last).toMatchObject({ total: 1, registered: 2 });
-    expect(last.sync.detailsTotal).toBe(0); // nothing changed in Zoho since the details were read: no detail calls
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    // a vendor that is not registered: price, then no price
+    await VendorPrice.deleteMany({});
+    const put = (b: unknown) => api().put('/api/v1/vendors/800000000000010/price'.replace('/vendors/', '/vendors/zoho-directory/')).set(as('OPS')).send(b);
+    expect((await put({ ratePerShop: 250 })).status).toBe(200);
+    expect(await VendorPrice.countDocuments()).toBe(1);
+    expect((await put({ ratePerShop: null })).body.data).toMatchObject({ ratePerShop: null, source: null });
+    expect(await VendorPrice.countDocuments()).toBe(0);
   });
 });
+
 
 describe('Export of entered and fetched vendor details', () => {
   const csv = (path: string, as_ = 'OPS') => api().get(path).set(as(as_)).buffer(true).parse((res, cb) => { let t = ''; res.setEncoding('utf8'); res.on('data', (c: string) => (t += c)); res.on('end', () => cb(null, t)); });
@@ -216,14 +244,18 @@ describe('Export of entered and fetched vendor details', () => {
     expect((await api().get('/api/v1/vendors/export?format=csv').set(as('BD'))).status).toBe(403);
   });
 
-  it('Zoho vendors: CSV with the fetched details and the active/inactive filter', async () => {
+  it('Zoho vendors: the CSV holds the vendors that have a cost, with the status filter', async () => {
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    await VendorPrice.create({ zohoContactId: '800000000000555', name: 'Export Signs', vendorNo: '55555', ratePerShop: 210, city: 'Theni', zohoStatus: 'active' });
     const all = await csv('/api/v1/vendors/zoho-directory/export?format=csv');
-    const lines = (all.body as string).replace(/^﻿/, '').trim().split('\r\n');
-    expect(lines[0]).toBe('Vendor ID,Vendor Name,Phone,Email,Created By,Created On,Status,City,Address,GSTIN,PAN,Price per Shop,Far Price per Shop,Zoho Contact ID,Last Synced');
-    expect(lines.length).toBeGreaterThanOrEqual(2);
-    expect(lines[1]).toContain('Active');
+    const lines = (all.body as string).replace(/^\uFEFF/, '').trim().split('\r\n');
+    expect(lines[0]).toBe('Vendor ID,Vendor Name,Phone,Email,Created By,Created On,Status,City,Address,GSTIN,PAN,Price per Shop,Far Price per Shop,Contact Code,Zoho Contact ID');
+    const mine = lines.find((l) => l.includes('Export Signs'));
+    expect(mine).toContain('Active');
+    expect(mine).toContain('Theni');
     const inactive = await csv('/api/v1/vendors/zoho-directory/export?format=csv&status=inactive');
-    expect((inactive.body as string).trim().split('\r\n')).toHaveLength(1);
+    expect(inactive.body as string).not.toContain('Export Signs');
+    await VendorPrice.deleteMany({});
   });
 });
 

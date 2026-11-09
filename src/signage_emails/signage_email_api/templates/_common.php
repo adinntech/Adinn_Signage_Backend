@@ -79,7 +79,9 @@ function noteBar(string $text):void{
 }
 
 function messageBlock(array $data):void{
- if(!empty($data['message']))echo '<p style="font-size:12px;line-height:1.7;color:#394d6b;margin:0 0 10px"><strong>Additional Notes:</strong> '.nl2br(esc($data['message'])).'</p>';
+ /* bodyHtml is cleaned by index_signage.php (simple formatting tags only); the plain message is the fallback. */
+ if(!empty($data['bodyHtml']))echo '<div style="font-size:12px;line-height:1.7;color:#394d6b;margin:0 0 10px"><strong>Additional Notes:</strong><div style="margin-top:4px">'.$data['bodyHtml'].'</div></div>';
+ elseif(!empty($data['message']))echo '<p style="font-size:12px;line-height:1.7;color:#394d6b;margin:0 0 10px"><strong>Additional Notes:</strong> '.nl2br(esc($data['message'])).'</p>';
 }
 
 /* Sign-off, logo and (optional) footer banner; closes the document. */

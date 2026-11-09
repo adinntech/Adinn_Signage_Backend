@@ -51,6 +51,8 @@ In Bruno: Headers tab -> `Content-Type` and `X-API-Key` (the header name is `X-A
 
 Common fields: `mailtype`, `toEmail` (array or comma-separated), `ccEmail`, `bccEmail`, `subject` (optional, max 200 chars, no line breaks), `requestId` (max 100 chars), `requestDate`, `source`, `message`, `replyTo`, `attachments`.
 
+`bodyHtml` (code requests and vendor): rich text typed on the CRM screen, cleaned to simple tags and shown as "Additional Notes"; `message` (plain text) is the fallback. `requestId` is `ADN-Signage-<prj|cli|cp|vnd>-ddmmyy<serial>`.
+
 ### 1. Combined (`mailtype: "combined"`)
 
 ```json

@@ -1,170 +1,212 @@
 import { z } from 'zod';
 import { env } from '../../config/env';
-import { AppError } from '../../common/errors';
 import { exportFormat, tabularFile, type ExportColumn } from '../../common/tabular';
-import { escapeRegex, listQuery, pageMeta, type Actor } from '../../common/query';
-import { recordAudit } from '../audit/audit.service';
+import { escapeRegex, listQuery, pageMeta } from '../../common/query';
 import { Vendor } from '../vendors/vendor.model';
+import { VendorPrice } from '../vendors/vendorPrice.model';
 import { pricedZohoContactIds, pricesOfZohoVendors } from '../vendors/vendorPrice.service';
 import { zohoGet } from './zoho.client';
-import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from './zoho.mapper';
-import { ZohoVendor } from './zohoVendor.model';
+import { toZohoVendorRow, type ZohoContact } from './zoho.mapper';
 
-const PER_PAGE = 200; // Zoho's maximum
-const DETAIL_PARALLEL = 3; // Zoho Books allows about 100 calls a minute; three at a time stays well under it
-
-export interface SyncState {
-  running: boolean;
-  phase: 'list' | 'details' | null;
-  /** Vendors read from the Zoho list. */
-  fetched: number;
-  /** Detail calls (city, address, created by) done / needed in this run. */
-  detailsDone: number;
-  detailsTotal: number;
-  startedAt: string | null;
-  finishedAt: string | null;
-  error: string | null;
-}
-const idle = (): SyncState => ({ running: false, phase: null, fetched: 0, detailsDone: 0, detailsTotal: 0, startedAt: null, finishedAt: null, error: null });
-/** One backend process runs one sync at a time; the state is for the progress bar and is lost on restart (the data is not). */
-let state: SyncState = idle();
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-/** Zoho answers "too many requests" with an error body; wait and try again a few times before giving up on that vendor. */
-async function withRetry<T>(call: () => Promise<T>): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await call();
-    } catch (e) {
-      if (attempt >= 3 || !(e instanceof AppError) || e.statusCode !== 502) throw e;
-      await sleep(attempt * 5000);
-    }
-  }
-}
-
-async function runSync() {
-  const started = new Date();
-  const wanted = env.ZOHO_VENDOR_CONTACT_CODE.trim().toLowerCase();
-  try {
-    // 1) the list: only vendors whose Zoho "Contact Code" is the configured one (Creditors - Signage). Zoho filters; we check again.
-    for (let page = 1; ; page++) {
-      const r = await withRetry(() =>
-        zohoGet<{ contacts?: (ZohoContact & { last_modified_time?: string; created_time?: string; cf_contact_code?: string })[]; page_context?: { has_more_page?: boolean } }>('/contacts', {
-          contact_type: 'vendor',
-          cf_contact_code: env.ZOHO_VENDOR_CONTACT_CODE,
-          per_page: PER_PAGE,
-          page,
-        }),
-      );
-      const rows = (r.contacts ?? []).filter((c) => (c.cf_contact_code ?? '').trim().toLowerCase() === wanted).map(toZohoVendorRow);
-      if (rows.length) {
-        await ZohoVendor.bulkWrite(
-          rows.map((row) => ({
-            updateOne: {
-              filter: { zohoContactId: row.zohoContactId },
-              // null (not undefined) so a value removed in Zoho is cleared here too.
-              update: { $set: { ...Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v ?? null])), syncedAt: started } },
-              upsert: true,
-            },
-          })),
-          { ordered: false },
-        );
-      }
-      state.fetched += rows.length;
-      if (!r.page_context?.has_more_page) break;
-    }
-    // Only after a complete read: vendors that are no longer in the list (removed, or no longer this Contact Code) are gone here too.
-    await ZohoVendor.deleteMany({ syncedAt: { $lt: started } });
-
-    // 2) details (city, address, created by) only for vendors that are new or changed in Zoho since their details were read.
-    state.phase = 'details';
-    const todo = await ZohoVendor.find({ syncedAt: started, $or: [{ detailAt: null }, { $expr: { $ne: ['$detailModifiedAt', '$zohoModifiedAt'] } }] })
-      .select('zohoContactId zohoModifiedAt')
-      .lean();
-    state.detailsTotal = todo.length;
-    let next = 0;
-    let failed = 0;
-    await Promise.all(
-      Array.from({ length: DETAIL_PARALLEL }, async () => {
-        while (next < todo.length) {
-          const row = todo[next++]!;
-          try {
-            const d = await withRetry(() => zohoGet<{ contact: ZohoContact & { created_by_name?: string } }>(`/contacts/${encodeURIComponent(row.zohoContactId)}`));
-            const f = toZohoVendorDetail(d.contact);
-            await ZohoVendor.updateOne({ _id: row._id }, { $set: { city: f.city ?? null, address: f.address ?? null, createdByName: f.createdByName ?? null, detailAt: new Date(), detailModifiedAt: row.zohoModifiedAt ?? null } });
-          } catch (e) {
-            failed++; // left without detailAt: the next sync reads it again
-            console.error('zoho vendor detail failed', row.zohoContactId, (e as Error).message);
-          }
-          state.detailsDone++;
-        }
-      }),
-    );
-    state = { ...state, running: false, phase: null, finishedAt: new Date().toISOString(), error: failed ? `${failed} vendor(s) could not be read fully. Run the sync again to retry them.` : null };
-  } catch (e) {
-    state = { ...state, running: false, phase: null, finishedAt: new Date().toISOString(), error: e instanceof AppError ? e.message : 'The sync stopped. Try again in a minute.' };
-    console.error('zoho vendor sync failed', e);
-  }
-}
-
-/** Starts reading every vendor from Zoho in the background and returns at once; poll zohoVendorStatus() for progress. */
-export async function startZohoVendorSync(actor: Actor) {
-  if (state.running) throw AppError.conflict('A Zoho sync is already running');
-  state = { ...idle(), running: true, phase: 'list', startedAt: new Date().toISOString() };
-  await recordAudit({ actor, action: 'ZOHO_VENDOR_SYNC', entity: 'ZohoVendor', entityId: actor.id });
-  void runSync();
-  return state;
-}
-
-export async function zohoVendorStatus() {
-  const [total, active, registered, last] = await Promise.all([
-    ZohoVendor.countDocuments(),
-    ZohoVendor.countDocuments({ zohoStatus: 'active' }),
-    Vendor.countDocuments({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null }),
-    ZohoVendor.findOne().sort({ syncedAt: -1 }).select('syncedAt').lean(),
-  ]);
-  return { sync: state, total, active, registered, lastSyncedAt: last?.syncedAt ?? null };
-}
+/**
+ * The "Zoho vendors" list. Nothing of Zoho's vendor list is stored here: the list is read from Zoho Books when the screen asks
+ * for it. Only a vendor that gets a cost (price per shop, travelling cost) is kept, as a small snapshot on VendorPrice, so
+ * "Vendors with cost" and the cost planning work without calling Zoho.
+ */
 
 export const zohoVendorListQuery = listQuery.extend({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   status: z.enum(['active', 'inactive']).optional(),
   registered: z.enum(['yes', 'no']).optional(),
-  /** Vendor price management: only vendors whose price per shop is set / not set yet. */
+  /** Vendor price management: only vendors whose price per shop is set / not set yet. "set" is read from what is stored, not from Zoho. */
   price: z.enum(['set', 'missing']).optional(),
+  /** true: only the Signage creditors (Zoho Contact Code = ZOHO_VENDOR_CONTACT_CODE). false: every vendor in Zoho. Left out: ZOHO_SIGNAGE_CREDITORS_ONLY. */
+  signageOnly: z.enum(['true', 'false']).optional(),
 });
+type ListQuery = z.infer<typeof zohoVendorListQuery>;
 
-/** The list screen and the export share this filter. */
-async function zohoFilter(q: Pick<z.infer<typeof zohoVendorListQuery>, 'status' | 'q' | 'registered'> & { price?: 'set' | 'missing' | undefined }) {
-  const f: Record<string, unknown> = {};
-  if (q.status) f.zohoStatus = q.status;
-  if (q.q) {
-    const re = new RegExp(escapeRegex(q.q), 'i');
-    f.$or = [{ name: re }, { vendorNo: re }, { gstin: re }, { pan: re }, { mobile: re }, { email: re }, { city: re }, { createdByName: re }, { zohoContactId: re }];
-  }
-  if (q.registered) {
-    const ids = (await Vendor.find({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null }).select('zohoContactId').lean()).map((v) => v.zohoContactId);
-    f.zohoContactId = q.registered === 'yes' ? { $in: ids } : { $nin: ids };
-  }
-  if (q.price) {
-    const priced = await pricedZohoContactIds();
-    const both = f.zohoContactId ? [{ zohoContactId: f.zohoContactId }, { zohoContactId: q.price === 'set' ? { $in: priced } : { $nin: priced } }] : null;
-    if (both) { delete f.zohoContactId; f.$and = both; } else f.zohoContactId = q.price === 'set' ? { $in: priced } : { $nin: priced };
-  }
-  return f;
+type Row = ReturnType<typeof toZohoVendorRow> & { city?: string | null; address?: string | null; createdByName?: string | null };
+
+/** Zoho only searches one field at a time: an e-mail, a phone number, or the name (the vendor number is part of the name: "12543 - NAME"). */
+function searchParams(term?: string): Record<string, string> {
+  const t = term?.trim();
+  if (!t) return {};
+  if (t.includes('@')) return { email_contains: t };
+  if (/^\+?[\d\s-]{7,}$/.test(t)) return { phone_contains: t.replace(/\D/g, '') };
+  return { contact_name_contains: t };
 }
 
-/** One page of the stored Zoho vendors; each row says whether it is already in the vendor master. */
-export async function listZohoVendors(q: z.infer<typeof zohoVendorListQuery>) {
-  const f = await zohoFilter(q);
-  const [items, total] = await Promise.all([
-    ZohoVendor.find(f).sort({ name: 1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
-    ZohoVendor.countDocuments(f),
-  ]);
-  const linked = await Vendor.find({ zohoContactId: { $in: items.map((i) => i.zohoContactId) }, deletedAt: null }).select('zohoContactId code status').lean();
+/** Who already holds each Zoho vendor in the vendor master, and the price typed for it. */
+async function decorate(rows: Row[]) {
+  const ids = rows.map((r) => r.zohoContactId);
+  const linked = await Vendor.find({ zohoContactId: { $in: ids }, deletedAt: null }).select('zohoContactId code status').lean();
   const byZoho = new Map(linked.map((v) => [v.zohoContactId, { id: String(v._id), code: v.code, status: v.status }]));
-  const prices = await pricesOfZohoVendors(items.map((i) => i.zohoContactId));
-  return { items: items.map((i) => ({ ...i, vendor: byZoho.get(i.zohoContactId) ?? null, price: prices.get(i.zohoContactId) ?? { ratePerShop: null, farRatePerShop: null, source: null } })), meta: pageMeta(q.page, q.limit, total) };
+  const prices = await pricesOfZohoVendors(ids);
+  return rows.map((r) => ({ ...r, _id: r.zohoContactId, vendor: byZoho.get(r.zohoContactId) ?? null, price: prices.get(r.zohoContactId) ?? { ratePerShop: null, farRatePerShop: null, source: null } }));
+}
+
+/** Vendors that have a cost (and registered Zoho vendors), from what is stored. */
+async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'price'>): Promise<Row[]> {
+  const [snaps, vendors] = await Promise.all([VendorPrice.find().lean(), Vendor.find({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null }).lean()]);
+  const rows = new Map<string, Row>();
+  for (const s of snaps) {
+    if (s.ratePerShop == null) continue;
+    rows.set(s.zohoContactId, { zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null });
+  }
+  for (const v of vendors) {
+    const id = v.zohoContactId as string;
+    const costed = v.ratePerShop != null;
+    if (!costed && q.registered !== 'yes') continue;
+    if (!rows.has(id)) rows.set(id, { zohoContactId: id, vendorNo: v.zohoVendorNo ?? undefined, name: v.name, email: v.email ?? undefined, mobile: v.mobile ?? undefined, gstin: v.gstin ?? undefined, pan: v.pan ?? undefined, contactCode: undefined, zohoStatus: v.status === 'INACTIVE' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: undefined, city: v.district ?? null, address: v.address ?? null, createdByName: null });
+  }
+  let list = [...rows.values()];
+  if (q.status) list = list.filter((r) => r.zohoStatus === q.status);
+  if (q.q) {
+    const re = new RegExp(escapeRegex(q.q), 'i');
+    list = list.filter((r) => [r.name, r.vendorNo, r.gstin, r.pan, r.mobile, r.email, r.city, r.zohoContactId].some((x) => x && re.test(x)));
+  }
+  if (q.registered) {
+    const reg = new Set(vendors.map((v) => v.zohoContactId));
+    list = list.filter((r) => reg.has(r.zohoContactId) === (q.registered === 'yes'));
+  }
+  return list.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The Signage creditors (about 577), all of them, kept in memory only for SIGNAGE_TTL_MS. Zoho drops the Contact Code filter when it
+ * is combined with the Active/Inactive filter or with a search, so for this small group the whole list is read once (200 per
+ * call) and the status, the search and the paging are done here.
+ */
+const SIGNAGE_TTL_MS = 15 * 60 * 1000;
+let signageCache: { rows: Row[]; at: number } | null = null;
+let signageLoading: Promise<Row[]> | null = null;
+async function signageRows(): Promise<Row[]> {
+  if (signageCache && Date.now() - signageCache.at < SIGNAGE_TTL_MS) return signageCache.rows;
+  if (!signageLoading) {
+    signageLoading = (async () => {
+      const wanted = env.ZOHO_VENDOR_CONTACT_CODE.trim().toLowerCase();
+      const rows: Row[] = [];
+      for (let page = 1; page <= 50; page++) {
+        const r = await zohoGet<{ contacts?: (ZohoContact & { cf_contact_code?: string })[]; page_context?: { has_more_page?: boolean } }>('/contacts', { contact_type: 'vendor', per_page: 200, page, cf_contact_code: env.ZOHO_VENDOR_CONTACT_CODE });
+        for (const c of r.contacts ?? []) if (c.cf_contact_code === undefined || c.cf_contact_code.trim().toLowerCase() === wanted) rows.push(toZohoVendorRow(c));
+        if (!r.page_context?.has_more_page) break;
+      }
+      signageCache = { rows, at: Date.now() };
+      return rows;
+    })().finally(() => { signageLoading = null; });
+  }
+  return signageLoading;
+}
+
+/**
+ * One page of Zoho vendors. "Vendors with cost" (price=set) and "registered" come from what is stored; everything else is read
+ * live from Zoho Books, one page at a time (Zoho does not say how many vendors match, only whether another page exists).
+ */
+export async function listZohoVendors(q: ListQuery) {
+  if (q.price === 'set' || q.registered === 'yes') {
+    const all = await storedRows(q);
+    const items = all.slice((q.page - 1) * q.limit, q.page * q.limit);
+    return { items: await decorate(items), meta: pageMeta(q.page, q.limit, all.length) };
+  }
+  const signage = (q.signageOnly ?? env.ZOHO_SIGNAGE_CREDITORS_ONLY) === 'true';
+  if (signage) {
+    let all = await signageRows();
+    if (q.status) all = all.filter((r) => r.zohoStatus === q.status);
+    const t = q.q?.trim();
+    if (t) {
+      const re = new RegExp(escapeRegex(t), 'i');
+      const digits = t.replace(/\D/g, '');
+      all = all.filter((r) => [r.name, r.vendorNo, r.email].some((x) => x && re.test(x)) || (digits.length >= 4 && (r.mobile ?? '').replace(/\D/g, '').includes(digits)));
+    }
+    let items = await decorate(all.slice((q.page - 1) * q.limit, q.page * q.limit));
+    if (q.price === 'missing') items = items.filter((i) => i.price.ratePerShop == null);
+    if (q.registered === 'no') items = items.filter((i) => !i.vendor);
+    return { items, meta: pageMeta(q.page, q.limit, all.length) };
+  }
+  const r = await zohoGet<{ contacts?: (ZohoContact & { last_modified_time?: string; created_time?: string })[]; page_context?: { has_more_page?: boolean } }>('/contacts', {
+    contact_type: 'vendor',
+    per_page: q.limit,
+    page: q.page,
+    ...(q.status ? { filter_by: q.status === 'active' ? 'Status.Active' : 'Status.Inactive' } : {}),
+    ...searchParams(q.q),
+  });
+  const rows: Row[] = (r.contacts ?? []).map(toZohoVendorRow);
+  let items = await decorate(rows);
+  if (q.price === 'missing') items = items.filter((i) => i.price.ratePerShop == null);
+  if (q.registered === 'no') items = items.filter((i) => !i.vendor);
+  // Zoho does not give a total: when another page exists, the total is just past this page so the pager offers "next".
+  const more = !!r.page_context?.has_more_page;
+  return { items, meta: pageMeta(q.page, q.limit, more ? q.page * q.limit + 1 : (q.page - 1) * q.limit + (r.contacts ?? []).length) };
+}
+
+/**
+ * How many vendors Zoho holds (total, active, inactive) for the Signage creditors or for every vendor. Zoho gives no total, so the
+ * pages are counted (200 vendors per call: about 3 calls for the Signage creditors, about 41 for all). The result is kept in
+ * memory only (never in the database) for COUNT_TTL_MS, and counting runs in the background so the screen is not held up.
+ */
+export interface ZohoCounts { total: number; active: number; inactive: number }
+type CountState = { running: boolean; counted: number; at: number; error?: string; counts?: ZohoCounts };
+const COUNT_TTL_MS = 15 * 60 * 1000;
+const countCache = new Map<'signage' | 'all', CountState>();
+
+async function countZohoVendors(scope: 'signage' | 'all', state: CountState) {
+  try {
+    const tally: ZohoCounts = { total: 0, active: 0, inactive: 0 };
+    if (scope === 'signage') {
+      for (const row of await signageRows()) {
+        tally.total += 1;
+        if (row.zohoStatus === 'inactive') tally.inactive += 1;
+        else tally.active += 1;
+      }
+      state.counted = tally.total;
+      state.counts = tally;
+      state.error = undefined;
+      state.at = Date.now();
+      return;
+    }
+    for (let page = 1; page <= 200; page++) {
+      const r = await zohoGet<{ contacts?: ZohoContact[]; page_context?: { has_more_page?: boolean } }>('/contacts', {
+        contact_type: 'vendor',
+        per_page: 200,
+        page,
+      });
+      for (const c of r.contacts ?? []) {
+        tally.total += 1;
+        if (toZohoVendorRow(c).zohoStatus === 'inactive') tally.inactive += 1;
+        else tally.active += 1;
+      }
+      state.counted = tally.total;
+      if (!r.page_context?.has_more_page) break;
+    }
+    state.counts = tally;
+    state.error = undefined;
+    state.at = Date.now();
+  } catch (e) {
+    state.error = e instanceof Error ? e.message : 'Zoho could not be reached';
+  } finally {
+    state.running = false;
+  }
+}
+
+/** Starts counting (only when `start`) when there is no fresh result; returns what is known now (ready false while counting). Without `start` Zoho is not called. */
+function zohoCounts(signage: boolean, start: boolean) {
+  const scope = signage ? 'signage' : 'all';
+  let state = countCache.get(scope);
+  if (!state) { state = { running: false, counted: 0, at: 0 }; countCache.set(scope, state); }
+  const stale = !state.counts || Date.now() - state.at > COUNT_TTL_MS;
+  if (start && stale && !state.running) {
+    state.running = true;
+    state.counted = 0;
+    void countZohoVendors(scope, state);
+  }
+  return { ready: !!state.counts && !state.running, counting: state.running, counted: state.counted, error: state.error, ...(state.counts ?? { total: null, active: null, inactive: null }) };
+}
+
+/** Counts for the tiles: vendors with a cost and registered ones come from what is stored; the Zoho counts are counted live and kept in memory. */
+export async function zohoVendorStatus(signageOnly?: 'true' | 'false', count = false) {
+  const signage = (signageOnly ?? env.ZOHO_SIGNAGE_CREDITORS_ONLY) === 'true';
+  const [costed, registered] = await Promise.all([pricedZohoContactIds().then((x) => x.length), Vendor.countDocuments({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null })]);
+  return { live: true, costed, registered, signageOnlyDefault: env.ZOHO_SIGNAGE_CREDITORS_ONLY === 'true', contactCode: env.ZOHO_VENDOR_CONTACT_CODE, scope: signage ? 'signage' : 'all', zoho: zohoCounts(signage, count) };
 }
 
 export const zohoExportQuery = z.object({ format: exportFormat, status: z.enum(['active', 'inactive']).optional(), q: z.string().trim().max(100).optional(), price: z.enum(['set', 'missing']).optional() });
@@ -183,13 +225,12 @@ const ZOHO_EXPORT: ExportColumn<Record<string, any>>[] = [
   { header: 'PAN', value: (v) => v.pan, width: 12 },
   { header: 'Price per Shop', value: (v) => v.price?.ratePerShop, width: 14 },
   { header: 'Far Price per Shop', value: (v) => v.price?.farRatePerShop, width: 18 },
+  { header: 'Contact Code', value: (v) => v.contactCode, width: 22 },
   { header: 'Zoho Contact ID', value: (v) => v.zohoContactId, width: 22 },
-  { header: 'Last Synced', value: (v) => v.syncedAt, width: 12 },
 ];
 
-/** Every stored Zoho vendor matching the screen's search and status (all pages), as Excel or CSV. */
+/** The vendors that have a cost (all pages), as Excel or CSV. The full Zoho list is not exported: it is not stored. */
 export async function exportZohoVendors(q: z.infer<typeof zohoExportQuery>) {
-  const items = await ZohoVendor.find(await zohoFilter({ status: q.status, q: q.q, registered: undefined, price: q.price })).sort({ name: 1 }).limit(20000).lean();
-  const prices = await pricesOfZohoVendors(items.map((i) => i.zohoContactId));
-  return tabularFile(q.format, 'Zoho vendors', ZOHO_EXPORT, items.map((i) => ({ ...i, price: prices.get(i.zohoContactId) })) as Record<string, any>[]);
+  const rows = (await storedRows({ q: q.q, status: q.status, registered: undefined, price: 'set' })).slice(0, 20000);
+  return tabularFile(q.format, 'Vendors with cost', ZOHO_EXPORT, (await decorate(rows)) as Record<string, any>[]);
 }

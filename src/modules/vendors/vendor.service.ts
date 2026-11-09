@@ -15,7 +15,6 @@ import { CostPlan } from '../costing/costing.model';
 import { Notification } from '../notifications/notification.model';
 import { deleteUser } from '../users/user.service';
 import { User } from '../users/user.model';
-import { ZohoVendor } from '../zoho/zohoVendor.model';
 import { VendorPrice } from './vendorPrice.model';
 import { VendorTypeOption } from './vendorType.model';
 import { lookupGst } from './gstPortal.service';
@@ -151,7 +150,7 @@ export async function verifyGstin(raw: string) {
   const gstin = raw.trim().toUpperCase();
   if (!GST_RE.test(gstin)) throw new AppError(422, 'VALIDATION_ERROR', 'Validation failed', [{ path: 'gstin', message: 'Enter a valid GST number' }]);
   const [zoho, registered, portal] = await Promise.all([
-    ZohoVendor.findOne({ gstin }).select('name vendorNo zohoStatus city zohoContactId').lean(),
+    VendorPrice.findOne({ gstin }).select('name vendorNo zohoStatus city zohoContactId').lean(),
     Vendor.findOne({ gstin, deletedAt: null }).select('name code status').lean(),
     lookupGst(gstin),
   ]);
@@ -159,7 +158,7 @@ export async function verifyGstin(raw: string) {
     gstin,
     /** The GST portal's own details (legal name, status, address, PAN) when the paid lookup is set up (GST_VERIFY_KEY). */
     portal,
-    zoho: zoho ? { name: zoho.name, vendorNo: zoho.vendorNo ?? null, status: zoho.zohoStatus, city: zoho.city ?? null, zohoContactId: zoho.zohoContactId } : null,
+    zoho: zoho?.name ? { name: zoho.name, vendorNo: zoho.vendorNo ?? null, status: zoho.zohoStatus, city: zoho.city ?? null, zohoContactId: zoho.zohoContactId } : null,
     registered: registered ? { id: String(registered._id), name: registered.name, code: registered.code, status: registered.status } : null,
   };
 }

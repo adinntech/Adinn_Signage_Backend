@@ -155,7 +155,7 @@ describe('shop verification gates the smart plan', () => {
   it('plans only verified shops, says how many wait, and finds Zoho vendors near an area', async () => {
     const { Site } = await import('../src/modules/sites/site.model');
     const { Project } = await import('../src/modules/projects/project.model');
-    const { ZohoVendor } = await import('../src/modules/zoho/zohoVendor.model');
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
     const clientId = (await Project.findById(projectId).select('client').lean())!.client;
     const p3 = await Project.create({ code: 'PLN-V3', name: 'Verify list', client: clientId, requirementType: 'SHOP_DETAILS', status: 'IN_PROGRESS', originName: 'Madurai', originLat: 9.9252, originLng: 78.1198 });
     const mk = (n: number, from: number, extra: object) => Array.from({ length: n }, (_, i) => ({ project: p3._id, siteCode: `PLN-V3-${from + i}`, seq: from + i, scenario: 'MEASUREMENT_REQUIRED', shopName: `Verify shop ${from + i}`, district: 'Theni', location: 'Periyakulam', lat: 10.12 + i * 0.001, lng: 77.54 + i * 0.001, ...extra }));
@@ -175,8 +175,9 @@ describe('shop verification gates the smart plan', () => {
     expect(refused.status).toBe(422);
     expect(JSON.stringify(refused.body)).toMatch(/address/i);
 
-    await ZohoVendor.create({ zohoContactId: 'z-near', name: 'Periyakulam Boards', city: 'Periyakulam', address: 'Theni district', zohoStatus: 'active', syncedAt: new Date() });
-    await ZohoVendor.create({ zohoContactId: 'z-far', name: 'Chennai Signs', city: 'Chennai', address: 'Anna Salai', zohoStatus: 'active', syncedAt: new Date() });
+    // Only Zoho vendors that have a cost are stored, so only those can be suggested.
+    await VendorPrice.create({ zohoContactId: 'z-near', name: 'Periyakulam Boards', city: 'Periyakulam', address: 'Theni district', zohoStatus: 'active', ratePerShop: 300 });
+    await VendorPrice.create({ zohoContactId: 'z-far', name: 'Chennai Signs', city: 'Chennai', address: 'Anna Salai', zohoStatus: 'active', ratePerShop: 280 });
     const r = await api().post(`/api/v1/projects/${p3._id}/cost/suggest`).set(as('ADMIN')).send({});
     expect(r.status).toBe(200);
     expect(r.body.data.verification).toMatchObject({ total: 5, verified: 3, unverified: 2, noAddress: 1 });
