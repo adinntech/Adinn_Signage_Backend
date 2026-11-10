@@ -13,7 +13,8 @@ import { clientNameOf } from '../clients/clientDetails';
 import { listExpenses, notifyApprovers } from '../expenses/expense.service';
 import { notify } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
-import { changeStatus } from '../projects/project.service';
+import { advanceStage, changeStatus } from '../projects/project.service';
+import { User } from '../users/user.model';
 import { normKey } from '../sites/site.fields';
 import { Site } from '../sites/site.model';
 import { clusterShops } from './costing.cluster';
@@ -344,7 +345,29 @@ export async function assignPlan(projectId: string, actor: Actor) {
   plan.set({ status: 'ASSIGNED', assignedAt: new Date(), assignedBy: actor.id, updatedBy: actor.id });
   await plan.save();
   await recordAudit({ actor, action: 'COST_ASSIGN', entity: 'CostPlan', entityId: plan._id, project: projectId, reason: `${assigned} shop(s) assigned${skipped.length ? `; not matched: ${skipped.join(', ')}` : ''}` });
-  return { ...(await getPlan(projectId)), assigned, skipped };
+
+  // The recce is now running: the project goes to IN_PROGRESS (one step at a time, the same checks as Operations' own button).
+  let stage: string | null = null;
+  try {
+    for (let i = 0; i < 2; i++) {
+      const p = await Project.findById(projectId).select('status').lean();
+      if (!p || !['RECCE_ASSIGNED', 'PLANNING'].includes(p.status)) { stage = p?.status ?? null; break; }
+      stage = (await advanceStage(projectId, { stage: p.status === 'RECCE_ASSIGNED' ? 'PLANNING' : 'IN_PROGRESS' }, actor)).status as string;
+    }
+  } catch (e) {
+    stage = null; // shops stay assigned; Operations can start the recce by hand (the reason shows in the project page)
+    console.error('project could not move to in progress after assigning', e instanceof Error ? e.message : e);
+  }
+
+  // A vendor can only see its shops with a mobile login. Tell Operations which vendors still have none.
+  const vendorIds = [...new Set(plan.legs.filter((l) => l.channel === 'VENDOR' && l.vendor).map((l) => String(l.vendor)))];
+  const vendorsWithoutLogin: { id: string; name: string; email: string | null; mobile: string | null }[] = [];
+  for (const id of vendorIds) {
+    if (await User.exists({ role: 'VENDOR', vendorId: id, isActive: true, deletedAt: null })) continue;
+    const v = await Vendor.findById(id).select('name email mobile').lean();
+    if (v) vendorsWithoutLogin.push({ id, name: v.name, email: v.email ?? null, mobile: v.mobile ?? null });
+  }
+  return { ...(await getPlan(projectId)), assigned, skipped, stage, vendorsWithoutLogin };
 }
 
 /** The client's answer to the cost. A rejected cost closes the project as LOSS, with the reason. */

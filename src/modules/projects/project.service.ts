@@ -24,6 +24,7 @@ const POPULATE_USERS = [
   { path: 'owner', select: 'name role' },
   { path: 'coordinator', select: 'name role' },
   { path: 'assignedTo', select: 'name role email phone' },
+  { path: 'assignedBy', select: 'name role' },
 ];
 const PROJECT_FIELDS = ['name', 'code', 'campaign', 'priority', 'startDate', 'targetDate', 'district', 'instructions', 'requirementType', 'expectedShops', 'contacts', 'description', 'owner', 'coordinator'];
 const REQ_FIELDS = ['source', 'sourceNote', 'contact', 'expectedSites', 'locations', 'description', 'commercialNotes', 'recceRequired', 'siteDataScenario', 'attachments'];
@@ -161,7 +162,7 @@ export async function createProject(input: z.infer<typeof projectCreate>, actor:
 }
 
 export async function getProject(id: string) {
-  const p = await Project.findOne({ _id: id, deletedAt: null }).populate(POPULATE_CLIENT).populate(POPULATE_USERS).populate('createdBy', 'name').lean();
+  const p = await Project.findOne({ _id: id, deletedAt: null }).populate(POPULATE_CLIENT).populate(POPULATE_USERS).populate('createdBy', 'name role').lean();
   if (!p) throw AppError.notFound('Project not found');
   const requirement = await Requirement.findOne({ project: id }).lean();
   return { ...p, requirement };
@@ -193,6 +194,7 @@ export async function listProjects(q: z.infer<typeof projectListQuery>, actor: A
       .limit(q.limit)
       .populate(POPULATE_CLIENT)
       .populate(POPULATE_USERS)
+      .populate('createdBy', 'name role')
       .lean(),
     Project.countDocuments(filter),
   ]);
@@ -319,6 +321,7 @@ export async function assignProject(id: string, body: z.infer<typeof assignBody>
   if (previous === body.assigneeId) return getProject(id); // idempotent: no duplicate notification
   p.assignedTo = assignee._id as never;
   p.assignedAt = new Date();
+  p.assignedBy = new Types.ObjectId(actor.id);
   if (UNASSIGNED.includes(p.status)) p.status = 'RECCE_ASSIGNED';
   p.updatedBy = new Types.ObjectId(actor.id);
   await p.save();

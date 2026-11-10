@@ -128,6 +128,10 @@ describe('smart plan suggestion', () => {
     expect(sub.status).toBe(200);
     const as2 = await api().post(`/api/v1/projects/${p2._id}/cost/assign`).set(as('ADMIN'));
     expect(as2.status).toBe(200);
+    // Vendors that got shops but have no mobile login are listed, and the project moves on to the recce.
+    expect(as2.body.data.vendorsWithoutLogin.length).toBeGreaterThan(0);
+    expect(as2.body.data.vendorsWithoutLogin[0]).toHaveProperty('name');
+    expect(as2.body.data).toHaveProperty('stage');
     expect(await Site.countDocuments({ project: p2._id, channel: 'IN_HOUSE' })).toBe(12);
     expect(await Site.countDocuments({ project: p2._id, channel: 'VENDOR' })).toBe(2);
 
