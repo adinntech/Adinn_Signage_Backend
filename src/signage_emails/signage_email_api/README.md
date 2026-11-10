@@ -193,3 +193,7 @@ Sent by the CRM when Operations mails Accounts to create a new vendor (Vendor > 
 ```
 
 Template: `templates/signage_vendor_registration_request.php`. Node client: `src/modules/vendors/signageVendorMail.ts`.
+
+### 5. Vendor amount approval request (`mailtype: "rateapproval"`)
+
+Sent by the CRM when a vendor cost is typed above the company rate (Admin > Cost Rates). `requestId` is `ADN-Signage-vap-ddmmyy<serial>`; the approver replies APPROVED or NOT APPROVED and the CRM reads the reply from the reply mailbox. Template: `templates/signage_vendor_rate_approval.php`. Payload: `vendor { vendorName, vendorNo }`, `amounts { requestedRate, requestedFar, limitRate, limitFar, currentRate, currentFar, requestedBy }` (already formatted, for example "₹500"), `replyTo`. No attachments. Upload `index_signage.php` and the new template together.

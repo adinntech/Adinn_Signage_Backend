@@ -55,7 +55,7 @@ const codeRequestSchema = new Schema(
     evidence: { type: [storedFileSchema], default: [] },
     /** The reply mail read from the reply mailbox: who answered and the code found in it (verified by a person unless auto-confirm is on). */
     reply: {
-      type: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, autoConfirmError: String }, { _id: false }),
+      type: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], autoConfirmError: String }, { _id: false }),
       default: null,
     },
     rejectedReason: String,

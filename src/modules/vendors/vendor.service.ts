@@ -372,7 +372,7 @@ export const vendorExportQuery = z.object({ format: exportFormat, status: z.enum
 export async function listVendors(q: z.infer<typeof vendorListQuery>) {
   const f = vendorFilter(q);
   const [items, total, counts] = await Promise.all([
-    Vendor.find(f).sort(parseSort(q.sort, ['name', 'code', 'district', 'status', 'createdAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).populate('createdBy updatedBy', 'name').lean(),
+    Vendor.find(f).sort(parseSort(q.sort, ['name', 'code', 'district', 'status', 'createdAt', 'updatedAt'], 'name')).skip((q.page - 1) * q.limit).limit(q.limit).populate('createdBy updatedBy', 'name').lean(),
     Vendor.countDocuments(f),
     Vendor.aggregate([{ $match: { deletedAt: null } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
   ]);

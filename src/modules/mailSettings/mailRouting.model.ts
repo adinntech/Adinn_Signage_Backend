@@ -1,6 +1,6 @@
 import { Schema, model } from 'mongoose';
 
-export const ROUTING_KEYS = ['PROJECT_CODE', 'CLIENT_CODE', 'VENDOR_REGISTRATION'] as const;
+export const ROUTING_KEYS = ['PROJECT_CODE', 'CLIENT_CODE', 'VENDOR_REGISTRATION', 'VENDOR_RATE_APPROVAL'] as const;
 export type RoutingKey = (typeof ROUTING_KEYS)[number];
 
 /** Who each kind of request email goes to. Edited by the Super Admin; replaces the old env recipient lists. */

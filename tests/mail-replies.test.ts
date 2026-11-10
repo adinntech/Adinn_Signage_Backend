@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
 import type { Express } from 'express';
-import { findClientCode, findProjectCode, findVendorNo, freshText, requestIdsIn, senderAllowed } from '../src/modules/mailReplies/replyParser';
+import { findClientCode, findEstimates, findProjectCode, findVendorNo, freshText, requestIdsIn, senderAllowed } from '../src/modules/mailReplies/replyParser';
 import type { OutgoingMail } from '../src/modules/notifications/mail.service';
 
 const ID = 'ADN-Signage-prj-06122601';
@@ -28,6 +28,10 @@ describe('reply parser', () => {
     expect(findProjectCode('Project code: 11223344').code).toBe('11223344');
     expect(findProjectCode('Created. 11223344 Thanks').code).toBe('11223344');
     expect(findProjectCode(`Re ${ID} created 11223344`).code).toBe('11223344'); // 06122601 is also 8 digits but belongs to the id
+    const many = 'Project code 22068682\nEST-020456\nEST-020457\nEST-020456 again, est-12345678';
+    expect(findProjectCode(many).code).toBe('22068682'); // an 8-digit estimate number is not a second project code
+    expect(findEstimates(many)).toEqual(['EST-020456', 'EST-020457', 'EST-12345678']);
+    expect(findEstimates('no estimates, TEST-123 is not one')).toEqual([]);
     expect(findProjectCode('Code 11223344 and 55667788')).toEqual({ code: null, ambiguous: ['11223344', '55667788'] });
     expect(findProjectCode('Mobile 9876543210, ref 1234567')).toEqual({ code: null, ambiguous: [] });
     expect(findProjectCode('Project code 11223344, project 11223344').code).toBe('11223344');

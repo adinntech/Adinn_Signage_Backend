@@ -17,6 +17,10 @@ export interface SignageMail {
   source: string;
   client: { clientName: string; clientCode: string };
   attachments: StoredFile[];
+  /** Data-only details the PHP template prints (client, project, contacts). */
+  details?: unknown;
+  /** The rich note the person wrote; only set when they changed the default text. With `details` the editor text is not sent as a note otherwise. */
+  noteHtml?: string | undefined;
   /** Where each file comes from (by file id): ratecard, shoplist, so, communication, upload, gst. */
   docTypes?: Record<string, string> | undefined;
 }
@@ -76,8 +80,8 @@ export function signagePayload(m: SignageMail) {
     requestId: m.requestId,
     requestDate: requestDateIst(),
     source: m.source,
-    message: m.text,
-    messageHtml: m.html,
+    // With details the template prints the structure itself and the text only goes out as a note when it was written; without them the whole text is the note.
+    ...(m.details ? { details: m.details, ...(m.noteHtml ? { message: m.text, bodyHtml: m.noteHtml } : {}) } : { message: m.text, bodyHtml: m.html }),
     client: m.client,
     // Required by the API (422 "project.projectName required"); the request is for the Recce assignment.
     project: { projectName: 'Recce Assign' },

@@ -32,7 +32,8 @@ const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', R
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
 
-type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string> };
+/** `facts`: the details the PHP template prints; `noteHtml`: the rich note, only when the person changed the default text. */
+type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string>; facts?: unknown; noteHtml?: string | undefined };
 
 type DeliverInput = {
   order: Types.ObjectId;
@@ -106,8 +107,9 @@ async function deliverOnce(rec: DeliverInput) {
       cc: rec.cc,
       subject: subjectWithId(rec.subject, requestId),
       requestId,
-      text: htmlToText(rec.body),
-      html: rec.body,
+      text: htmlToText(projectRequest.noteHtml ?? rec.body),
+      html: projectRequest.noteHtml ?? rec.body,
+      ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
       source: projectRequest.source ?? 'Client Servicing Team',
       client: projectRequest.client ?? { clientName: '', clientCode: '' },
       attachments: rec.attachments,
@@ -129,8 +131,9 @@ async function deliverOnce(rec: DeliverInput) {
           cc: rec.cc,
           subject: subjectWithId(rec.subject, requestId!),
           requestId: requestId!,
-          text: htmlToText(rec.body),
-          html,
+          text: htmlToText(projectRequest.noteHtml ?? rec.body),
+          html: projectRequest.noteHtml ? styledEmailHtml(projectRequest.noteHtml) : html,
+          ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
           source: apiPayload!.source,
           client: apiPayload!.client,
           attachments: rec.attachments,

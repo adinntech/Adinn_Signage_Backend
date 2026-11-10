@@ -8,9 +8,13 @@ import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from '../zoho/z
 import { Vendor } from './vendor.model';
 import type { priceBody, skillBody } from './vendor.service';
 import { VendorPrice } from './vendorPrice.model';
+import { VendorRateApproval } from './vendorRateApproval.model';
+import { cappedAtLimit, companyRates, exceedsLimit, pendingApprovals, requestRateApproval } from './vendorRateApproval.service';
 import { VendorSkill } from './vendorSkill.model';
 
-export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null };
+/** `pending`: a typed cost above the company rate that is waiting for the approver's reply. */
+export type Pending = { requestId: string; ratePerShop: number | null; farRatePerShop: number | null; limitRate: number | null; limitFar: number | null };
+export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null; pending?: Pending };
 const NONE: Price = { ratePerShop: null, farRatePerShop: null, skills: [], source: null };
 
 /* --------------------------------------- skills --------------------------------------- */
@@ -45,10 +49,11 @@ export async function pricesOfZohoVendors(contactIds: string[]): Promise<Map<str
   const out = new Map<string, Price>();
   for (const t of typed) out.set(t.zohoContactId, { ratePerShop: t.ratePerShop ?? null, farRatePerShop: t.farRatePerShop ?? null, skills: t.skills ?? [], source: 'ZOHO' });
   for (const v of vendors) if (v.zohoContactId) out.set(v.zohoContactId, { ratePerShop: v.ratePerShop ?? null, farRatePerShop: v.farRatePerShop ?? null, skills: v.skills ?? [], source: 'VENDOR' });
+  for (const [id, p] of await pendingApprovals(contactIds)) out.set(id, { ...(out.get(id) ?? NONE), pending: p });
   return out;
 }
 
-/** Zoho contact ids that already have a cost added (used by the "cost added / not added" filter). */
+/** Zoho contact ids that already have a cost added, or one waiting for approval (used by the "cost added / not added" filter and the Vendors with cost list). */
 export async function pricedZohoContactIds(): Promise<string[]> {
   const [vendors, typed] = await Promise.all([
     Vendor.find({ zohoContactId: { $exists: true, $ne: null }, ratePerShop: { $ne: null }, deletedAt: null }).select('zohoContactId').lean(),
@@ -62,13 +67,32 @@ export async function pricedZohoContactIds(): Promise<string[]> {
  * vendor (so allocation and costing see it); a vendor not registered yet keeps it here until it is registered. An empty
  * price removes the cost (the vendor leaves the "cost added" list and the company rate applies). Skills left out stay as they are.
  */
-export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof priceBody>, actor: Actor) {
+export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof priceBody>, actor: Actor, opts: { approved?: boolean } = {}): Promise<Price> {
   const vendor = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null });
   const far = body.farRatePerShop ?? null;
   if (body.ratePerShop == null && far != null) throw AppError.badRequest('Enter the price per shop first');
   if (body.ratePerShop != null && far != null && far < body.ratePerShop) throw AppError.badRequest('The far-distance price cannot be lower than the normal price');
   const skills = body.skills ? await checkedSkills(body.skills) : undefined;
   const set = { ratePerShop: body.ratePerShop, farRatePerShop: far };
+
+  // A cost above the company rate (Admin > Cost Rates) is not saved yet: the approver is mailed, and the old cost stays until they answer.
+  if (!opts.approved) {
+    const limit = await companyRates();
+    if (exceedsLimit(set, limit)) {
+      const current = (await pricesOfZohoVendors([contactId])).get(contactId) ?? NONE;
+      const prior = vendor ? null : await VendorPrice.findOne({ zohoContactId: contactId }).select('name vendorNo').lean();
+      const approval = await requestRateApproval(
+        { zohoContactId: contactId, vendor, vendorName: vendor?.name ?? prior?.name ?? 'Vendor', vendorNo: vendor?.zohoVendorNo ?? prior?.vendorNo ?? null, requested: set, limit, current: { ratePerShop: current.ratePerShop, farRatePerShop: current.farRatePerShop } },
+        actor,
+      );
+      await recordAudit({ actor, action: 'PRICE_APPROVAL_REQUESTED', entity: vendor ? 'Vendor' : 'VendorPrice', entityId: vendor?._id ?? approval._id, reason: `${approval.requestId}: asked ${set.ratePerShop}/${set.farRatePerShop ?? '-'}, company rate ${limit.ratePerShop}/${limit.farRatePerShop}` });
+      // Skills still save now; only the price waits.
+      const held = await setZohoVendorPrice(contactId, { ratePerShop: current.ratePerShop, farRatePerShop: current.farRatePerShop, ...(body.skills ? { skills: body.skills } : {}) }, actor, { approved: true });
+      return { ...held, pending: { requestId: approval.requestId, ratePerShop: set.ratePerShop ?? null, farRatePerShop: set.farRatePerShop ?? null, limitRate: limit.ratePerShop, limitFar: limit.farRatePerShop } };
+    }
+    // A cost within the company rate saved now replaces one that was still waiting for approval.
+    await VendorRateApproval.updateMany({ zohoContactId: contactId, status: 'PENDING' }, { $set: { status: 'REPLACED', decidedAt: new Date(), decidedBy: 'Replaced by a newer cost' } });
+  }
   if (vendor) {
     const old = { ratePerShop: vendor.ratePerShop ?? null, farRatePerShop: vendor.farRatePerShop ?? null };
     // An empty value removes the field: the vendor falls back to the company rate.
@@ -95,4 +119,21 @@ export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof
     await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: row._id, reason: row.name ?? contactId, changes: [{ field: 'ratePerShop', oldValue: prior?.ratePerShop ?? null, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: prior?.farRatePerShop ?? null, newValue: set.farRatePerShop }] });
   }
   return (await pricesOfZohoVendors([contactId])).get(contactId) ?? NONE;
+}
+
+/**
+ * The approver answered. APPROVED applies the typed cost; NOT_APPROVED applies the company rate instead (every price capped at it).
+ * Only the first answer counts. Returns null when the request is not waiting any more.
+ */
+export async function decideRateApproval(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', decidedBy: string, reply?: { messageId: string; from: string; receivedAt: Date; snippet: string }) {
+  const a = await VendorRateApproval.findOne({ requestId, status: 'PENDING' }).lean();
+  if (!a) return null;
+  const typed = { ratePerShop: a.requested.ratePerShop ?? null, farRatePerShop: a.requested.farRatePerShop ?? null };
+  const applied = decision === 'APPROVED' ? typed : cappedAtLimit(typed, { ratePerShop: a.limit.ratePerShop ?? 0, farRatePerShop: a.limit.farRatePerShop ?? 0 });
+  const claimed = await VendorRateApproval.findOneAndUpdate({ _id: a._id, status: 'PENDING' }, { $set: { status: decision, decidedAt: new Date(), decidedBy, applied, ...(reply ? { reply } : {}) } });
+  if (!claimed) return null;
+  const actor = { id: String(a.requestedBy), role: 'SYSTEM' };
+  await setZohoVendorPrice(a.zohoContactId, { ratePerShop: applied.ratePerShop, farRatePerShop: applied.farRatePerShop }, actor, { approved: true });
+  await recordAudit({ actor, action: decision === 'APPROVED' ? 'PRICE_APPROVED' : 'PRICE_NOT_APPROVED', entity: 'VendorRateApproval', entityId: a._id, reason: `${requestId} by ${decidedBy}: applied ${applied.ratePerShop}/${applied.farRatePerShop ?? '-'}` });
+  return { requestId, decision, applied, vendorName: a.vendorName ?? '' };
 }

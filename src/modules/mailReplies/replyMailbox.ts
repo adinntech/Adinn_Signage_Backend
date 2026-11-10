@@ -5,6 +5,7 @@ import { env } from '../../config/env';
 import { processReply, type ReplyOutcome } from './mailReply.service';
 
 let running = false;
+const LOOKBACK_DAYS = 14;
 
 export interface CheckResult {
   checked: number;
@@ -19,8 +20,8 @@ const automatic = (headers: Map<string, unknown>, subject: string) => {
 };
 
 /**
- * Reads the unread mails whose subject carries a request ID from the reply mailbox (IMAP), hands each to processReply,
- * and marks as read only the ones that name one of our requests. Other mail in the mailbox is never touched.
+ * Reads the mails of the last 14 days whose subject carries a request ID from the reply mailbox (IMAP) and hands each reply to
+ * processReply (which ignores one it has already read). Other mail in the mailbox is never touched.
  */
 export async function checkReplies(): Promise<CheckResult> {
   if (!env.imapEnabled) throw AppError.conflict('The reply mailbox is not configured on the server (IMAP_HOST, IMAP_USER, IMAP_PASS).');
@@ -32,7 +33,9 @@ export async function checkReplies(): Promise<CheckResult> {
     await client.connect();
     const lock = await client.getMailboxLock(env.IMAP_MAILBOX);
     try {
-      const uids = (await client.search({ seen: false, subject: 'ADN-Signage-' }, { uid: true })) || [];
+      // Not only unread: a person may open the reply in Gmail first. Repeats are safe, processReply skips a mail it already read.
+      const since = new Date(Date.now() - LOOKBACK_DAYS * 86_400_000);
+      const uids = (await client.search({ since, subject: 'ADN-Signage-' }, { uid: true })) || [];
       for (const uid of uids) {
         const raw = await client.fetchOne(String(uid), { source: true }, { uid: true });
         if (!raw || !raw.source) continue;
@@ -40,6 +43,7 @@ export async function checkReplies(): Promise<CheckResult> {
         result.checked += 1;
         const subject = mail.subject ?? '';
         if (automatic(mail.headers, subject)) continue;
+        if (!mail.inReplyTo && !/^\s*(re|fw|fwd)\s*:/i.test(subject)) continue; // our own sent request, not an answer
         const outcome = await processReply({
           messageId: mail.messageId ?? `uid-${uid}`,
           from: (mail.from?.value ?? []).map((a) => a.address ?? '').filter(Boolean),
@@ -48,7 +52,6 @@ export async function checkReplies(): Promise<CheckResult> {
           ...(mail.date ? { receivedAt: mail.date } : {}),
         });
         result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
-        if (outcome !== 'unknown') await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
       }
     } finally {
       lock.release();

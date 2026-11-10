@@ -84,6 +84,36 @@ function messageBlock(array $data):void{
  elseif(!empty($data['message']))echo '<p style="font-size:12px;line-height:1.7;color:#394d6b;margin:0 0 10px"><strong>Additional Notes:</strong> '.nl2br(esc($data['message'])).'</p>';
 }
 
+/* Data-only details sent by the CRM: details.sections = [{title, rows:[{label,value}], table:{columns:[..], rows:[[..]]}}]. One card each. */
+function detailsCards(array $data):void{
+ $d=is_array($data['details']??null)?$data['details']:[];
+ $sections=is_array($d['sections']??null)?$d['sections']:[];
+ $colors=[['#eaf2ff','#1d4ed8','#d6e4fa'],['#e9f8ef','#16a34a','#cfeedb'],['#f6f0ff','#7c3aed','#e3d5fb'],['#fff4e5','#d97706','#fbe3bf']];
+ $i=0;
+ foreach($sections as $s){
+  if(!is_array($s))continue;
+  $title=trim((string)($s['title']??''));$rows=is_array($s['rows']??null)?$s['rows']:[];$t=is_array($s['table']??null)?$s['table']:null;
+  $body='';
+  if($rows){$list=[];foreach($rows as $r){if(is_array($r))$list[]=['desc',(string)($r['label']??''),(string)($r['value']??'')];}$body.=rowsHtml($list);}
+  if($t&&is_array($t['columns']??null)&&is_array($t['rows']??null)){
+   $body.='<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>';
+   foreach($t['columns'] as $c)$body.='<td style="padding:7px 8px;background:#f3f6fb;border-bottom:1px solid #dfe6f1;font-size:11px;font-weight:700;color:#4a5b74;text-transform:uppercase">'.esc($c).'</td>';
+   $body.='</tr>';
+   foreach($t['rows'] as $r){if(!is_array($r))continue;$body.='<tr>';foreach($r as $cell)$body.='<td valign="top" style="padding:7px 8px;border-bottom:1px solid #edf1f7;font-size:12px;font-weight:600;color:#10244a;word-break:break-word">'.esc($cell).'</td>';$body.='</tr>';}
+   $body.='</table>';
+  }
+  if($body===''||$title==='')continue;
+  [$bg,$ac,$bd]=$colors[$i++%count($colors)];
+  echo card($title,$body,$bg,$ac,$bd);
+ }
+}
+
+/* Optional rich note written on the CRM mail screen (cleaned to simple tags by index_signage.php); only sent when the person changed the default text. */
+function noteBlock(array $data,string $title):void{
+ if(empty($data['bodyHtml']))return;
+ echo '<div style="font-size:13px;line-height:1.7;color:#243857;margin:0 0 14px;padding:10px 14px;background:#f8fafd;border-left:3px solid #7c3aed;border-radius:4px"><div style="font-size:11px;color:#6a7890;margin-bottom:4px"><strong>'.esc($title).'</strong></div>'.$data['bodyHtml'].'</div>';
+}
+
 /* Sign-off, logo and (optional) footer banner; closes the document. */
 function pageEnd(string $greeting,string $team,array $config):void{
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px"><tr><td valign="bottom" style="font-size:12px;line-height:1.7;color:#4a5b74;padding:6px 0 14px">'.esc($greeting).'<br><strong style="color:#10244a">'.esc($team).'</strong><br>Adinn Advertising Services Ltd.</td>';

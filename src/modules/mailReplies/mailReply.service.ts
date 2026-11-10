@@ -4,7 +4,9 @@ import { confirmCode } from '../codeRequests/codeRequest.service';
 import { listEmails } from '../sales/salesMail.service';
 import { routingOf } from '../mailSettings/mailRouting.service';
 import { Vendor } from '../vendors/vendor.model';
-import { findClientCode, findProjectCode, findVendorNo, freshText, requestIdsIn, senderAllowed, snippetOf } from './replyParser';
+import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
+import { decideRateApproval } from '../vendors/vendorPrice.service';
+import { findClientCode, findDecision, findEstimates, findProjectCode, findVendorNo, freshText, requestIdsIn, senderAllowed, snippetOf } from './replyParser';
 
 /** One mail read from the reply mailbox (the mailbox reader hands over plain data, so this is testable without IMAP). */
 export interface IncomingReply {
@@ -35,7 +37,7 @@ export async function processReply(msg: IncomingReply): Promise<ReplyOutcome> {
   const keep = (o: ReplyOutcome) => { if (rank.indexOf(o) > rank.indexOf(best)) best = o; };
 
   for (const id of ids) {
-    keep(id.startsWith('ADN-Signage-vnd-') ? await vendorReply(id, msg, fresh, from, receivedAt) : await codeReply(id, msg, fresh, from, receivedAt));
+    keep(id.startsWith('ADN-Signage-vnd-') ? await vendorReply(id, msg, fresh, from, receivedAt) : id.startsWith('ADN-Signage-vap-') ? await rateApprovalReply(id, msg, fresh, from, receivedAt) : await codeReply(id, msg, fresh, from, receivedAt));
     if (best !== 'unknown') break; // the first request ID that belongs to us is the one answered
   }
   return best;
@@ -55,12 +57,13 @@ async function codeReply(requestId: string, msg: IncomingReply, fresh: string, f
     const kind = row.kind as CodeKind;
     const found = kind === 'PROJECT_CODE' ? findProjectCode(fresh) : findClientCode(fresh);
     let autoConfirmError: string | undefined;
-    const base = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}) };
+    const estimates = kind === 'PROJECT_CODE' ? findEstimates(fresh) : [];
+    const base = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}) };
     await CodeRequest.updateOne({ _id: row._id }, { $set: { reply: base } });
     if (found.code && (await routingOf(kind === 'PROJECT_CODE' ? 'PROJECT_CODE' : 'CLIENT_CODE')).autoConfirm && row.sentBy) {
       try {
         // Confirmed in the name of the person who sent the request; the evidence note says it came from the reply.
-        await confirmCode(String(row.order), { kind, code: found.code, evidenceNote: `Automatically from the reply of ${base.from}` }, [], { id: String(row.sentBy), role: 'CLIENT_SERVICING' });
+        await confirmCode(String(row.order), { kind, code: found.code, evidenceNote: `Automatically from the reply of ${base.from}${estimates.length ? `. Estimates: ${estimates.join(', ')}` : ''}` }, [], { id: String(row.sentBy), role: 'CLIENT_SERVICING' });
         outcome = 'confirmed';
       } catch (e) {
         autoConfirmError = e instanceof AppError ? e.message : 'Could not confirm automatically';
@@ -82,4 +85,20 @@ async function vendorReply(requestId: string, msg: IncomingReply, fresh: string,
   const found = findVendorNo(fresh);
   await Vendor.updateOne({ _id: v._id }, { $set: { 'registration.reply': { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedVendorNo: found.code } : {}) } } });
   return 'saved';
+}
+
+/** The approver answered a vendor amount approval request: APPROVED applies the typed cost, NOT APPROVED applies the company rate. */
+async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: string, from: string[], receivedAt: Date): Promise<ReplyOutcome> {
+  const a = await VendorRateApproval.findOne({ requestId }).lean();
+  if (!a) return 'unknown';
+  if (!senderAllowed(from, [...(a.to ?? []), ...(a.cc ?? []), ...(a.bcc ?? [])])) return 'rejected';
+  if (a.reply?.messageId === msg.messageId || a.status !== 'PENDING') return 'duplicate';
+  const reply = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh) };
+  const decision = findDecision(fresh);
+  if (!decision) {
+    // Neither a clear yes nor a clear no: kept for a person, still waiting.
+    await VendorRateApproval.updateOne({ _id: a._id }, { $set: { reply } });
+    return 'saved';
+  }
+  return (await decideRateApproval(requestId, decision, reply.from, reply)) ? 'confirmed' : 'duplicate';
 }

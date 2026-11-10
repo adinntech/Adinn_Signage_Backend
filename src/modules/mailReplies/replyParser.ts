@@ -3,7 +3,7 @@
  * so every rule is unit-tested. A code is taken only when it is unambiguous; anything doubtful is left for a person.
  */
 
-const ID_RE = /ADN-Signage-(prj|cli|cp|vnd)-(\d{7,})/gi;
+const ID_RE = /ADN-Signage-(prj|cli|cp|vnd|vap)-(\d{7,})/gi;
 
 /** Every request ID mentioned (normalised to the stored spelling), first mention first. */
 export function requestIdsIn(text: string): string[] {
@@ -18,7 +18,11 @@ export function requestIdsIn(text: string): string[] {
 /** Only what the person wrote: drops quoted lines, "On ... wrote:" blocks, forwarded headers and signatures after "-- ". */
 export function freshText(text: string): string {
   const lines: string[] = [];
-  for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
+  let body = text.replace(/\r\n/g, '\n');
+  // Gmail wraps the "On ... wrote:" line over two lines, so cut at it before reading line by line.
+  const cut = body.search(/(^|\n)[ \t]*On [^\n]{5,200}(\n[^\n]{0,200})?[ \t]+wrote:/i);
+  if (cut >= 0) body = body.slice(0, cut);
+  for (const raw of body.split('\n')) {
     const line = raw.trim();
     if (/^(on .{5,200} wrote:?|-{2,}\s*(original message|forwarded message)\s*-{2,}|_{5,}|from:\s.+@.+|sent from my )/i.test(line)) break;
     if (/^--\s*$/.test(raw)) break;
@@ -28,8 +32,13 @@ export function freshText(text: string): string {
   return lines.join('\n').trim();
 }
 
-const norm = (s: string) => s.replace(ID_RE, ' ').replace(/[ \t]+/g, ' ');
+/** Estimate numbers (EST-20234, EST-020456): many can come with one project code. */
+const EST_RE = /(?<![A-Z0-9])EST-?\d{3,10}(?!\d)/gi;
+// Request IDs and estimate numbers are removed first, so their digits are never mistaken for a project code.
+const norm = (s: string) => s.replace(ID_RE, ' ').replace(EST_RE, ' ').replace(/[ \t]+/g, ' ');
 const uniq = <T,>(a: T[]) => [...new Set(a)];
+/** Every estimate number in the reply, once each, in the order written, as EST-<digits>. */
+export const findEstimates = (text: string): string[] => uniq([...text.matchAll(EST_RE)].map((m) => `EST-${m[0].replace(/\D/g, '')}`));
 
 export type Found = { code: string | null; ambiguous: string[] };
 const one = (all: string[]): Found => {
@@ -75,3 +84,17 @@ export function senderAllowed(from: string[], recipients: string[]) {
 
 /** A short single-line preview for the screen. */
 export const snippetOf = (text: string, max = 300) => text.replace(/\s+/g, ' ').trim().slice(0, max);
+
+export type Decision = 'APPROVED' | 'NOT_APPROVED';
+/**
+ * The answer to an amount approval request. "Not approved", "rejected", "declined" or "denied" win over "approved" (a reply
+ * such as "not approved" contains the word approved). Both kinds of word, or neither, is left for a person (null).
+ */
+export function findDecision(text: string): Decision | null {
+  const t = text.toLowerCase();
+  const no = /\b(not\s+approved|disapproved|un-?approved|rejected|declined|denied|not\s+allowed|do\s+not\s+approve|don'?t\s+approve|no\s+approval)\b/.test(t);
+  const yes = /\b(approved|approve|ok\s+to\s+proceed|go\s+ahead)\b/.test(t.replace(/\b(not\s+approved|disapproved|un-?approved|do\s+not\s+approve|don'?t\s+approve)\b/g, ' '));
+  if (no && !yes) return 'NOT_APPROVED';
+  if (yes && !no) return 'APPROVED';
+  return null;
+}

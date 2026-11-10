@@ -121,6 +121,8 @@ describe('vendor price management', () => {
     // The Zoho list is not stored; a vendor is kept only because it has a cost. Zoho is not reachable in this test, so the snapshot of an earlier save is used.
     const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
     await VendorPrice.create({ zohoContactId: '777000000000111', vendorNo: '12600', name: 'Price Test Signs', zohoStatus: 'active' });
+    // A cost above the company rate waits for approval (tests/vendor-rate-approval.test.ts); this test is about storing, so the rate is set high.
+    await (await import('../src/modules/costing/costing.model')).CostPolicy.create({ key: 'default', vendorRatePerShop: 1000, vendorFarRatePerShop: 1500 });
     const put = (b: unknown) => api().put('/api/v1/vendors/zoho-directory/777000000000111/price').set(as('OPS')).send(b);
     expect((await put({ ratePerShop: 320, farRatePerShop: 280 })).status).toBe(400); // far cannot be below normal
     // skills come from the list: an unknown one is refused until it is added

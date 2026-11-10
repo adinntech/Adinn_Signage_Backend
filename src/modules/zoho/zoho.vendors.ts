@@ -5,6 +5,7 @@ import { escapeRegex, listQuery, pageMeta } from '../../common/query';
 import { Vendor } from '../vendors/vendor.model';
 import { VendorPrice } from '../vendors/vendorPrice.model';
 import { pricedZohoContactIds, pricesOfZohoVendors } from '../vendors/vendorPrice.service';
+import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
 import { zohoGet } from './zoho.client';
 import { toZohoVendorRow, type ZohoContact } from './zoho.mapper';
 
@@ -58,6 +59,14 @@ async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'pr
     const costed = v.ratePerShop != null;
     if (!costed && q.registered !== 'yes') continue;
     if (!rows.has(id)) rows.set(id, { zohoContactId: id, vendorNo: v.zohoVendorNo ?? undefined, name: v.name, email: v.email ?? undefined, mobile: v.mobile ?? undefined, gstin: v.gstin ?? undefined, pan: v.pan ?? undefined, contactCode: undefined, zohoStatus: v.status === 'INACTIVE' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: undefined, city: v.district ?? null, address: v.address ?? null, createdByName: null });
+  }
+  // A vendor whose first cost is waiting for the approver is listed too (marked "waiting for approval"), so it is not lost.
+  if (q.price === 'set') {
+    for (const a of await VendorRateApproval.find({ status: 'PENDING' }).lean()) {
+      if (rows.has(a.zohoContactId)) continue;
+      const v = vendors.find((x) => x.zohoContactId === a.zohoContactId);
+      rows.set(a.zohoContactId, { zohoContactId: a.zohoContactId, vendorNo: a.vendorNo ?? v?.zohoVendorNo ?? undefined, name: a.vendorName ?? v?.name ?? 'Zoho vendor', email: v?.email ?? undefined, mobile: v?.mobile ?? undefined, gstin: v?.gstin ?? undefined, pan: v?.pan ?? undefined, contactCode: undefined, zohoStatus: 'active', zohoModifiedAt: undefined, zohoCreatedAt: undefined, city: v?.district ?? null, address: v?.address ?? null, createdByName: null });
+    }
   }
   let list = [...rows.values()];
   if (q.status) list = list.filter((r) => r.zohoStatus === q.status);

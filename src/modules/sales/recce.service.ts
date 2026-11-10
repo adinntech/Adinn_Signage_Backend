@@ -3,7 +3,7 @@ import type { z } from 'zod';
 import { COMPANY } from '../../config/company';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
-import { escapeHtml, sanitizeHtml } from '../../common/html';
+import { escapeHtml, htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
@@ -123,6 +123,11 @@ async function includedRateCard(orderId: Types.ObjectId, r: RateCardFlow) {
   return o?.rateCardArray?.[0] ?? null;
 }
 
+/** What the request email opens with when the signage API prints the details: a short note (the details are not typed, the template prints them). */
+export const DEFAULT_NOTE = '<p>Kindly create the codes for this order and share them to proceed with the Recce/Operations assignment.</p>';
+/** Same words, whatever the markup (the editor rewrites tags and spacing). */
+const sameText = (a: string, b: string) => htmlToText(a).replace(/\s+/g, ' ').trim() === htmlToText(b).replace(/\s+/g, ' ').trim();
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
@@ -199,6 +204,12 @@ export async function getRecce(id: string, actor: Actor) {
   };
   const section = (title: string, inner: string) => (inner ? `<h3>${esc(title)}</h3>${inner}` : '');
   const mobile = (p?: string | null) => (p ? `+91 ${p}` : null);
+  /** The same lists feed the editor text above and the data the mail template prints (`facts`). */
+  const pairsOf = (list: [string, string | null | undefined][]) => list.filter((x): x is [string, string] => filled(x[1])).map(([label, value]) => ({ label, value }));
+  const tableOf = <T,>(list: T[], cols: [string, (x: T) => string | null | undefined][]) => {
+    const used = cols.filter(([, f]) => list.some((x) => filled(f(x))));
+    return list.length && used.length ? { columns: used.map(([h]) => h), rows: list.map((x) => used.map(([, f]) => (filled(f(x)) ? f(x)! : '—'))) } : null;
+  };
   // Full address: the street, then city / state / PIN when the street does not already contain them.
   const street = client?.address?.trim() ?? '';
   const address = [street, ...[client?.city, client?.state, client?.pincode].map((p) => p?.trim()).filter((p): p is string => !!p && !street.toLowerCase().includes(p.toLowerCase()))]
@@ -213,6 +224,42 @@ export async function getRecce(id: string, actor: Actor) {
     ...certs.map((f) => ({ file: f, note: 'GST certificate' })),
   ];
   const fileNames = safeNames(files.map((x) => x.file));
+  const clientRows: [string, string | null | undefined][] = [
+    ['Company Name', client?.name],
+    // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
+    ...(existing ? ([['Client ID', zohoNo]] as [string, string | null | undefined][]) : ([['Client ID', 'To be created in Zoho'], ['CRM Reference (temporary)', client?.clientNo]] as [string, string | null | undefined][])),
+    ...(csWording ? [] : ([['Client Flag', existing ? 'Existing Client' : 'New Client']] as [string, string][])),
+    ['Email', client?.email],
+    ['Phone', client?.phone],
+    ['GST Number', client?.gstin],
+    ['Address', address],
+    ...custom.map((f) => [f.label!, f.value!] as [string, string]),
+  ];
+  const projectRows: [string, string | null | undefined][] = [['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]];
+  const contactCols: [string, (k: (typeof contacts)[number]) => string | null | undefined][] = [
+    ['Name', (k) => k.name],
+    ['Designation', (k) => k.designation],
+    ['Mobile', (k) => mobile(k.phone)],
+    ['Email', (k) => k.email],
+    ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+  ];
+  const soList = o.soContacts ?? [];
+  const soCols: [string, (k: (typeof soList)[number]) => string | null | undefined][] = [
+    ['Name', (k) => k.name],
+    ['Mobile', (k) => mobile(k.phone)],
+    ['Email', (k) => k.email],
+    ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+  ];
+  const facts = {
+    existing,
+    clientId: zohoNo ?? '',
+    sections: [
+      { title: 'Client Details', rows: pairsOf(clientRows), table: null },
+      { title: 'Project Details', rows: pairsOf(projectRows), table: null },
+      { title: 'Contact Persons', rows: [] as { label: string; value: string }[], table: tableOf(contacts, contactCols) },
+      ...(o.handoverType === 'ASO' ? [{ title: 'SO Contacts', rows: [] as { label: string; value: string }[], table: tableOf(soList, soCols) }] : []),
+    ].filter((x) => x.rows.length || x.table),
+  };
   const team = isCs(actor) ? 'Client Servicing Team' : 'Business Development Team';
   return {
     orderId: String(o._id),
@@ -274,52 +321,23 @@ export async function getRecce(id: string, actor: Actor) {
     draft: {
       to: [] as string[],
       cc: [] as string[],
+      /** The details the mail template prints on its own (client, project, contacts); the editor text only goes out when it was changed. */
+      facts,
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
       subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
       // Heading, greeting and request, client details, project details, contacts (SO contacts for SO), attachments,
       // closing and sign-off. Empty sections and fields are left out.
-      body:
-        `<h2>${existing ? 'Project &amp; Estimation Code Request' : 'Client ID, Project &amp; Estimation Code Request'}</h2>` +
+      body: signageMailAvailable()
+        ? DEFAULT_NOTE
+        : `<h2>${existing ? 'Project &amp; Estimation Code Request' : 'Client ID, Project &amp; Estimation Code Request'}</h2>` +
         `<p>Dear Team,</p>` +
         (existing
           ? `<p>Kindly create the project code and estimation code for the following order under ${csWording ? '' : 'the existing '}Client ID <strong>${escapeHtml(zohoNo ?? '-')}</strong>.</p>`
           : `<p>This is a new client. Kindly create the <strong>client ID in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below. The GST certificate and the client's details are included for the client ID.</p>`) +
-        section(
-          'Client Details',
-          rows([
-            ['Company Name', client?.name],
-            // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
-            ...(existing ? [['Client ID', zohoNo] as [string, string | null | undefined]] : [['Client ID', 'To be created in Zoho'] as [string, string], ['CRM Reference (temporary)', client?.clientNo] as [string, string | null | undefined]]),
-            ...(csWording ? [] : [['Client Flag', existing ? 'Existing Client' : 'New Client'] as [string, string]]),
-            ['Email', client?.email],
-            ['Phone', client?.phone],
-            ['GST Number', client?.gstin],
-            ['Address', address],
-            ...custom.map((f) => [f.label!, f.value!] as [string, string]),
-          ]),
-        ) +
-        section('Project Details', rows([['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]])) +
-        section(
-          'Contact Persons',
-          grid(contacts, [
-            ['Name', (k) => k.name],
-            ['Designation', (k) => k.designation],
-            ['Mobile', (k) => mobile(k.phone)],
-            ['Email', (k) => k.email],
-            ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
-          ]),
-        ) +
-        (o.handoverType === 'ASO'
-          ? section(
-              'SO Contacts',
-              grid(o.soContacts ?? [], [
-                ['Name', (k) => k.name],
-                ['Mobile', (k) => mobile(k.phone)],
-                ['Email', (k) => k.email],
-                ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
-              ]),
-            )
-          : '') +
+        section('Client Details', rows(clientRows)) +
+        section('Project Details', rows(projectRows)) +
+        section('Contact Persons', grid(contacts, contactCols)) +
+        (o.handoverType === 'ASO' ? section('SO Contacts', grid(soList, soCols)) : '') +
         section('Attachments', files.length ? `<ul>${files.map((x, i) => `<li>${esc(fileNames[i]!)}${x.note ? ` (${esc(x.note)})` : ''}</li>`).join('')}</ul>` : '') +
         `<p>Kindly share the generated codes to proceed with the Recce/Operations assignment.</p>` +
         `<p>Regards,<br><strong>${esc(bd?.name ?? team)}</strong><br>${team}<br>${esc(COMPANY.name)}</p>`,
@@ -392,7 +410,13 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       attachments,
       rateCardRevision: included?.revision ?? undefined,
       requestKey: input.requestKey,
-      signage: { source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team', client: { clientName: client?.name ?? '', clientCode }, docTypes },
+      signage: {
+        source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team',
+        client: { clientName: client?.name ?? '', clientCode },
+        docTypes,
+        // The template prints the client, project and contact details itself; the written text goes out as a rich note only when it differs from the default.
+        ...(signageMailAvailable() ? { facts: (await getRecce(id, actor)).draft.facts, ...(sameText(input.body, DEFAULT_NOTE) ? {} : { noteHtml: sanitizeHtml(input.body) }) } : {}),
+      },
       actor,
     });
     const status = (sent as { status?: string }).status ?? 'SENT';

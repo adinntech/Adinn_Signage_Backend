@@ -1,7 +1,7 @@
 import { nextSeq } from '../../common/counter.model';
 
 /** Which kind of request an ID is for. The tag is the part after "ADN-Signage-". */
-export const REQUEST_ID_TAGS = { CLIENT_CODE: 'cli', PROJECT_CODE: 'prj', COMBINED_CODE: 'cp', VENDOR_REGISTRATION: 'vnd' } as const;
+export const REQUEST_ID_TAGS = { CLIENT_CODE: 'cli', PROJECT_CODE: 'prj', COMBINED_CODE: 'cp', VENDOR_REGISTRATION: 'vnd', VENDOR_RATE_APPROVAL: 'vap' } as const;
 export type RequestIdType = keyof typeof REQUEST_ID_TAGS;
 
 const two = (n: number) => String(n).padStart(2, '0');

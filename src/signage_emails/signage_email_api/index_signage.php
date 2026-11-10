@@ -47,7 +47,7 @@ try{
   respond(200,['status'=>'success','message'=>'Piece stored','index'=>$idx]);
  }
  $type=clean($data['mailtype']??'');
- $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','vendor'=>'signage_vendor_registration_request.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
+ $templates=['combined'=>'signage_client_&_project_code_requests.php','client'=>'signage_client_code_request.php','project'=>'signage_project_code_request.php','vendor'=>'signage_vendor_registration_request.php','rateapproval'=>'signage_vendor_rate_approval.php','forgot_mpin'=>'signage_forgot_credential.php','forgot_password'=>'signage_forgot_credential.php'];
  if(!isset($templates[$type]))throw new InvalidArgumentException('Invalid mailtype');
  $isAuth=in_array($type,['forgot_mpin','forgot_password'],true);
  $to=emails($data['toEmail']??[]);$cc=emails($data['ccEmail']??[]);$bcc=emails($data['bccEmail']??[]);
@@ -68,7 +68,7 @@ try{
  if($type==='vendor'&&clean($vendor['vendorName']??'')==='')throw new InvalidArgumentException('vendor.vendorName required');
  $data['bodyHtml']=safeHtml($data['bodyHtml']??'');
  $subject=clean($data['subject']??'');
- if($subject==='')$subject=$isAuth?'Your Signage verification code':($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId);
+ if($subject==='')$subject=$isAuth?'Your Signage verification code':($type==='rateapproval'?'Vendor Amount Approval - '.$requestId:($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId));
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
  $attachments=[];
  foreach(($data['attachments']??[]) as $a){

@@ -21,13 +21,14 @@ export interface Routing {
 /** The audit log needs an ObjectId; one fixed id per routing key. */
 const auditId = (key: RoutingKey) => new Types.ObjectId(Buffer.from(key.padEnd(12, '_').slice(0, 12)).toString('hex'));
 
-export const LABELS: Record<RoutingKey, string> = { PROJECT_CODE: 'Project code request', CLIENT_CODE: 'Client code request', VENDOR_REGISTRATION: 'Vendor registration request' };
+export const LABELS: Record<RoutingKey, string> = { PROJECT_CODE: 'Project code request', CLIENT_CODE: 'Client code request', VENDOR_REGISTRATION: 'Vendor registration request', VENDOR_RATE_APPROVAL: 'Vendor amount approval request' };
 
 const list = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const ENV_TO: Record<RoutingKey, () => string[]> = {
   PROJECT_CODE: () => list(env.CODE_REQUEST_PROJECT_RECIPIENTS),
   CLIENT_CODE: () => list(env.CODE_REQUEST_CLIENT_RECIPIENTS),
   VENDOR_REGISTRATION: () => list(env.VENDOR_REGISTRATION_RECIPIENTS),
+  VENDOR_RATE_APPROVAL: () => [],
 };
 /** No address is built into the code: until the Super Admin saves the recipients (Admin > Mail settings) only the old env list is used, else the lists are empty. */
 const fallback = (key: RoutingKey) => ({ to: ENV_TO[key](), cc: [] as string[] });
