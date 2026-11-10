@@ -33,7 +33,7 @@ const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage a
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
 
 /** `facts`: the details the PHP template prints; `noteHtml`: the rich note, only when the person changed the default text. */
-type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string>; facts?: unknown; noteHtml?: string | undefined };
+type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string>; facts?: unknown; noteHtml?: string | undefined; replyTo?: string | undefined };
 
 type DeliverInput = {
   order: Types.ObjectId;
@@ -110,6 +110,7 @@ async function deliverOnce(rec: DeliverInput) {
       text: htmlToText(projectRequest.noteHtml ?? rec.body),
       html: projectRequest.noteHtml ?? rec.body,
       ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
+      ...(projectRequest.replyTo ? { replyTo: projectRequest.replyTo } : {}),
       source: projectRequest.source ?? 'Client Servicing Team',
       client: projectRequest.client ?? { clientName: '', clientCode: '' },
       attachments: rec.attachments,
@@ -134,6 +135,7 @@ async function deliverOnce(rec: DeliverInput) {
           text: htmlToText(projectRequest.noteHtml ?? rec.body),
           html: projectRequest.noteHtml ? styledEmailHtml(projectRequest.noteHtml) : html,
           ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
+          ...(projectRequest.replyTo ? { replyTo: projectRequest.replyTo } : {}),
           source: apiPayload!.source,
           client: apiPayload!.client,
           attachments: rec.attachments,

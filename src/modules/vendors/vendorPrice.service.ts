@@ -8,13 +8,15 @@ import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from '../zoho/z
 import { Vendor } from './vendor.model';
 import type { priceBody, skillBody } from './vendor.service';
 import { VendorPrice } from './vendorPrice.model';
+import { User } from '../users/user.model';
 import { VendorRateApproval } from './vendorRateApproval.model';
-import { cappedAtLimit, companyRates, exceedsLimit, pendingApprovals, requestRateApproval } from './vendorRateApproval.service';
+import { cappedAtLimit, companyRates, exceedsLimit, latestApprovals, pendingApprovals, requestRateApproval } from './vendorRateApproval.service';
 import { VendorSkill } from './vendorSkill.model';
 
 /** `pending`: a typed cost above the company rate that is waiting for the approver's reply. */
 export type Pending = { requestId: string; ratePerShop: number | null; farRatePerShop: number | null; limitRate: number | null; limitFar: number | null };
-export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null; pending?: Pending };
+export type Approval = Awaited<ReturnType<typeof latestApprovals>> extends Map<string, infer A> ? A : never;
+export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null; /** When the cost record was created and last changed. */ createdAt?: Date; updatedAt?: Date; pending?: Pending; /** The latest amount approval: waiting, approved or not approved. */ approval?: Approval };
 const NONE: Price = { ratePerShop: null, farRatePerShop: null, skills: [], source: null };
 
 /* --------------------------------------- skills --------------------------------------- */
@@ -43,13 +45,14 @@ async function checkedSkills(names: string[]): Promise<string[]> {
 /** Price per shop and skills of each Zoho vendor: the registered vendor's own when it is registered, otherwise the ones typed in Vendor master. */
 export async function pricesOfZohoVendors(contactIds: string[]): Promise<Map<string, Price>> {
   const [vendors, typed] = await Promise.all([
-    Vendor.find({ zohoContactId: { $in: contactIds }, deletedAt: null }).select('zohoContactId ratePerShop farRatePerShop skills').lean(),
+    Vendor.find({ zohoContactId: { $in: contactIds }, deletedAt: null }).select('zohoContactId ratePerShop farRatePerShop skills createdAt updatedAt').lean(),
     VendorPrice.find({ zohoContactId: { $in: contactIds } }).lean(),
   ]);
   const out = new Map<string, Price>();
-  for (const t of typed) out.set(t.zohoContactId, { ratePerShop: t.ratePerShop ?? null, farRatePerShop: t.farRatePerShop ?? null, skills: t.skills ?? [], source: 'ZOHO' });
-  for (const v of vendors) if (v.zohoContactId) out.set(v.zohoContactId, { ratePerShop: v.ratePerShop ?? null, farRatePerShop: v.farRatePerShop ?? null, skills: v.skills ?? [], source: 'VENDOR' });
+  for (const t of typed) out.set(t.zohoContactId, { ratePerShop: t.ratePerShop ?? null, farRatePerShop: t.farRatePerShop ?? null, skills: t.skills ?? [], source: 'ZOHO', ...(t.createdAt ? { createdAt: t.createdAt } : {}), ...(t.updatedAt ? { updatedAt: t.updatedAt } : {}) });
+  for (const v of vendors) if (v.zohoContactId) out.set(v.zohoContactId, { ratePerShop: v.ratePerShop ?? null, farRatePerShop: v.farRatePerShop ?? null, skills: v.skills ?? [], source: 'VENDOR', ...(v.createdAt ? { createdAt: v.createdAt } : {}), ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) });
   for (const [id, p] of await pendingApprovals(contactIds)) out.set(id, { ...(out.get(id) ?? NONE), pending: p });
+  for (const [id, a] of await latestApprovals(contactIds)) out.set(id, { ...(out.get(id) ?? NONE), approval: a });
   return out;
 }
 
@@ -125,15 +128,33 @@ export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof
  * The approver answered. APPROVED applies the typed cost; NOT_APPROVED applies the company rate instead (every price capped at it).
  * Only the first answer counts. Returns null when the request is not waiting any more.
  */
-export async function decideRateApproval(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', decidedBy: string, reply?: { messageId: string; from: string; receivedAt: Date; snippet: string }) {
-  const a = await VendorRateApproval.findOne({ requestId, status: 'PENDING' }).lean();
+export async function decideRateApproval(
+  requestId: string,
+  decision: 'APPROVED' | 'NOT_APPROVED',
+  decidedBy: string,
+  reply?: { messageId: string; from: string; receivedAt: Date; snippet: string },
+  /** redo: change an answer already given (a corrected reply, or a person changing the status). Only the vendor's latest request can be changed. */
+  opts: { redo?: boolean } = {},
+) {
+  const a = await VendorRateApproval.findOne({ requestId, status: opts.redo ? { $in: ['PENDING', 'APPROVED', 'NOT_APPROVED'] } : 'PENDING' }).lean();
   if (!a) return null;
+  if (a.status === decision) return null; // nothing to change
+  if (a.status !== 'PENDING' && (await VendorRateApproval.exists({ zohoContactId: a.zohoContactId, createdAt: { $gt: (a as { createdAt?: Date }).createdAt }, status: { $ne: 'REPLACED' } }))) return null; // a newer request took over
   const typed = { ratePerShop: a.requested.ratePerShop ?? null, farRatePerShop: a.requested.farRatePerShop ?? null };
   const applied = decision === 'APPROVED' ? typed : cappedAtLimit(typed, { ratePerShop: a.limit.ratePerShop ?? 0, farRatePerShop: a.limit.farRatePerShop ?? 0 });
-  const claimed = await VendorRateApproval.findOneAndUpdate({ _id: a._id, status: 'PENDING' }, { $set: { status: decision, decidedAt: new Date(), decidedBy, applied, ...(reply ? { reply } : {}) } });
+  const claimed = await VendorRateApproval.findOneAndUpdate({ _id: a._id, status: a.status }, { $set: { status: decision, decidedAt: new Date(), decidedBy, applied, ...(reply ? { reply } : {}) } });
   if (!claimed) return null;
   const actor = { id: String(a.requestedBy), role: 'SYSTEM' };
   await setZohoVendorPrice(a.zohoContactId, { ratePerShop: applied.ratePerShop, farRatePerShop: applied.farRatePerShop }, actor, { approved: true });
-  await recordAudit({ actor, action: decision === 'APPROVED' ? 'PRICE_APPROVED' : 'PRICE_NOT_APPROVED', entity: 'VendorRateApproval', entityId: a._id, reason: `${requestId} by ${decidedBy}: applied ${applied.ratePerShop}/${applied.farRatePerShop ?? '-'}` });
-  return { requestId, decision, applied, vendorName: a.vendorName ?? '' };
+  await recordAudit({ actor, action: decision === 'APPROVED' ? 'PRICE_APPROVED' : 'PRICE_NOT_APPROVED', entity: 'VendorRateApproval', entityId: a._id, reason: `${requestId} by ${decidedBy}${a.status !== 'PENDING' ? ` (changed from ${a.status})` : ''}: applied ${applied.ratePerShop}/${applied.farRatePerShop ?? '-'}` });
+  return { requestId, decision, applied, vendorName: a.vendorName ?? '', changedFrom: a.status !== 'PENDING' ? a.status : null };
+}
+
+/** A person (Operations) changes the status of an amount request: APPROVED applies the typed cost, NOT_APPROVED the company rate. Kept in the request's history. */
+export async function changeRateApprovalStatus(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', actor: Actor) {
+  const name = (await User.findById(actor.id).select('name').lean())?.name ?? 'User';
+  const done = await decideRateApproval(requestId, decision, `${name} (manual)`, undefined, { redo: true });
+  if (!done) throw AppError.conflict('This request already has that status, or a newer request replaced it. Reload the page.');
+  await VendorRateApproval.updateOne({ requestId }, { $push: { history: { at: new Date(), from: name, outcome: `Status changed by ${name}: ${done.changedFrom ?? 'PENDING'} to ${decision}` } } });
+  return done;
 }

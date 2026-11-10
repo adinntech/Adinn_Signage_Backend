@@ -41,6 +41,10 @@ const schema = z
     MAX_IMAGE_SIZE: z.coerce.number().int().positive(),
     MAX_VIDEO_SIZE: z.coerce.number().int().positive(),
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+    /** Where the in-house recce team starts from when a project has no start point of its own (used by the smart planner). */
+    DEFAULT_BASE_NAME: z.string().trim().min(1).default('Adinn Head Office'),
+    DEFAULT_BASE_LAT: z.coerce.number().min(-90).max(90).default(9.9252),
+    DEFAULT_BASE_LNG: z.coerce.number().min(-180).max(180).default(78.1198),
     /** Public URL of the web CRM, used for links inside notification emails. */
     WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
     /** Map services for shop allocation. Both are open services that need no key; point them at your own server if you host one. Empty disables the lookup. */
@@ -87,6 +91,8 @@ const schema = z
     IMAP_USER: optional,
     IMAP_PASS: optional,
     IMAP_MAILBOX: z.string().trim().default('INBOX'),
+    /** Also read here, so a reply sent from the reply mailbox's own account (it never reaches its Inbox) is picked up. Empty = off. Gmail: [Gmail]/Sent Mail. */
+    IMAP_SENT_MAILBOX: z.string().trim().default('[Gmail]/Sent Mail'),
     /** How often the reply mailbox is checked, in seconds. 0 = never (only the Check now button). */
     MAIL_REPLY_POLL_SECONDS: z.coerce.number().int().min(0).default(120),
     /** Public URL of the Adinn logo shown in the footer of code request emails. */

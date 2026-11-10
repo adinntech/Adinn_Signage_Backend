@@ -36,6 +36,8 @@ const vendorRateApprovalSchema = new Schema(
     decidedAt: Date,
     decidedBy: String,
     reply: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String }, { _id: false }),
+    /** Every reply read, with what was made of it (decided, unclear, or ignored because already decided). */
+    history: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, outcome: String }],
   },
   { timestamps: true },
 );

@@ -1,6 +1,8 @@
 import { Types } from 'mongoose';
 import type { z } from 'zod';
-import { fileContent } from '../files/file.service';
+import { fileContent, readStoredFile } from '../files/file.service';
+import type { StoredFile } from '../files/storedFile.schema';
+import { SalesOrder } from '../sales/sales.model';
 import { AppError } from '../../common/errors';
 import { nextSeqBlock } from '../../common/counter.model';
 import { pageMeta, type Actor } from '../../common/query';
@@ -54,10 +56,22 @@ export async function uploadSheet(projectId: string, file: { buffer: Buffer; ori
  * "Extract" for a sheet the project already holds (the Excel BD attached): reads the stored file and stages it exactly like an
  * upload, so Operations never has to download and re-upload it. Review and commit then work as for any import.
  */
+/** A file the BD / Client Servicing attached to the sales order (handover documents, shop lists, chat files) of this project. */
+async function uploadFromHandoverFile(projectId: string, fileId: string, actor: Actor) {
+  const project = await Project.findOne({ _id: projectId, deletedAt: null }).select('salesOrder').lean();
+  const order = project?.salesOrder ? await SalesOrder.findOne({ _id: project.salesOrder, deletedAt: null }).select('handoverDocumentsArray.file handoverMessagesArray.attachments').lean() : null;
+  const all: (StoredFile | null | undefined)[] = [...(order?.handoverDocumentsArray ?? []).map((d) => d.file as StoredFile | undefined), ...(order?.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[])];
+  const file = all.find((f) => f && String(f.fileId) === fileId);
+  if (!file) throw AppError.notFound('That file is not an attachment of this project');
+  const { name, content } = await readStoredFile(file);
+  if (!/.(xlsx|csv)$/i.test(name)) throw AppError.badRequest('Only Excel (.xlsx) or CSV files can be extracted');
+  return uploadSheet(projectId, { buffer: content, originalname: name, size: content.length }, actor);
+}
+
 export async function uploadFromProjectFile(projectId: string, fileId: string, actor: Actor) {
   await requireProject(projectId);
   const holds = await Project.exists({ _id: projectId, files: { $elemMatch: { _id: fileId, category: { $in: ['BD_CLIENT_DETAILS', 'OPS_SURVEY_PROOF'] }, deletedAt: null } } });
-  if (!holds) throw AppError.notFound('That file is not an attachment of this project');
+  if (!holds) return uploadFromHandoverFile(projectId, fileId, actor);
   const { stream, name } = await fileContent(fileId, actor);
   if (!/\.(xlsx|csv)$/i.test(name)) throw AppError.badRequest('Only Excel (.xlsx) or CSV files can be extracted');
   const chunks: Buffer[] = [];

@@ -48,7 +48,7 @@ describe('reply parser', () => {
     expect(findVendorNo('Vendor ID: 4521').code).toBe('4521');
     expect(findVendorNo('vendor no 88').code).toBe('88');
     expect(findVendorNo('4521\n\nRegards').code).toBe('4521');
-    expect(findVendorNo('Registered, number 4521 for you').code).toBeNull();
+    expect(findVendorNo('Registered, number 4521 for you').code).toBe('4521'); // the only number in the reply
   });
 
   it('only the people the mail went to (or their domain) may answer', () => {
@@ -144,6 +144,46 @@ describe('replies to a code request', () => {
     expect(ok.status).toBe(200);
   });
 
+  it('a corrected reply overwrites the first; the person can edit the fetched code and estimates, and the edits are kept with who and when', async () => {
+    const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
+    const order = await makeOrder();
+    const row = (await sendProject(order, 'reply-key-0009')).body.data.requests[0];
+    const first = reply(row.requestId);
+    expect(await processReply({ ...first, messageId: '<c1@adinn.test>', text: 'Project code 20205768 EST-020456 EST-020457' })).toBe('saved');
+    expect(await processReply({ ...first, messageId: '<c2@adinn.test>', text: 'Sorry, project code 20205769 EST-020456 EST-020458', receivedAt: new Date(Date.now() + 60_000) })).toBe('saved');
+    const { CodeRequest } = await import('../src/modules/codeRequests/codeRequest.model');
+    const got = (await CodeRequest.findOne({ requestId: row.requestId }).lean())!;
+    expect(got.reply).toMatchObject({ detectedCode: '20205769', estimates: ['EST-020456', 'EST-020458'] });
+    expect(got.replyHistory?.map((h) => h.detectedCode)).toEqual(['20205768', '20205769']);
+    // the person fixes the code and drops one estimate before confirming
+    const ok = await api().post(`/api/v1/sales/orders/${order}/codes/confirm`).set(as('CS')).send({ kind: 'PROJECT_CODE', code: '20205770', estimates: ['est-020456', 'EST-020459'], evidenceNote: 'edited' });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const done = (await CodeRequest.findOne({ requestId: row.requestId }).lean())!;
+    expect(done).toMatchObject({ confirmedCode: '20205770', estimates: ['EST-020456', 'EST-020459'] });
+    expect(done.editHistory?.map((e) => [e.field, e.from, e.to, e.byName])).toEqual([['code', '20205769', '20205770', 'CS'], ['estimates', 'EST-020456, EST-020458', 'EST-020456, EST-020459', 'CS']]);
+    expect(done.editHistory?.every((e) => e.at instanceof Date)).toBe(true);
+    const bad = await api().post(`/api/v1/sales/orders/${(await makeOrder())}/codes/confirm`).set(as('CS')).send({ kind: 'PROJECT_CODE', code: '20205771', estimates: ['ABC'] });
+    expect(bad.status).toBe(422);
+  });
+
+  it('the project code request mail sent from Project Assign (Recce): its reply is read onto the order, never saved as the code by itself', async () => {
+    const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
+    const { SalesOrder } = await import('../src/modules/sales/sales.model');
+    const order = await makeOrder();
+    const id = 'ADN-Signage-prj-10112699';
+    await SalesOrder.updateOne({ _id: order }, { $push: { salesprofile: { kind: 'PROJECT_CODE_REQUEST', to: ['codes@adinn.test'], cc: ['sm@adinn.test'], subject: `Project Code Request - ${id}`, status: 'SENT', requestId: id, sentBy: uid.CS } } });
+    const m = (messageId: string, text: string, extra: Record<string, unknown> = {}) => ({ messageId, from: ['codes@adinn.test'], subject: `Re: Project Code Request - ${id}`, text, ...extra });
+    expect(await processReply({ ...m('<s0@x>', 'Project code 22070277', {}), from: ['x@evil.com'] })).toBe('rejected');
+    expect(await processReply(m('<s1@x>', 'Dear Sir,\nProject code 22070277\nEST-323343 EST-323344'))).toBe('saved');
+    expect(await processReply(m('<s1@x>', 'Dear Sir,\nProject code 22070277'))).toBe('duplicate');
+    // a corrected reply overwrites what is shown; both stay in the history
+    expect(await processReply(m('<s2@x>', 'Sorry, project code 22070278 EST-323345', { receivedAt: new Date(Date.now() + 60_000) }))).toBe('saved');
+    const got = (await SalesOrder.findById(order).lean())!;
+    expect(got.recce?.codeReply).toMatchObject({ detectedCode: '22070278', estimates: ['EST-323345'] });
+    expect(got.recce?.codeReplyHistory?.map((h) => h.detectedCode)).toEqual(['22070277', '22070278']);
+    expect(got.recce?.projectCode).toBeUndefined(); // saved by a person in the Codes step only
+  });
+
   it('ignores a reply from someone the request was not sent to, and mail that names no request', async () => {
     const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
     const order = await makeOrder();
@@ -177,8 +217,15 @@ describe('replies to a code request', () => {
     expect(got.registration?.reply).toMatchObject({ from: 'accounts@adinn.test', detectedVendorNo: '4521' });
     expect(got.zohoVendorNo).toBeUndefined(); // a person still saves the ID, which activates the vendor
     await Vendor.updateOne({ _id: v._id }, { $set: { 'registration.vendorIdAt': new Date() } });
-    expect(await processReply({ ...mail, messageId: '<v2@adinn.test>', text: 'Vendor ID: 9999' })).toBe('duplicate');
-    expect(((await Vendor.findById(v._id).lean())!.registration?.reply as { detectedVendorNo?: string }).detectedVendorNo).toBe('4521');
+    // a correction in the same thread overwrites what is shown, never the ID a person saved; both stay in the history with their time
+    expect(await processReply({ ...mail, messageId: '<v2@adinn.test>', text: 'Sorry, wrong. Vendor ID: 9999', receivedAt: new Date(Date.now() + 60_000) })).toBe('saved');
+    // an older mail read late does not replace the newer one
+    expect(await processReply({ ...mail, messageId: '<v0@adinn.test>', text: 'Vendor ID: 1111', receivedAt: new Date(Date.now() - 3_600_000) })).toBe('saved');
+    const after = (await Vendor.findById(v._id).lean())!;
+    expect(after.registration?.reply?.detectedVendorNo).toBe('9999');
+    expect(after.registration?.replyHistory?.map((h) => h.detectedVendorNo)).toEqual(['4521', '9999', '1111']);
+    expect(after.registration?.replyHistory?.every((h) => h.at instanceof Date)).toBe(true);
+    expect(after.zohoVendorNo).toBeUndefined();
   });
 
   it('confirms the code on its own only when auto-confirm is on for project code mails', async () => {

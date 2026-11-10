@@ -97,6 +97,25 @@ export async function requestRateApproval(input: RequestInput, actor: Actor) {
   return (await VendorRateApproval.findById(row._id).lean())!;
 }
 
+/** The latest request of each Zoho vendor that was not replaced (waiting, approved or not approved), with its history, for the status tag and the status change. */
+export async function latestApprovals(contactIds: string[]) {
+  const rows = await VendorRateApproval.find({ zohoContactId: { $in: contactIds }, status: { $ne: 'REPLACED' } }).sort({ createdAt: -1 }).lean();
+  const out = new Map<string, {
+    requestId: string; status: string; ratePerShop: number | null; farRatePerShop: number | null; limitRate: number | null; limitFar: number | null;
+    appliedRate: number | null; appliedFar: number | null; decidedAt?: Date; decidedBy?: string;
+    history: { at?: Date; receivedAt?: Date; from?: string; snippet?: string; outcome?: string }[];
+  }>();
+  for (const r of rows) {
+    if (out.has(r.zohoContactId)) continue;
+    out.set(r.zohoContactId, {
+      requestId: r.requestId, status: r.status ?? 'PENDING', ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null,
+      limitRate: r.limit.ratePerShop ?? null, limitFar: r.limit.farRatePerShop ?? null, appliedRate: r.applied?.ratePerShop ?? null, appliedFar: r.applied?.farRatePerShop ?? null,
+      decidedAt: r.decidedAt ?? undefined, decidedBy: r.decidedBy ?? undefined, history: (r.history ?? []).map((h) => ({ at: h.at ?? undefined, receivedAt: h.receivedAt ?? undefined, from: h.from ?? undefined, snippet: h.snippet ?? undefined, outcome: h.outcome ?? undefined })),
+    });
+  }
+  return out;
+}
+
 /** The waiting request of each Zoho vendor (for the "waiting for approval" tag in Vendor master). */
 export async function pendingApprovals(contactIds: string[]) {
   const rows = await VendorRateApproval.find({ zohoContactId: { $in: contactIds }, status: 'PENDING' }).lean();

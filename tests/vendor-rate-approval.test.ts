@@ -147,7 +147,52 @@ describe('the approver replies', () => {
     expect((await VendorRateApproval.findOne({ requestId: id }).lean())!.status).toBe('PENDING');
     expect(await price()).toMatchObject({ ratePerShop: 280 }); // nothing applied
     expect(await reply(id, 'APPROVED', 'someone@t.com', '<one@t>')()).toBe('confirmed'); // same company domain as the approver
-    expect(await reply(id, 'NOT APPROVED', 'approver@t.com', '<two@t>')()).toBe('duplicate'); // already decided: the first answer counts
     expect(await price()).toMatchObject({ ratePerShop: 520, farRatePerShop: 640 });
+    expect(await reply(id, 'Approved', 'approver@t.com', '<one@t>')()).toBe('duplicate'); // the same mail read again
+    expect(await reply(id, 'Approved, thanks', 'approver@t.com', '<same@t>')()).toBe('duplicate'); // same answer again: only logged
+    // a corrected reply in a newer mail changes the answer, and the cost follows
+    const later = new Date(Date.now() + 60_000);
+    const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
+    expect(await processReply({ messageId: '<two@t>', from: ['approver@t.com'], subject: `Re: Vendor amount approval - ${id}`, text: 'Sorry, NOT APPROVED. Use the company rate.', receivedAt: later })).toBe('confirmed');
+    expect(await price()).toMatchObject({ ratePerShop: 300, farRatePerShop: 350 });
+    // an older mail read late never changes it back
+    expect(await processReply({ messageId: '<old@t>', from: ['approver@t.com'], subject: `Re: Vendor amount approval - ${id}`, text: 'APPROVED', receivedAt: new Date(Date.now() - 3_600_000) })).toBe('duplicate');
+    expect(await price()).toMatchObject({ ratePerShop: 300 });
+    const row = (await VendorRateApproval.findOne({ requestId: id }).lean())!;
+    expect(row.status).toBe('NOT_APPROVED');
+    expect(row.history?.map((h) => h.outcome)).toEqual(expect.arrayContaining(['Decided: APPROVED', 'Same answer again (APPROVED)', 'Changed from APPROVED to NOT_APPROVED', 'Older mail, kept as NOT_APPROVED']));
+    // the list shows the status
+    expect((await price()).approval).toMatchObject({ requestId: id, status: 'NOT_APPROVED', appliedRate: 300 });
+  });
+
+  it('the LATEST reply decides: Okay, then a question, then "did not accept, rejected" ends as NOT_APPROVED with the company rate', async () => {
+    const id = await ask(480, 590);
+    const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
+    const at = (min: number) => new Date(Date.now() + min * 60_000);
+    const send = (text: string, messageId: string, min: number) => processReply({ messageId, from: ['approver@t.com'], subject: `Re: Vendor amount approval - ${id}`, text, receivedAt: at(min) });
+    expect(await send('Okay. Thanks & Regards', '<a@t>', 1)).toBe('confirmed');
+    expect(await price()).toMatchObject({ ratePerShop: 480, farRatePerShop: 590 });
+    expect(await send('Are you Sure! Do you want to approved?', '<b@t>', 2)).toBe('saved'); // a question: only logged
+    expect(await price()).toMatchObject({ ratePerShop: 480 });
+    expect(await send('Management did not accept it. Note it down as rejected.', '<c@t>', 3)).toBe('confirmed');
+    expect(await price()).toMatchObject({ ratePerShop: 300, farRatePerShop: 350 });
+    expect((await price()).approval).toMatchObject({ status: 'NOT_APPROVED' });
+    expect(await send('Not okay', '<d@t>', 4)).toBe('duplicate'); // same answer again
+  });
+
+  it('Operations can change the status by hand, both ways, and it is written in the history', async () => {
+    const id = await ask(560, 660);
+    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'APPROVED' })).status).toBe(200);
+    expect(await price()).toMatchObject({ ratePerShop: 560, farRatePerShop: 660 });
+    expect((await price()).approval).toMatchObject({ status: 'APPROVED', decidedBy: 'OPS (manual)' });
+    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'NOT_APPROVED' })).status).toBe(200);
+    expect(await price()).toMatchObject({ ratePerShop: 300, farRatePerShop: 350 });
+    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'NOT_APPROVED' })).status).toBe(409); // already that status
+    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'MAYBE' })).status).toBe(422);
+    const { VendorRateApproval } = await import('../src/modules/vendors/vendorRateApproval.model');
+    expect((await VendorRateApproval.findOne({ requestId: id }).lean())!.history?.map((h) => h.outcome)).toEqual(['Status changed by OPS: PENDING to APPROVED', 'Status changed by OPS: APPROVED to NOT_APPROVED']);
+    // a newer request takes over: the older one can no longer be changed
+    await ask(570, 670);
+    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'APPROVED' })).status).toBe(409);
   });
 });

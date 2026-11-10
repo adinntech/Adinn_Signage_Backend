@@ -9,11 +9,13 @@ import { APPROVAL_DOC_TYPES, EMAIL_KINDS, HANDOVER_TYPES, LEAD_STAGES, ORDER_STA
 /** Assign to Recce Team: the codes the BD received for the project. */
 export const recceCodesBody = z.object({
   projectCode: z.string().trim().regex(/^\d{8}$/, 'Project code must be exactly 8 digits'),
+  /** Optional: the project can be assigned with the project code alone; the estimation code can be added later. */
   estimationCode: z
     .string()
     .trim()
     .toUpperCase()
-    .regex(/^EST-\d{6}$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343'),
+    .regex(/^(EST-\d{6})?$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343')
+    .optional(),
   /** New client: the Client ID created in Zoho. Existing clients take theirs from Zoho. */
   clientId: z
     .string()

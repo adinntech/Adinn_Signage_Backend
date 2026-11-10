@@ -23,6 +23,8 @@ export interface SignageMail {
   noteHtml?: string | undefined;
   /** Where each file comes from (by file id): ratecard, shoplist, so, communication, upload, gst. */
   docTypes?: Record<string, string> | undefined;
+  /** Where the answer goes: the reply mailbox (Admin > Mail contacts), so the reply can be read back. */
+  replyTo?: string | undefined;
 }
 
 /** "03 Nov 2026": today in India (Asia/Kolkata). */
@@ -81,6 +83,7 @@ export function signagePayload(m: SignageMail) {
     requestDate: requestDateIst(),
     source: m.source,
     // With details the template prints the structure itself and the text only goes out as a note when it was written; without them the whole text is the note.
+    ...(m.replyTo ? { replyTo: m.replyTo } : {}),
     ...(m.details ? { details: m.details, ...(m.noteHtml ? { message: m.text, bodyHtml: m.noteHtml } : {}) } : { message: m.text, bodyHtml: m.html }),
     client: m.client,
     // Required by the API (422 "project.projectName required"); the request is for the Recce assignment.

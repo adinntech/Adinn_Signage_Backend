@@ -405,6 +405,16 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
   if (await CodeRequest.exists({ kind, confirmedCode: code, order: { $ne: o._id } })) throw invalid('code', `${LABEL[kind]} ${code} is already confirmed on another order`);
 
   const req = await liveRequest(o, kind, actor);
+  // What the person changed from what the reply gave (code, estimates) is kept with who and when.
+  const fetched = { code: req.reply?.detectedCode ?? '', estimates: [...(req.reply?.estimates ?? [])] };
+  const finalEstimates = kind === 'PROJECT_CODE' ? [...new Set(input.estimates ?? fetched.estimates)] : [];
+  const edits: { at: Date; by: string; byName: string; field: string; from: string; to: string }[] = [];
+  if (req.reply) {
+    const byName = (await User.findById(actor.id).select('name').lean())?.name ?? '';
+    const at = new Date();
+    if (code !== fetched.code) edits.push({ at, by: actor.id, byName, field: 'code', from: fetched.code, to: code });
+    if (kind === 'PROJECT_CODE' && finalEstimates.join(',') !== fetched.estimates.join(',')) edits.push({ at, by: actor.id, byName, field: 'estimates', from: fetched.estimates.join(', '), to: finalEstimates.join(', ') });
+  }
   const stored: StoredFile[] = [];
   try {
     for (const f of uploads) stored.push(await storeEmbeddedFile({ category: 'CODE_CONFIRMATION_EVIDENCE', clientName: client.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: { entity: 'SalesOrder', id: o._id } }));
@@ -415,7 +425,7 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
   try {
     const r = await CodeRequest.updateOne(
       { _id: req._id, status: 'PENDING_CONFIRMATION' },
-      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote, evidence: stored } },
+      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote, evidence: stored, ...(kind === 'PROJECT_CODE' ? { estimates: finalEstimates } : {}), ...(edits.length ? { editHistory: edits } : {}) } },
     );
     if (!r.matchedCount) throw AppError.conflict('This request was already handled. Reload the page.');
     if (kind === 'CLIENT_CODE') {

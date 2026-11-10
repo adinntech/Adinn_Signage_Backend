@@ -26,6 +26,10 @@ const vendorPriceSchema = new Schema(
     ratePerShop: Number,
     skills: [String],
     farRatePerShop: Number,
+    /** Where the vendor is (found once from city / address), so the planner can offer the nearest one. geoAt: when it was tried. */
+    lat: Number,
+    lng: Number,
+    geoAt: Date,
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true },

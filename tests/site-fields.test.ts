@@ -80,3 +80,18 @@ describe('normalise', () => {
     expect(dupKeyOf({ shopName: 'ABC Traders', dealerName: 'Raj', district: 'Vellore' })).toBe(dupKeyOf({ shopName: 'abc  traders.', dealerName: 'RAJ', district: 'vellore' }));
   });
 });
+
+describe('the Madurai recce test workbook', () => {
+  it('maps Area / Town to the location and leaves Allocation Status alone', async () => {
+    const fs = await import('node:fs');
+    const { parseWorkbook } = await import('../src/modules/sites/excel.service');
+    const { autoMap } = await import('../src/modules/sites/site.fields');
+    const parsed = await parseWorkbook(fs.readFileSync('src/Madurai_Recce_Vendor_Allocation_Test.xlsx'), 'Madurai.xlsx');
+    expect(parsed.rows.length).toBe(8);
+    const map = autoMap(parsed.headers);
+    expect(map['Area / Town']).toBe('location');
+    expect(map['Allocation Status']).toBe('extra');
+    expect(map['Customer Name']).toBe('dealerName');
+    expect(map['District']).toBe('district');
+  });
+});

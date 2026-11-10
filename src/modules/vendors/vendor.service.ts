@@ -52,6 +52,8 @@ export const vendorBody = z.object({
   bank: z.object({ accountName: opt(120), accountNo: opt(30), ifsc: opt(20) }).optional(),
   ratePerShop: rate,
   farRatePerShop: rate,
+  shopsPerDay: z.coerce.number().int().min(1, 'At least 1 shop a day').max(200, 'At most 200 shops a day').optional(),
+  availability: z.enum(['AVAILABLE', 'BUSY']).optional(),
   notes: opt(1000),
   /** Set when the form was filled from a Zoho Books vendor (see GET /vendors/zoho/:vendorNo). */
   zohoContactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id').optional(),
@@ -198,6 +200,34 @@ async function resolveType<T extends { type?: string | undefined; typeName?: str
   return { ...body, type: t.rules, typeName: t.name };
 }
 
+/**
+ * A Zoho vendor that has a cost in Vendor master gets its CRM vendor record when it is first given shops: name, mobile, e-mail,
+ * city, GST / PAN, cost and skills come from Zoho / Vendor master, and it is ACTIVE straight away (Accounts already created it in
+ * Zoho). Its KYC checklist stays empty, to be completed later in Vendors. Returns the record that already exists, if there is one.
+ */
+export async function adoptZohoVendor(zohoContactId: string, actor: Actor) {
+  const have = await Vendor.findOne({ zohoContactId, deletedAt: null });
+  if (have) {
+    if (have.status !== 'ACTIVE') throw AppError.conflict(`${have.name} (${have.code}) is ${have.status.replace('_', ' ').toLowerCase()} in Vendors, so it cannot be given shops yet`);
+    return have;
+  }
+  const z = await VendorPrice.findOne({ zohoContactId }).lean();
+  if (!z || z.ratePerShop == null) throw AppError.notFound('This vendor has no cost in Vendor master');
+  const mobile = String(z.mobile ?? '').replace(/\D/g, '').slice(-10);
+  if (mobile.length !== 10) throw AppError.conflict(`${z.name ?? 'This vendor'} has no valid 10-digit mobile number in Zoho. Add it in Zoho, or onboard the vendor in Vendors`);
+  const code = `VND-${String(await nextSeq('vendor')).padStart(4, '0')}`;
+  const v = await Vendor.create({
+    code, name: z.name ?? 'Zoho vendor', nameKey: normKey(z.name ?? 'zoho vendor'), type: 'ORGANIZATION', mobile,
+    ...(z.email ? { email: z.email } : {}), ...(z.gstin ? { gstin: z.gstin } : {}), ...(z.pan ? { pan: z.pan } : {}),
+    ...(z.address ? { address: z.address } : {}), ...(z.city ? { district: z.city } : {}),
+    ratePerShop: z.ratePerShop, ...(z.farRatePerShop != null ? { farRatePerShop: z.farRatePerShop } : {}), skills: z.skills ?? [],
+    zohoContactId, ...(z.vendorNo ? { zohoVendorNo: z.vendorNo } : {}), source: 'ZOHO', status: 'ACTIVE',
+    statusReason: 'Created from Vendor master when given shops. KYC checklist still to be completed', createdBy: actor.id, updatedBy: actor.id,
+  });
+  await recordAudit({ actor, action: 'CREATE', entity: 'Vendor', entityId: v._id, reason: `${code} ${v.name}: created from the Zoho vendor in Vendor master when given shops (KYC pending)` });
+  return v;
+}
+
 export async function createVendor(rawBody: z.infer<typeof vendorBody>, actor: Actor, source: 'MANUAL' | 'IMPORT' | 'ZOHO' = 'MANUAL') {
   const { fullDetails, ...body } = await resolveType(rawBody);
   const { value, errors } = checkVendor(body);
@@ -219,7 +249,7 @@ export async function createVendor(rawBody: z.infer<typeof vendorBody>, actor: A
   return v.toObject();
 }
 
-const AUDIT = ['name', 'type', 'contactPerson', 'designation', 'mobile', 'email', 'gstin', 'pan', 'address', 'pincode', 'state', 'district', 'hasGst', 'ratePerShop', 'farRatePerShop'];
+const AUDIT = ['name', 'type', 'contactPerson', 'designation', 'mobile', 'email', 'gstin', 'pan', 'address', 'pincode', 'state', 'district', 'hasGst', 'ratePerShop', 'farRatePerShop', 'shopsPerDay', 'availability'];
 export async function updateVendor(id: string, rawPatch: z.infer<typeof vendorPatch>, actor: Actor) {
   const v = await Vendor.findOne({ _id: id, deletedAt: null });
   if (!v) throw AppError.notFound('Vendor not found');
@@ -387,7 +417,7 @@ export async function listVendors(q: z.infer<typeof vendorListQuery>) {
 }
 
 /** Vendors that can be given shops (active only), light fields. */
-export const activeVendors = () => Vendor.find({ status: 'ACTIVE', deletedAt: null }).sort({ name: 1 }).select('code name type district serviceAreas ratePerShop farRatePerShop mobile').limit(500).lean();
+export const activeVendors = () => Vendor.find({ status: 'ACTIVE', deletedAt: null }).sort({ name: 1 }).select('code name type district serviceAreas ratePerShop farRatePerShop mobile zohoContactId').limit(500).lean();
 
 /**
  * Accounts replied to the registration mail with the vendor ID (Zoho vendor number). Typing it here is the proof that the
@@ -404,6 +434,10 @@ export async function setVendorId(id: string, body: z.infer<typeof vendorIdBody>
   const activate = v.status === 'PENDING_KYC';
   v.set({ zohoVendorNo: body.vendorNo, 'registration.vendorIdAt': new Date(), 'registration.vendorIdBy': actor.id, updatedBy: actor.id, ...(activate ? { status: 'ACTIVE', statusReason: undefined } : {}) });
   await v.save();
+  if (old !== body.vendorNo) {
+    const byName = (await User.findById(actor.id).select('name').lean())?.name ?? '';
+    await Vendor.updateOne({ _id: v._id }, { $push: { 'registration.idHistory': { at: new Date(), by: actor.id, byName, from: old ?? '', to: body.vendorNo } } });
+  }
   await recordAudit({ actor, action: 'VENDOR_ID_RECEIVED', entity: 'Vendor', entityId: v._id, changes: [{ field: 'zohoVendorNo', oldValue: old, newValue: body.vendorNo }] });
   if (activate) await recordAudit({ actor, action: 'STATUS_CHANGE', entity: 'Vendor', entityId: v._id, changes: [{ field: 'status', oldValue: 'PENDING_KYC', newValue: 'ACTIVE' }], reason: 'Vendor ID received from Accounts' });
   return getVendor(id);

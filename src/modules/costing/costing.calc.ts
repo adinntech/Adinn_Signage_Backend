@@ -13,6 +13,8 @@ export interface CostRates {
   stayPerNight: number;
   /** In-house: fuel for every km of the route. */
   fuelRatePerKm: number;
+  /** In-house: local expenses (auto / bus / parking in the shop area) for every field day. */
+  localPerDay: number;
   /** Per-shop limit; above it (vendor bargained too high, or in-house too costly) a special approval is needed. */
   thresholdPerShop: number;
   /** Worst case per shop for in-house. */
@@ -28,6 +30,7 @@ export const DEFAULT_RATES: CostRates = {
   foodPerDay: 300,
   stayPerNight: 450,
   fuelRatePerKm: 3,
+  localPerDay: 0,
   thresholdPerShop: 400,
   worstCasePerShop: 450,
   overVendorPercent: 25,
@@ -85,7 +88,7 @@ export interface LegInput {
 
 export interface LegResult {
   vendor: { perShopRate: number; far: boolean; negotiated: boolean; shopCost: number; other: number; total: number; perShop: number };
-  inHouse: { meals: number; days: number; nights: number; datesAssumed: boolean; routeKm: number; food: number; stay: number; fuel: number; other: number; subtotal: number; total: number; perShop: number };
+  inHouse: { meals: number; days: number; nights: number; datesAssumed: boolean; routeKm: number; food: number; stay: number; fuel: number; local: number; other: number; subtotal: number; total: number; perShop: number };
   comparison: { difference: number; inHouseSavingPercent: number; inHouseOverVendorPercent: number; cheaper: Channel };
   flags: { inHouseOverThreshold: boolean; inHouseWorstCase: boolean; inHouseOverVendor: boolean; vendorOverThreshold: boolean };
   /** Whether choosing this channel for this area needs a special approval from admin. */
@@ -114,8 +117,9 @@ export function calculateLeg(input: LegInput, rates: CostRates): LegResult {
   const food = r2(trip.meals * (rates.foodPerDay / 3));
   const stay = r2(trip.nights * rates.stayPerNight);
   const fuel = r2(routeKm * rates.fuelRatePerKm);
+  const local = r2(trip.days * nn(rates.localPerDay));
   const other = r2(nn(input.otherAmount));
-  const subtotal = r2(food + stay + fuel + other);
+  const subtotal = r2(food + stay + fuel + local + other);
   const hTotal = r2(subtotal / shared);
 
   const vendorPerShop = r2(vTotal / shops);
@@ -145,7 +149,7 @@ export function calculateLeg(input: LegInput, rates: CostRates): LegResult {
 
   return {
     vendor: { perShopRate, far, negotiated, shopCost: vShop, other: vOther, total: vTotal, perShop: vendorPerShop },
-    inHouse: { meals: trip.meals, days: trip.days, nights: trip.nights, datesAssumed: !trip.valid, routeKm: r2(routeKm), food, stay, fuel, other, subtotal, total: hTotal, perShop: hPerShop },
+    inHouse: { meals: trip.meals, days: trip.days, nights: trip.nights, datesAssumed: !trip.valid, routeKm: r2(routeKm), food, stay, fuel, local, other, subtotal, total: hTotal, perShop: hPerShop },
     comparison: { difference, inHouseSavingPercent: vTotal > 0 ? r2((difference / vTotal) * 100) : 0, inHouseOverVendorPercent: overVendorPct, cheaper },
     flags,
     needsApproval,

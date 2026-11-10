@@ -12,7 +12,7 @@ import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
 import { lookupPincode, pincodeParam } from './pincode.service';
-import { addVendorSkill, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
+import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
 import { companyRates } from './vendorRateApproval.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
@@ -42,6 +42,8 @@ vendorRouter.post('/types', ...write, asyncHandler(async (req, res) => ok(res, a
 vendorRouter.get('/skills', ...read, asyncHandler(async (_req, res) => ok(res, await listVendorSkills())));
 vendorRouter.post('/skills', ...write, asyncHandler(async (req, res) => ok(res, await addVendorSkill(svc.skillBody.parse(req.body), actorOf(req)), undefined, 201)));
 // The company rates the Super Admin set (Admin > Cost Rates): shown in the Add cost box; a cost above them needs approval.
+const decisionBody = z.object({ decision: z.enum(['APPROVED', 'NOT_APPROVED']) });
+vendorRouter.put('/rate-approvals/:requestId/decision', ...write, asyncHandler(async (req, res) => ok(res, await changeRateApprovalStatus(z.string().regex(/^ADN-Signage-vap-\d{7,}$/).parse(req.params.requestId), decisionBody.parse(req.body).decision, actorOf(req)))));
 vendorRouter.get('/company-rates', ...read, asyncHandler(async (_req, res) => ok(res, await companyRates())));
 vendorRouter.get('/active', ...read, asyncHandler(async (_req, res) => ok(res, await svc.activeVendors())));
 vendorRouter.get('/template', ...read, asyncHandler(async (_req, res) => sheet(res, await vendorTemplate(), 'vendor-template.xlsx')));

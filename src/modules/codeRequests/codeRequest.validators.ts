@@ -45,6 +45,8 @@ export const confirmBody = z.object({
   kind: z.enum(CODE_KINDS),
   code: z.string().trim().toUpperCase().min(1, 'Enter the code received').max(20),
   evidenceNote: z.string().trim().max(500).optional(),
+  /** Estimate numbers sent with a project code (read from the reply, edited by the person): EST-20234. */
+  estimates: z.array(z.string().trim().toUpperCase().regex(/^EST-\d{3,10}$/, 'An estimate number looks like EST-020456')).max(50).optional(),
 });
 export const rejectBody = z.object({ kind: z.enum(CODE_KINDS), reason: z.string().trim().min(3, 'Enter the reason').max(500) });
 export const retryBody = z.object({ mailBatchId: z.string().trim().min(8).max(64) });

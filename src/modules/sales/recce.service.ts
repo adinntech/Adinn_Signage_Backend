@@ -25,6 +25,7 @@ import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
 import type { recceAssignBody, recceCodesBody, sendEmailBody } from './sales.validators';
 import { safeNames, signageMailAvailable } from './signageMail';
+import { routingOf } from '../mailSettings/mailRouting.service';
 
 /** Recce / Operations people a project can be assigned to (same rule as the projects module). */
 export const recceUsers = () =>
@@ -141,6 +142,7 @@ export async function getRecce(id: string, actor: Actor) {
   // The Client record, or the client kept on the order (Client Servicing).
   const client = await clientOf(o);
   const r = o.recce ?? null;
+  const routing = await routingOf('PROJECT_CODE');
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const codes = r?.projectCode
     ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', clientId: r.clientId ?? null, savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null }
@@ -273,6 +275,9 @@ export async function getRecce(id: string, actor: Actor) {
     /** Gaps of the full handover (step 1). */
     handoverMissing,
     codes,
+    /** The latest reply read for the project code request mail: the project code and estimate numbers found in it (a person still saves them). */
+    codeReply: r?.codeReply ?? null,
+    codeReplyHistory: r?.codeReplyHistory ?? [],
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
     /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
     emailDone: sentOk,
@@ -319,8 +324,9 @@ export async function getRecce(id: string, actor: Actor) {
     // Sent through the signage email API (its URL and key on the server), not SMTP.
     mail: { enabled: signageMailAvailable(), from: env.MAIL_FROM ?? null },
     draft: {
-      to: [] as string[],
-      cc: [] as string[],
+      // The recipients Admin set in Mail contacts for project code requests.
+      to: routing.to,
+      cc: routing.cc,
       /** The details the mail template prints on its own (client, project, contacts); the editor text only goes out when it was changed. */
       facts,
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
@@ -399,6 +405,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       ...tag(soDocuments(o.toObject()), 'so'),
       ...tag(newClientCertificates(o.clientType, client), 'gst'),
     ]);
+    const routing = await routingOf('PROJECT_CODE');
     const sent = await deliver({
       order: o._id,
       client: o.client,
@@ -411,6 +418,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       rateCardRevision: included?.revision ?? undefined,
       requestKey: input.requestKey,
       signage: {
+        ...(routing.replyTo ? { replyTo: routing.replyTo } : {}),
         source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team',
         client: { clientName: client?.name ?? '', clientCode },
         docTypes,
@@ -515,9 +523,9 @@ export async function skipRateCard(id: string, actor: Actor) {
 }
 
 /** Codes are unique across operations projects and other orders. */
-async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, estimationCode: string) {
+async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, estimationCode?: string) {
   if (await Project.exists({ code: projectCode })) throw invalid('projectCode', `Project code ${projectCode} already exists`);
-  const other = await SalesOrder.findOne({ _id: { $ne: orderId }, deletedAt: null, $or: [{ 'recce.projectCode': projectCode }, { 'recce.estimationCode': estimationCode }] })
+  const other = await SalesOrder.findOne({ _id: { $ne: orderId }, deletedAt: null, $or: [{ 'recce.projectCode': projectCode }, ...(estimationCode ? [{ 'recce.estimationCode': estimationCode }] : [])] })
     .select('orderNo recce.projectCode')
     .lean();
   if (other?.recce?.projectCode === projectCode) throw invalid('projectCode', `Project code ${projectCode} is already used by order ${other.orderNo}`);
@@ -549,7 +557,8 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
   assertBranchOpen(o, actor);
   await claimRecce(o, actor);
   if (!(await emailDone(o._id))) throw invalid('projectCode', 'Send the project code request email first');
-  await assertCodesFree(o._id, input.projectCode, input.estimationCode);
+  const estimation = input.estimationCode || undefined;
+  await assertCodesFree(o._id, input.projectCode, estimation);
   // Client ID in Zoho: an Existing client's comes from Zoho; a New client's is typed (created in Zoho after the email).
   const c = await clientOf(o);
   const fromZoho = o.clientType === 'EXISTING' ? await zohoClientIdOf(c) : null;
@@ -559,17 +568,17 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
     const other = await Client.findOne({ _id: { $ne: o.client }, deletedAt: null, $or: [{ code: clientId }, { zohoCustomerNo: clientId }] }).select('name').lean();
     if (other) throw invalid('clientId', `Client code ${clientId} already belongs to ${other.name}`);
   }
-  const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
+  const { estimationCode: _oldEstimation, ...previous } = (o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {}) as Record<string, unknown>;
   try {
     const r = await SalesOrder.updateOne(
       branchFilter(o, actor),
       {
-        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
+        $set: { recce: { ...previous, projectCode: input.projectCode, ...(estimation ? { estimationCode: estimation } : {}), clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
         $push: {
-          leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode} / ${input.estimationCode}${clientId ? ` · Client ID ${clientId}` : ''}`, {
+          leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode}${estimation ? ` / ${estimation}` : ''}${clientId ? ` · Client ID ${clientId}` : ''}`, {
             step: 'codes',
             oldValue: o.recce?.projectCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode ?? null, clientId: o.recce.clientId ?? null } : null,
-            newValue: { projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null },
+            newValue: { projectCode: input.projectCode, estimationCode: estimation ?? null, clientId: clientId ?? null },
           }),
         },
       },
@@ -604,8 +613,8 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
   await claimRecce(o, actor);
-  const codes = o.recce?.projectCode && o.recce.estimationCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode } : null;
-  if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
+  const codes = o.recce?.projectCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode || undefined } : null;
+  if (!codes) throw invalid('projectCode', 'Enter the project code first');
   if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
   const client = await clientOf(o);
   const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
@@ -640,7 +649,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
     status: 'NEW',
     requirement: {
       source: 'OTHER',
-      sourceNote: `Lead Management: ${o.orderNo} (estimation ${codes.estimationCode})`,
+      sourceNote: `Lead Management: ${o.orderNo}${codes.estimationCode ? ` (estimation ${codes.estimationCode})` : ''}`,
       description: notes || undefined,
       recceRequired: true,
       siteDataScenario: type === 'SHOP_MEASUREMENT' ? 'CLIENT_PROVIDED' : 'MEASUREMENT_REQUIRED',
@@ -655,7 +664,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   const project = await createProject(parsed.data, actor, { clientDetails: o.client ? null : latestDetails(o) });
   const projectId = project._id as Types.ObjectId;
   try {
-    await Project.updateOne({ _id: projectId }, { $set: { estimationCode: codes.estimationCode, salesOrder: o._id } });
+    await Project.updateOne({ _id: projectId }, { $set: { ...(codes.estimationCode ? { estimationCode: codes.estimationCode } : {}), salesOrder: o._id } });
     await assignProject(String(projectId), { assigneeId: input.assigneeId }, actor);
   } catch (e) {
     await dropProject(projectId);

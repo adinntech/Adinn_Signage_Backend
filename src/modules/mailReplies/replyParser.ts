@@ -33,9 +33,11 @@ export function freshText(text: string): string {
 }
 
 /** Estimate numbers (EST-20234, EST-020456): many can come with one project code. */
-const EST_RE = /(?<![A-Z0-9])EST-?\d{3,10}(?!\d)/gi;
+const EST_RE = /(?<![A-Z0-9])EST(?:\s*[-–—]\s*)?\d{3,10}(?!\d)/gi;
 // Request IDs and estimate numbers are removed first, so their digits are never mistaken for a project code.
-const norm = (s: string) => s.replace(ID_RE, ' ').replace(EST_RE, ' ').replace(/[ \t]+/g, ' ');
+/** Bold / italic marks a mail app adds to plain text (*12543 - SRN MEDIA*, _text_, ~text~, `text`) are not part of what was written. */
+export const plain = (s: string) => s.replace(/[*~`]+/g, '').replace(/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g, '');
+const norm = (s: string) => plain(s).replace(ID_RE, ' ').replace(EST_RE, ' ').replace(/[ \t]+/g, ' ');
 const uniq = <T,>(a: T[]) => [...new Set(a)];
 /** Every estimate number in the reply, once each, in the order written, as EST-<digits>. */
 export const findEstimates = (text: string): string[] => uniq([...text.matchAll(EST_RE)].map((m) => `EST-${m[0].replace(/\D/g, '')}`));
@@ -61,13 +63,28 @@ export function findClientCode(text: string): Found {
   return one(all);
 }
 
-/** Vendor ID from Accounts: 2 to 8 digits after "vendor id / no / number / code", or a first line that is only the number. */
+/**
+ * Vendor ID from Accounts (2 to 8 digits). In order of trust:
+ * 1. after "vendor id / no / number / code";
+ * 2. a number followed by a dash and a name: "Zoho Book - 12589 - SRN MEDIA", "12589 - SRN MEDIA";
+ * 3. a line that is only the number;
+ * 4. the only 4 to 8 digit number in the whole reply (phone numbers, dates and years are not counted).
+ * Two different numbers at the same level is ambiguous: nothing is picked and a person decides.
+ */
 export function findVendorNo(text: string): Found {
   const t = norm(text);
   const labelled = [...t.matchAll(/vendor\s*(?:id|no\.?|number|code)\s*(?:is|:|-|=|#)?\s*(\d{2,8})(?!\d)/gi)].map((m) => m[1]!);
   if (labelled.length) return one(labelled);
-  const first = t.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  return /^\d{2,8}$/.test(first) ? { code: first, ambiguous: [] } : { code: null, ambiguous: [] };
+  const named = [...t.matchAll(/(?<![\d.])(\d{3,8})(?![\d.])\s*[-–—:]\s*(?=[A-Za-z])/g)].map((m) => m[1]!);
+  if (named.length) return one(named);
+  const only = t.split('\n').map((l) => l.trim()).filter((l) => /^\d{2,8}$/.test(l));
+  if (only.length) return one(only);
+  const loose = t
+    .replace(/\+?\d[\d\s-]{8,}\d/g, ' ') // phone numbers
+    .replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g, ' ') // dates
+    .replace(/\b(19|20)\d{2}\b/g, ' '); // years
+  const nums = [...loose.matchAll(/(?<![\d.])(\d{4,8})(?![\d.])/g)].map((m) => m[1]!);
+  return nums.length ? one(nums) : { code: null, ambiguous: [] };
 }
 
 const domainOf = (a: string) => a.split('@')[1]?.toLowerCase() ?? '';
@@ -83,18 +100,31 @@ export function senderAllowed(from: string[], recipients: string[]) {
 }
 
 /** A short single-line preview for the screen. */
-export const snippetOf = (text: string, max = 300) => text.replace(/\s+/g, ' ').trim().slice(0, max);
+export const snippetOf = (text: string, max = 300) => plain(text).replace(/\s+/g, ' ').trim().slice(0, max);
 
 export type Decision = 'APPROVED' | 'NOT_APPROVED';
+// Strong words decide on their own. Weak words ("proceed", "go ahead", "fine") only count when no strong word is present, so
+// "Not approved, proceed with the company rate" is still a no.
+const NO_STRONG = /\b(not\s+approved|not\s+approve|disapproved?|un-?approved|reject(?:ed|s)?|declined?|denied|deny|refused?|not\s+allowed|not\s+ok(?:ay)?|not\s+agreed|cancel(?:led)?|do\s+not\s+approve|don'?t\s+approve|no\s+approval|not\s+accepted|(?:did\s+not|didn'?t|does\s+not|doesn'?t|will\s+not|won'?t|cannot|can'?t|never|not)\s+(?:\w+\s+)?(?:approve|accept|agree|allow|sanction|grant))\b/;
+const NO_WEAK = /\b(do\s+not\s+proceed|don'?t\s+proceed|hold\s+on|on\s+hold|not\s+now|no\s+need)\b/;
+const YES_STRONG = /\b(approved|approve|accepted|accept|agreed|confirmed|ok|okay|sanctioned|granted)\b/;
+const YES_WEAK = /\b(proceed|go\s+ahead|fine|sure|done|yes|alright|good\s+to\s+go|allowed)\b/;
 /**
- * The answer to an amount approval request. "Not approved", "rejected", "declined" or "denied" win over "approved" (a reply
- * such as "not approved" contains the word approved). Both kinds of word, or neither, is left for a person (null).
+ * The answer to an amount approval request ("Approved", "OK, proceed", "approved after some time", "Rejected", "Not approved"...).
+ * "Not approved" contains the word approved, so negatives are cut out first. A strong yes and a strong no together, or no
+ * decision word at all, is left for a person (null).
  */
 export function findDecision(text: string): Decision | null {
-  const t = text.toLowerCase();
-  const no = /\b(not\s+approved|disapproved|un-?approved|rejected|declined|denied|not\s+allowed|do\s+not\s+approve|don'?t\s+approve|no\s+approval)\b/.test(t);
-  const yes = /\b(approved|approve|ok\s+to\s+proceed|go\s+ahead)\b/.test(t.replace(/\b(not\s+approved|disapproved|un-?approved|do\s+not\s+approve|don'?t\s+approve)\b/g, ' '));
-  if (no && !yes) return 'NOT_APPROVED';
-  if (yes && !no) return 'APPROVED';
+  // A question ("Are you sure? Do you want to approve?") is not an answer, so sentences ending in ? are left out.
+  const t = text.toLowerCase().replace(/[^.\n]*\?/g, ' ').replace(/\s+/g, ' ');
+  const noS = NO_STRONG.test(t);
+  const yesS = YES_STRONG.test(t.replace(new RegExp(NO_STRONG.source, 'g'), ' '));
+  if (noS && yesS) return null;
+  if (noS) return 'NOT_APPROVED';
+  if (yesS) return NO_WEAK.test(t) ? null : 'APPROVED';
+  const noW = NO_WEAK.test(t);
+  const yesW = YES_WEAK.test(t.replace(new RegExp(NO_WEAK.source, 'g'), ' '));
+  if (noW && !yesW) return 'NOT_APPROVED';
+  if (yesW && !noW) return 'APPROVED';
   return null;
 }

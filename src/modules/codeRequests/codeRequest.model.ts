@@ -47,6 +47,12 @@ const codeRequestSchema = new Schema(
     sentAt: Date,
     sentBy: { type: Schema.Types.ObjectId, ref: 'User' },
     confirmedCode: String,
+    /** Estimate numbers confirmed with a project code. */
+    estimates: [String],
+    /** What the person changed from what was read out of the reply (or typed first): who, when, field, from, to. */
+    editHistory: [{ _id: false, at: Date, by: { type: Schema.Types.ObjectId, ref: 'User' }, byName: String, field: String, from: String, to: String }],
+    /** Every reply read for this request, newest last; the latest overwrites `reply`. */
+    replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String] }],
     confirmedAt: Date,
     confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     /** Where the code came from (reply mail, reference number...). */
