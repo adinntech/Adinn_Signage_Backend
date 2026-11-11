@@ -21,13 +21,17 @@ async function vendorOf(actor: Actor) {
   return u.vendorId;
 }
 
-const mine = (vendor: Types.ObjectId) => ({ channel: 'VENDOR', vendor, deletedAt: null });
+/** The vendor's shops that this login may see: shops given to this login, and shops not yet given to any login of the vendor. */
+const mine = (vendor: Types.ObjectId, actor: Actor) => ({
+  channel: 'VENDOR', vendor, deletedAt: null,
+  $or: [{ assignedTo: new Types.ObjectId(actor.id) }, { assignedTo: null }],
+});
 
 /** Projects in which this vendor was given shops, with how many. Costs, other vendors and BD documents are never included. */
 export async function listJobs(actor: Actor) {
   const vendor = await vendorOf(actor);
   const groups = await Site.aggregate<{ _id: Types.ObjectId; shops: number; districts: string[] }>([
-    { $match: mine(vendor) },
+    { $match: mine(vendor, actor) },
     { $group: { _id: '$project', shops: { $sum: 1 }, districts: { $addToSet: '$district' } } },
   ]);
   const projects = await Project.find({ _id: { $in: groups.map((g) => g._id) }, deletedAt: null, status: { $nin: ['CANCELLED', 'LOSS'] } })
@@ -51,15 +55,15 @@ export async function listJobs(actor: Actor) {
   }));
 }
 
-const SHOP_FIELDS = 'seq siteCode shopName dealerName location district address1 address2 address3 pincode mobile contactPerson width height unit quantity boardType remarks lat lng status';
+const SHOP_FIELDS = 'seq siteCode shopName dealerName location district address1 address2 address3 pincode mobile contactPerson width height unit quantity boardType remarks lat lng status assignedTo assignedToAt assignedToBy';
 
 /** Only this vendor's shops of one project. A project where they hold no shops is reported as not found. */
 export async function listJobShops(actor: Actor, projectId: string, q: z.infer<typeof shopsQuery>) {
   const vendor = await vendorOf(actor);
-  const filter: Record<string, unknown> = { ...mine(vendor), project: new Types.ObjectId(projectId) };
-  if (q.q) { const re = new RegExp(escapeRegex(q.q), 'i'); filter.$or = [{ shopName: re }, { dealerName: re }, { siteCode: re }, { location: re }, { district: re }, { mobile: re }]; }
+  const filter: Record<string, unknown> = { ...mine(vendor, actor), project: new Types.ObjectId(projectId) };
+  if (q.q) { const re = new RegExp(escapeRegex(q.q), 'i'); filter.$and = [{ $or: [{ shopName: re }, { dealerName: re }, { siteCode: re }, { location: re }, { district: re }, { mobile: re }] }]; }
   const [items, total] = await Promise.all([
-    Site.find(filter).select(SHOP_FIELDS).sort({ seq: 1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
+    Site.find(filter).select(SHOP_FIELDS).sort({ seq: 1 }).skip((q.page - 1) * q.limit).limit(q.limit).populate('assignedToBy', 'name').lean(),
     Site.countDocuments(filter),
   ]);
   if (!total && !q.q) throw AppError.notFound('Project not found');

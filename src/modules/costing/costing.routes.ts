@@ -36,4 +36,6 @@ costRouter.post(`${P}/legs/:key/route`, ...write, asyncHandler(async (req, res) 
 costRouter.post(`${P}/submit`, ...write, asyncHandler(async (req, res) => ok(res, await svc.submitPlan(pid(req), svc.submitBody.parse(req.body ?? {}), actorOf(req)))));
 costRouter.post(`${P}/decide`, authenticate, requirePermission('finance:manage'), scopeProj, asyncHandler(async (req, res) => ok(res, await svc.decideApproval(pid(req), svc.decideBody.parse(req.body), actorOf(req)))));
 costRouter.post(`${P}/assign`, ...write, asyncHandler(async (req, res) => ok(res, await svc.assignPlan(pid(req), actorOf(req)))));
+costRouter.get(`${P}/logins`, ...read, asyncHandler(async (req, res) => ok(res, await svc.legLogins(pid(req)))));
+costRouter.post(`${P}/assign-logins`, ...write, asyncHandler(async (req, res) => ok(res, await svc.assignLogins(pid(req), svc.loginsBody.parse(req.body), actorOf(req)))));
 costRouter.post(`${P}/client-decision`, ...write, asyncHandler(async (req, res) => ok(res, await svc.clientDecision(pid(req), svc.clientBody.parse(req.body), actorOf(req)))));

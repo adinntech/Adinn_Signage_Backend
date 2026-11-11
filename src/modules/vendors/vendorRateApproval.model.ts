@@ -18,6 +18,8 @@ const vendorRateApprovalSchema = new Schema(
     vendor: { type: Schema.Types.ObjectId, ref: 'Vendor' },
     vendorName: String,
     vendorNo: String,
+    /** Who the vendor is (from Zoho or the registered vendor) at the time of the request: shown in the list and sent in the mail. */
+    info: new Schema({ email: String, mobile: String, gstin: String, pan: String, city: String, address: String, createdByName: String, contactCode: String }, { _id: false }),
     /** What was typed. */
     requested: { type: rates, required: true },
     /** The company rate at that moment: the most the approver is asked to allow without a yes. */

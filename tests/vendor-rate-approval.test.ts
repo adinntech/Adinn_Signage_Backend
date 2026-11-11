@@ -84,6 +84,8 @@ describe('vendor cost above the company rate (Admin > Cost Rates: 300 near, 350 
     const row = await VendorRateApproval.findOne({ requestId: res.body.data.pending.requestId }).lean();
     expect(row).toMatchObject({ status: 'PENDING', to: ['approver@t.com'], cc: ['boss@t.com'] });
     expect(row!.sentAt).toBeTruthy();
+    // the request keeps who the vendor is (it is shown in the list and sent in the mail)
+    expect(row).toMatchObject({ vendorName: 'Approval Signs', vendorNo: '13100', info: { mobile: '9876500077' } });
     // the list shows the cost is waiting
     expect((await api().get('/api/v1/vendors/zoho-directory?price=set').set(as('OPS'))).body.data[0].price.pending).toMatchObject({ ratePerShop: 500 });
   });

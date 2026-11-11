@@ -1,7 +1,8 @@
 import { Schema, model } from 'mongoose';
 import { SCENARIOS, UNITS } from './site.fields';
 
-export const SITE_STATUSES = ['PENDING'] as const; // recce lifecycle statuses are added in later phases
+/** PENDING until the shop is given to a recce mobile login; IN_PROGRESS from then on. Later recce statuses are added in later phases. */
+export const SITE_STATUSES = ['PENDING', 'IN_PROGRESS'] as const;
 export const APPROVAL_STATES = ['PENDING', 'APPROVED', 'CORRECTION'] as const;
 export type ApprovalState = (typeof APPROVAL_STATES)[number];
 
@@ -49,6 +50,10 @@ const siteSchema = new Schema(
     vendor: { type: Schema.Types.ObjectId, ref: 'Vendor' },
     allocatedAt: Date,
     allocatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    /** The recce mobile login (in-house executive or a vendor's login) that does this shop, with when and by whom (Operations). */
+    assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    assignedToAt: Date,
+    assignedToBy: { type: Schema.Types.ObjectId, ref: 'User' },
     opsApprovalAt: Date,
     opsApprovalBy: { type: Schema.Types.ObjectId, ref: 'User' },
     bdApprovalAt: Date,

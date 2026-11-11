@@ -23,13 +23,16 @@ export interface NotifySpec {
   /** What the notification is about: a project, or (BD CRM) a sales order. */
   project?: { _id: Types.ObjectId | string; code: string; clientName?: string | undefined };
   order?: { _id: Types.ObjectId | string; orderNo: string; clientName?: string | undefined };
+  /** A web path to open instead of the project / order (e.g. a vendor): the bell, the pop-up, push and mail all follow it. */
+  path?: string | undefined;
   actorId?: string | undefined;
   /** Stable key per recipient for this event; the same key never creates a second notification. */
   dedupe: (recipientId: string) => string;
 }
 
 /** Where a notification opens: the sales order for order events, otherwise the project in the person's own area. */
-const linkOf = (role: string, n: { project?: unknown; salesOrder?: unknown; kind?: string }) =>
+const linkOf = (role: string, n: { project?: unknown; salesOrder?: unknown; kind?: string; path?: string | null }) =>
+  n.path ? `${env.webBaseUrl}${n.path}` :
   n.salesOrder ? `${env.webBaseUrl}/orders/${String(n.salesOrder)}?tab=handover` : linkFor(role, String(n.project), n.kind);
 
 const linkFor = (role: string, projectId: string, kind?: string) =>
@@ -63,6 +66,7 @@ export async function notify(spec: NotifySpec): Promise<void> {
           project: spec.project?._id,
           projectCode: spec.project?.code,
           salesOrder: spec.order?._id,
+          path: spec.path,
           orderNo: spec.order?.orderNo,
           clientName: spec.project?.clientName ?? spec.order?.clientName,
           dedupeKey: spec.dedupe(String(u._id)),
@@ -218,6 +222,7 @@ type NotificationRow = {
   projectCode?: string | null | undefined;
   salesOrder?: unknown;
   orderNo?: string | null | undefined;
+  path?: string | null | undefined;
   clientName?: string | null | undefined;
   readAt?: Date | null | undefined;
 };
@@ -233,6 +238,7 @@ export function toItem(n: NotificationRow) {
     projectId: n.project ? String(n.project) : '',
     projectCode: n.projectCode ?? n.orderNo ?? '',
     orderId: n.salesOrder ? String(n.salesOrder) : null,
+    path: n.path ?? null,
     client: n.clientName ?? '',
     read: !!n.readAt,
   };

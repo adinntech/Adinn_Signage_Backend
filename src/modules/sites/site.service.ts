@@ -55,11 +55,13 @@ export async function syncSiteCount(projectId: string) {
   return n;
 }
 
-export async function listSites(projectId: string, q: z.infer<typeof siteListQuery>) {
-  await requireProject(projectId);
-  const filter = buildFilter(projectId, q);
+export async function listSites(projectId: string, q: z.infer<typeof siteListQuery>, actor?: { id: string; role: string }) {
+  const project = await requireProject(projectId);
+  const filter: Record<string, unknown> = { ...buildFilter(projectId, q) };
+  // A recce executive sees only the shop-list shops Operations gave to this login (an ASO survey stays shared by its holder).
+  if (actor?.role === 'RECCE_EXECUTIVE' && project.requirementType !== 'ASO') filter.assignedTo = new Types.ObjectId(actor.id);
   const [items, total] = await Promise.all([
-    Site.find(filter).sort(parseSort(q.sort, SORTABLE, 'seq')).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
+    Site.find(filter).sort(parseSort(q.sort, SORTABLE, 'seq')).skip((q.page - 1) * q.limit).limit(q.limit).populate('assignedToBy', 'name').lean(),
     Site.countDocuments(filter),
   ]);
   return { items, meta: pageMeta(q.page, q.limit, total) };

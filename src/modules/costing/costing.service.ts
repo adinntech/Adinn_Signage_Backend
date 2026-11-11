@@ -94,6 +94,9 @@ async function requireProject(projectId: string) {
 const originOf = (p: { originLat?: number | null; originLng?: number | null }): LatLng | null => (hasCoords({ lat: p.originLat, lng: p.originLng }) ? { lat: p.originLat as number, lng: p.originLng as number } : null);
 const isoDay = (d?: Date | null) => (d ? d.toISOString().slice(0, 10) : undefined);
 const districtRe = (name: string) => new RegExp(`^\\s*${escapeRegex(name.trim())}\\s*$`, 'i');
+/** The shops of one plan area: its cluster key, else its district. */
+const legShopFilter = (projectId: string, leg: { key: string; district?: string | null; clustered?: boolean | null }) =>
+  ({ project: projectId, deletedAt: null, ...(leg.clustered ? { planArea: leg.key } : { district: districtRe(leg.district ?? '') }) });
 
 type LegDoc = {
   key: string; name: string; district?: string | null; shops: number; distanceKm?: number | null; routeKm?: number | null; deadline?: string | null;
@@ -334,10 +337,11 @@ export async function assignPlan(projectId: string, actor: Actor) {
     }
     const now = new Date();
     const r = await Site.updateMany(
-      { project: projectId, deletedAt: null, ...(leg.clustered ? { planArea: leg.key } : { district: districtRe(leg.district) }) },
+      legShopFilter(projectId, leg),
+      // A fresh allocation clears any earlier login assignment: Operations picks the login again afterwards.
       leg.channel === 'VENDOR'
-        ? { $set: { channel: 'VENDOR', vendor: leg.vendor, allocatedAt: now, allocatedBy: actor.id } }
-        : { $set: { channel: 'IN_HOUSE', allocatedAt: now, allocatedBy: actor.id }, $unset: { vendor: 1 } },
+        ? { $set: { channel: 'VENDOR', vendor: leg.vendor, allocatedAt: now, allocatedBy: actor.id, status: 'PENDING' }, $unset: { assignedTo: 1, assignedToAt: 1, assignedToBy: 1 } }
+        : { $set: { channel: 'IN_HOUSE', allocatedAt: now, allocatedBy: actor.id, status: 'PENDING' }, $unset: { vendor: 1, assignedTo: 1, assignedToAt: 1, assignedToBy: 1 } },
     );
     assigned += r.modifiedCount;
     if (r.modifiedCount > 0) await notifyNewShops(projectId, leg.channel === 'VENDOR' ? { kind: 'VENDOR', vendorId: String(leg.vendor) } : { kind: 'IN_HOUSE' }, r.modifiedCount, actor);
@@ -368,6 +372,69 @@ export async function assignPlan(projectId: string, actor: Actor) {
     if (v) vendorsWithoutLogin.push({ id, name: v.name, email: v.email ?? null, mobile: v.mobile ?? null });
   }
   return { ...(await getPlan(projectId)), assigned, skipped, stage, vendorsWithoutLogin };
+}
+
+export const loginsBody = z.object({ legs: z.array(z.object({ key: z.string().trim().min(1).max(80), userId: objectId })).min(1).max(100) });
+
+/** Active recce mobile logins that may take a plan area: the vendor's own logins, or the in-house recce executives. */
+async function loginsFor(leg: { channel?: string | null; vendor?: unknown }) {
+  const filter: Record<string, unknown> = leg.channel === 'VENDOR' ? { role: 'VENDOR', vendorId: leg.vendor } : { role: 'RECCE_EXECUTIVE' };
+  const users = await User.find({ ...filter, isActive: true, deletedAt: null }).select('name phone employeeId').sort({ name: 1 }).lean();
+  return users.map((u) => ({ id: String(u._id), name: u.name, phone: u.phone ?? null, employeeId: u.employeeId ?? null }));
+}
+
+/** Step after "Confirm & assign": for every area, the logins to choose from and who already holds its shops (with when and by whom). */
+export async function legLogins(projectId: string) {
+  await requireProject(projectId);
+  const plan = await CostPlan.findOne({ project: projectId });
+  if (!plan || plan.status !== 'ASSIGNED') throw AppError.conflict('Assign the shops to the in-house team or vendors first');
+  const out = [];
+  for (const leg of plan.legs) {
+    if (!leg.channel || !leg.district) continue;
+    const filter = legShopFilter(projectId, leg);
+    const [logins, holders] = await Promise.all([
+      loginsFor(leg),
+      Site.aggregate<{ _id: Types.ObjectId | null; shops: number; at: Date | null; by: Types.ObjectId | null }>([
+        { $match: { ...filter, project: new Types.ObjectId(projectId) } },
+        { $group: { _id: '$assignedTo', shops: { $sum: 1 }, at: { $max: '$assignedToAt' }, by: { $last: '$assignedToBy' } } },
+      ]),
+    ]);
+    const byIds = holders.map((h) => h.by).filter((x): x is Types.ObjectId => !!x);
+    const names = new Map((byIds.length ? await User.find({ _id: { $in: byIds } }).select('name').lean() : []).map((u) => [String(u._id), u.name]));
+    out.push({
+      key: leg.key, name: leg.name, channel: leg.channel, vendorName: leg.vendorName ?? null, shops: holders.reduce((n, h) => n + h.shops, 0), logins,
+      holders: holders.filter((h) => h._id).map((h) => ({ userId: String(h._id), shops: h.shops, assignedAt: h.at, assignedBy: h.by ? (names.get(String(h.by)) ?? null) : null })),
+      unassigned: holders.find((h) => !h._id)?.shops ?? 0,
+    });
+  }
+  return out;
+}
+
+/** Gives each area's shops to the chosen recce mobile login: status IN_PROGRESS, with the date and time and who assigned. */
+export async function assignLogins(projectId: string, body: z.infer<typeof loginsBody>, actor: Actor) {
+  const project = await requireProject(projectId);
+  await assertNotCancelled(projectId);
+  const legs = await legLogins(projectId);
+  const plan = await CostPlan.findOne({ project: projectId });
+  let given = 0;
+  for (const pick of body.legs) {
+    const view = legs.find((l) => l.key === pick.key);
+    const leg = plan?.legs.find((l) => l.key === pick.key);
+    if (!view || !leg) throw AppError.conflict('That area is not part of the plan');
+    if (!view.logins.some((u) => u.id === pick.userId)) throw AppError.conflict(`That login cannot take ${view.name}. Pick one of the ${view.channel === 'VENDOR' ? 'vendor' : 'in-house'} logins.`);
+    const now = new Date();
+    const r = await Site.updateMany({ ...legShopFilter(projectId, leg), channel: leg.channel }, { $set: { assignedTo: pick.userId, assignedToAt: now, assignedToBy: actor.id, status: 'IN_PROGRESS' } });
+    given += r.modifiedCount;
+    if (r.modifiedCount > 0) {
+      await notify({
+        kind: 'SHOPS_ADDED', recipients: [new Types.ObjectId(pick.userId)] as never[], actorId: actor.id,
+        title: `New shops assigned: ${project.code}`, body: `${r.modifiedCount} shop${r.modifiedCount === 1 ? '' : 's'} in ${view.name} are assigned to you. Open the project in the app to start the recce.`,
+        project: { _id: project._id, code: project.code }, dedupe: (rcp) => `shops-login:${projectId}:${pick.key}:${rcp}:${now.getTime()}`,
+      });
+    }
+  }
+  await recordAudit({ actor, action: 'COST_ASSIGN_LOGIN', entity: 'CostPlan', entityId: plan!._id, project: projectId, reason: `${given} shop(s) given to recce logins` });
+  return { given, legs: await legLogins(projectId) };
 }
 
 /** The client's answer to the cost. A rejected cost closes the project as LOSS, with the reason. */
@@ -685,8 +752,8 @@ export const editShopsBody = z.object({
 /** Every shop of the project with the planned area it sits in (none = not in any area), for the add / remove picker. */
 export async function planShops(projectId: string) {
   await requireProject(projectId);
-  const rows = await Site.find({ project: projectId, deletedAt: null }).sort({ seq: 1 }).limit(2000).select('shopName dealerName location district planArea lat lng').lean();
-  return rows.map((s) => ({ id: String(s._id), name: s.shopName || s.dealerName || '-', location: s.location ?? '', district: s.district ?? '', planArea: s.planArea ?? null, lat: s.lat ?? null, lng: s.lng ?? null }));
+  const rows = await Site.find({ project: projectId, deletedAt: null }).sort({ seq: 1 }).limit(2000).select('shopName dealerName location district planArea lat lng pincode address1 address2 address3').lean();
+  return rows.map((s) => ({ id: String(s._id), name: s.shopName || s.dealerName || '-', location: s.location ?? '', district: s.district ?? '', planArea: s.planArea ?? null, lat: s.lat ?? null, lng: s.lng ?? null, pincode: (s.pincode ?? '').replace(/\D/g, ''), address: [s.address3, s.address2, s.address1].filter(Boolean).join(' ') }));
 }
 
 /**

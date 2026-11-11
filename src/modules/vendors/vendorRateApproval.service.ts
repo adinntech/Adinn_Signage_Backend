@@ -28,11 +28,16 @@ export const cappedAtLimit = (typed: Rates, limit: { ratePerShop: number; farRat
   farRatePerShop: typed.farRatePerShop == null ? null : Math.min(typed.farRatePerShop, limit.farRatePerShop),
 });
 
+/** The vendor's known details (empty ones are left out). */
+export interface VendorInfo { email?: string | null | undefined; mobile?: string | null | undefined; gstin?: string | null | undefined; pan?: string | null | undefined; city?: string | null | undefined; address?: string | null | undefined; createdByName?: string | null | undefined; contactCode?: string | null | undefined }
+const compact = (i: VendorInfo = {}) => Object.fromEntries(Object.entries(i).filter(([, v]) => typeof v === 'string' && v.trim())) as Record<string, string>;
+
 interface RequestInput {
   zohoContactId: string;
   vendor?: { _id: Types.ObjectId; name?: string | null; zohoVendorNo?: string | null } | null;
   vendorName: string;
   vendorNo?: string | null;
+  info?: VendorInfo;
   requested: Rates;
   limit: { ratePerShop: number; farRatePerShop: number };
   current: Rates;
@@ -58,6 +63,7 @@ export async function requestRateApproval(input: RequestInput, actor: Actor) {
     ...(input.vendor ? { vendor: input.vendor._id } : {}),
     vendorName: input.vendorName,
     ...(input.vendorNo ? { vendorNo: input.vendorNo } : {}),
+    info: compact(input.info),
     requested: input.requested,
     limit: { ratePerShop: input.limit.ratePerShop, farRatePerShop: input.limit.farRatePerShop },
     current: input.current,
@@ -78,7 +84,7 @@ export async function requestRateApproval(input: RequestInput, actor: Actor) {
       requestDate: now.toISOString(),
       source: 'Operations Team',
       ...(routing.replyTo ? { replyTo: routing.replyTo } : {}),
-      vendor: { vendorName: input.vendorName, vendorNo: input.vendorNo ?? '' },
+      vendor: { vendorName: input.vendorName, vendorNo: input.vendorNo ?? '', ...compact(input.info) },
       amounts: {
         requestedRate: rupees(input.requested.ratePerShop),
         requestedFar: rupees(input.requested.farRatePerShop),
@@ -119,5 +125,5 @@ export async function latestApprovals(contactIds: string[]) {
 /** The waiting request of each Zoho vendor (for the "waiting for approval" tag in Vendor master). */
 export async function pendingApprovals(contactIds: string[]) {
   const rows = await VendorRateApproval.find({ zohoContactId: { $in: contactIds }, status: 'PENDING' }).lean();
-  return new Map(rows.map((r) => [r.zohoContactId, { requestId: r.requestId, ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null, limitRate: r.limit.ratePerShop ?? null, limitFar: r.limit.farRatePerShop ?? null }]));
+  return new Map(rows.map((r) => [r.zohoContactId, { requestId: r.requestId, ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null, limitRate: r.limit.ratePerShop ?? null, limitFar: r.limit.farRatePerShop ?? null, requestedAt: r.createdAt ?? null }]));
 }

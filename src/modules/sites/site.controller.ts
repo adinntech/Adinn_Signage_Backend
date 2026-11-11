@@ -25,7 +25,7 @@ function checkContent(file: Express.Multer.File) {
 }
 
 export const list = asyncHandler(async (req, res) => {
-  const { items, meta } = await svc.listSites(p(req), v.siteListQuery.parse(req.query));
+  const { items, meta } = await svc.listSites(p(req), v.siteListQuery.parse(req.query), actorOf(req));
   ok(res, items, meta);
 });
 export const stats = asyncHandler(async (req, res) => ok(res, await svc.siteStats(p(req))));

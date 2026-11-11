@@ -4,6 +4,8 @@ import { confirmCode } from '../codeRequests/codeRequest.service';
 import { listEmails } from '../sales/salesMail.service';
 import { routingOf } from '../mailSettings/mailRouting.service';
 import { SalesOrder } from '../sales/sales.model';
+import { notify } from '../notifications/notification.service';
+import { User } from '../users/user.model';
 import { Vendor } from '../vendors/vendor.model';
 import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
 import { decideRateApproval } from '../vendors/vendorPrice.service';
@@ -103,8 +105,16 @@ async function salesProjectReply(requestId: string, msg: IncomingReply, fresh: s
   return 'saved';
 }
 
+/** A reply arrived: the login that sent the request is told, and every Super Admin gets the same in the app. One per mail (the key holds the message id). */
+async function notifyReply(requester: unknown, kind: 'ACTIVITY' | 'COST_APPROVAL', title: string, body: string, key: string, path?: string) {
+  const admins = await User.find({ role: 'SUPER_ADMIN', isActive: true, deletedAt: null }).select('_id').lean();
+  await notify({ recipients: [requester as string], kind, title, body, path, dedupe: (r) => `${key}:${r}` });
+  // An admin who is also the requester already got the message above: not told twice.
+  await notify({ recipients: admins.map((x) => x._id).filter((x) => String(x) !== String(requester ?? '')), kind: 'ADMIN_ACTIVITY', title, body, path, dedupe: (r) => `admin-${key}:${r}` });
+}
+
 async function vendorReply(requestId: string, msg: IncomingReply, fresh: string, from: string[], receivedAt: Date): Promise<ReplyOutcome> {
-  const v = await Vendor.findOne({ 'mails.requestId': requestId, deletedAt: null }).select('mails registration');
+  const v = await Vendor.findOne({ 'mails.requestId': requestId, deletedAt: null }).select('mails registration name code');
   if (!v) return 'unknown';
   const mail = v.mails.find((m) => m.requestId === requestId);
   const recipients = [...(mail?.to ?? []), ...(mail?.cc ?? []), ...(mail?.bcc ?? [])];
@@ -121,6 +131,8 @@ async function vendorReply(requestId: string, msg: IncomingReply, fresh: string,
     ...(isNewest ? { $set: { 'registration.reply': entry } } : {}),
     $push: { 'registration.replyHistory': { ...entry, at: new Date(), ...(note ? { note } : {}) } },
   });
+  // The login that sent the registration request is told a reply came (in the app, as push, never twice for one mail).
+  await notifyReply(mail?.sentBy, 'ACTIVITY', `Vendor registration reply: ${v.name} (${v.code})`, found.code ? `${entry.from} replied with Vendor ID ${found.code}. Open the vendor to check and save it.` : `${entry.from} replied. ${note ?? 'Open the vendor to read it.'}`, `vendor-reg-reply:${msg.messageId}`, `/vendors/registration?idFor=${v._id}`);
   return 'saved';
 }
 
@@ -131,7 +143,11 @@ async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: s
   if (!senderAllowed(from, [...(a.to ?? []), ...(a.cc ?? []), ...(a.bcc ?? [])])) return 'rejected';
   if (a.reply?.messageId === msg.messageId || a.history?.some((h) => h.messageId === msg.messageId)) return 'duplicate';
   const reply = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh) };
-  const log = (outcome: string) => VendorRateApproval.updateOne({ _id: a._id }, { $push: { history: { ...reply, at: new Date(), outcome } } });
+  const log = async (outcome: string) => {
+    await VendorRateApproval.updateOne({ _id: a._id }, { $push: { history: { ...reply, at: new Date(), outcome } } });
+    // The login that asked for the approval is told what the reply did.
+    await notifyReply(a.requestedBy, 'COST_APPROVAL', 'Vendor amount approval reply', `${reply.from}: ${outcome}`, `vendor-rate-reply:${msg.messageId}`);
+  };
   // Already answered: the first clear answer stands. A later mail is only logged, so nobody is surprised by a changed cost.
   // Already answered: a clear answer in a NEWER mail than the one that decided (a corrected reply: "sorry, not approved") changes it; the history keeps both.
   if (a.status !== 'PENDING') {

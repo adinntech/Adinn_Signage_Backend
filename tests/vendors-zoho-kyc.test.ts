@@ -170,13 +170,52 @@ describe('Zoho vendors (read live from Zoho; only vendors with a cost are stored
 
   it('sends the search to the Zoho field that fits it, and the status as a Zoho filter', async () => {
     stub();
+    let before = calls.length;
+    const asked = (key: string) => calls.slice(before).map((u) => u.searchParams.get(key)).filter(Boolean);
     await list('q=SRI&status=inactive&signageOnly=false');
-    expect(last().searchParams.get('contact_name_contains')).toBe('SRI');
-    expect(last().searchParams.get('filter_by')).toBe('Status.Inactive');
+    expect(asked('contact_name_contains')).toEqual(['SRI']);
+    expect(asked('company_name_contains')).toEqual(['SRI']);
+    expect(asked('filter_by')).toEqual(['Status.Inactive', 'Status.Inactive']);
+    before = calls.length;
     await list('q=a%40b.com&signageOnly=false');
-    expect(last().searchParams.get('email_contains')).toBe('a@b.com');
+    expect(asked('email_contains')).toEqual(['a@b.com']);
+    // digits are searched as the vendor number (inside the name) and as a phone number
+    before = calls.length;
     await list('q=98765%2043210&signageOnly=false');
-    expect(last().searchParams.get('phone_contains')).toBe('9876543210');
+    expect(asked('phone_contains')).toEqual(['9876543210']);
+    expect(asked('contact_name_contains')).toEqual(['9876543210']);
+    before = calls.length;
+    await list('q=11011&signageOnly=false');
+    expect(asked('contact_name_contains')).toEqual(['11011']);
+    expect(asked('phone_contains')).toEqual(['11011']);
+  });
+
+  it('a typed search shows only vendors that really match every word (Zoho matches parts of words)', async () => {
+    const { matchesTerm } = await import('../src/modules/zoho/zoho.vendors');
+    const mkm = { contact_id: '1', contact_name: 'M.K.M TRACTORS', mobile: '8122199895' };
+    const other = { contact_id: '2', contact_name: '11001 - Dawn Indian Company', mobile: '+91-9842366353', email: 'a@dawn.com' };
+    expect(matchesTerm(mkm, 'M.K.M TRACTORS')).toBe(true);
+    expect(matchesTerm(mkm, 'mkm tractors')).toBe(true);
+    expect(matchesTerm(other, 'M.K.M TRACTORS')).toBe(false);
+    expect(matchesTerm(other, '11001')).toBe(true);
+    expect(matchesTerm(other, '9842366353')).toBe(true);
+    expect(matchesTerm(other, 'A@DAWN.COM')).toBe(true);
+    expect(matchesTerm(other, 'dawn travels')).toBe(false);
+  });
+
+  it('"Vendors with cost" lists the cost added or changed last on top', async () => {
+    stub();
+    const { VendorPrice } = await import('../src/modules/vendors/vendorPrice.model');
+    await VendorPrice.deleteMany({});
+    const at = (d: string) => new Date(`${d}T10:00:00Z`);
+    await VendorPrice.collection.insertMany([
+      { zohoContactId: '900000000000001', name: 'AAA First Alphabet', ratePerShop: 300, createdAt: at('2026-01-01'), updatedAt: at('2026-01-02') },
+      { zohoContactId: '900000000000002', name: 'ZZZ Last Updated', ratePerShop: 310, createdAt: at('2026-01-01'), updatedAt: at('2026-03-05') },
+      { zohoContactId: '900000000000003', name: 'MMM Middle', ratePerShop: 320, createdAt: at('2026-01-01'), updatedAt: at('2026-02-01') },
+    ]);
+    const names = (await list('price=set')).body.data.map((r: { name: string }) => r.name);
+    await VendorPrice.deleteMany({});
+    expect(names).toEqual(['ZZZ Last Updated', 'MMM Middle', 'AAA First Alphabet']);
   });
 
   it('adding a cost stores only that vendor (name, city, GST... read from Zoho); the cost list and registration read it back', async () => {

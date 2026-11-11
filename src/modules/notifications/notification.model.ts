@@ -56,6 +56,8 @@ const notificationSchema = new Schema(
     /** Set instead of `project` for sales order events. */
     salesOrder: { type: Schema.Types.ObjectId, ref: 'SalesOrder' },
     orderNo: String,
+    /** A web path the notification opens instead of the project / order. */
+    path: String,
     clientName: String,
     /** Same event for the same person is stored once, so retries and double clicks never notify twice. */
     dedupeKey: { type: String, required: true, unique: true },

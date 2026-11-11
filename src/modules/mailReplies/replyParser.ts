@@ -105,8 +105,8 @@ export const snippetOf = (text: string, max = 300) => plain(text).replace(/\s+/g
 export type Decision = 'APPROVED' | 'NOT_APPROVED';
 // Strong words decide on their own. Weak words ("proceed", "go ahead", "fine") only count when no strong word is present, so
 // "Not approved, proceed with the company rate" is still a no.
-const NO_STRONG = /\b(not\s+approved|not\s+approve|disapproved?|un-?approved|reject(?:ed|s)?|declined?|denied|deny|refused?|not\s+allowed|not\s+ok(?:ay)?|not\s+agreed|cancel(?:led)?|do\s+not\s+approve|don'?t\s+approve|no\s+approval|not\s+accepted|(?:did\s+not|didn'?t|does\s+not|doesn'?t|will\s+not|won'?t|cannot|can'?t|never|not)\s+(?:\w+\s+)?(?:approve|accept|agree|allow|sanction|grant))\b/;
-const NO_WEAK = /\b(do\s+not\s+proceed|don'?t\s+proceed|hold\s+on|on\s+hold|not\s+now|no\s+need)\b/;
+const NO_STRONG = /\b(not\s+approved|not\s+approve|disapproved?|un-?approved|reject(?:ed|s)?|declined?|denied|deny|refused?|not\s+allowed|not\s+ok(?:ay)?|not\s+agreed|cancel(?:led)?|do\s+not\s+approve|don'?t\s+approve|no\s+approval|not\s+accepted|not\s+(?:possible|acceptable|given|permitted)|(?:did\s+not|didn'?t|does\s+not|doesn'?t|will\s+not|won'?t|cannot|can'?t|never|not|unable\s+to)\s+(?:\w+\s+)?(?:approv|accept|agree|allow|sanction|grant|permit|authori[sz])\w*)\b/;
+const NO_WEAK = /(?:\b(?:do\s+not\s+proceed|don'?t\s+proceed|hold\s+on|on\s+hold|not\s+now|no\s+need)\b|^\s*(?:no|nope|nah)\b)/;
 const YES_STRONG = /\b(approved|approve|accepted|accept|agreed|confirmed|ok|okay|sanctioned|granted)\b/;
 const YES_WEAK = /\b(proceed|go\s+ahead|fine|sure|done|yes|alright|good\s+to\s+go|allowed)\b/;
 /**

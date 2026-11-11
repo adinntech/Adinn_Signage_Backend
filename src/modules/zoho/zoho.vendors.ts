@@ -4,7 +4,7 @@ import { exportFormat, tabularFile, type ExportColumn } from '../../common/tabul
 import { escapeRegex, listQuery, pageMeta } from '../../common/query';
 import { Vendor } from '../vendors/vendor.model';
 import { VendorPrice } from '../vendors/vendorPrice.model';
-import { pricedZohoContactIds, pricesOfZohoVendors } from '../vendors/vendorPrice.service';
+import { pricedZohoContactIds, pricesOfZohoVendors, zohoSnapshot } from '../vendors/vendorPrice.service';
 import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
 import { zohoGet } from './zoho.client';
 import { toZohoVendorRow, type ZohoContact } from './zoho.mapper';
@@ -28,13 +28,27 @@ type ListQuery = z.infer<typeof zohoVendorListQuery>;
 
 type Row = ReturnType<typeof toZohoVendorRow> & { city?: string | null; address?: string | null; createdByName?: string | null };
 
-/** Zoho only searches one field at a time: an e-mail, a phone number, or the name (the vendor number is part of the name: "12543 - NAME"). */
-function searchParams(term?: string): Record<string, string> {
+/**
+ * Zoho only searches one field per call. The searches to run for what was typed: an e-mail, or the name (the vendor number is
+ * part of the name: "12543 - NAME"); digits are tried as the vendor number AND as a phone number, and the results are merged.
+ */
+function searchParams(term?: string): Record<string, string>[] {
   const t = term?.trim();
-  if (!t) return {};
-  if (t.includes('@')) return { email_contains: t };
-  if (/^\+?[\d\s-]{7,}$/.test(t)) return { phone_contains: t.replace(/\D/g, '') };
-  return { contact_name_contains: t };
+  if (!t) return [{}];
+  if (t.includes('@')) return [{ email_contains: t }];
+  const digits = t.replace(/\D/g, '');
+  if (/^\+?[\d\s-]+$/.test(t) && digits.length >= 4) return [{ contact_name_contains: digits }, { phone_contains: digits.length > 10 ? digits.slice(-10) : digits }];
+  return [{ contact_name_contains: t }, { company_name_contains: t }];
+}
+
+/** Letters and digits only, lower case: "M.K.M Tractors" and "mkm tractors" read the same. */
+const squash = (v?: string) => (v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** Every word typed must be found in the vendor's name (with its number), company, e-mail, phone, mobile, GST or PAN. */
+export function matchesTerm(c: ZohoContact, term: string): boolean {
+  const fields = [c.contact_name, c.company_name, c.email, c.phone, c.mobile, c.gst_no, c.pan_no].map(squash).filter(Boolean);
+  const words = term.split(/s+/).map(squash).filter(Boolean);
+  return words.length > 0 && words.every((w) => fields.some((f) => f.includes(w)));
 }
 
 /** Who already holds each Zoho vendor in the vendor master, and the price typed for it. */
@@ -46,8 +60,22 @@ async function decorate(rows: Row[]) {
   return rows.map((r) => ({ ...r, _id: r.zohoContactId, vendor: byZoho.get(r.zohoContactId) ?? null, price: prices.get(r.zohoContactId) ?? { ratePerShop: null, farRatePerShop: null, source: null } }));
 }
 
+/** A waiting request made before the vendor's details were kept has no name or ID: read them from Zoho once and keep them on the request. */
+async function fillBlankApprovals() {
+  const blank = await VendorRateApproval.find({ status: 'PENDING', $or: [{ vendorName: { $in: [null, '', 'Vendor'] } }, { vendorName: { $exists: false } }] }).limit(20);
+  for (const a of blank) {
+    try {
+      const s = await zohoSnapshot(a.zohoContactId, false);
+      if (!s) continue;
+      const info = Object.fromEntries(Object.entries({ email: s.email, mobile: s.mobile, gstin: s.gstin, pan: s.pan, city: s.city, address: s.address, createdByName: s.createdByName, contactCode: s.contactCode }).filter(([, v]) => v));
+      await VendorRateApproval.updateOne({ _id: a._id }, { $set: { vendorName: s.name, ...(s.vendorNo ? { vendorNo: s.vendorNo } : {}), info } });
+    } catch { /* Zoho unreachable: the row stays as it was and is tried again next time */ }
+  }
+}
+
 /** Vendors that have a cost (and registered Zoho vendors), from what is stored. */
 async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'price'>): Promise<Row[]> {
+  if (q.price === 'set') await fillBlankApprovals();
   const [snaps, vendors] = await Promise.all([VendorPrice.find().lean(), Vendor.find({ zohoContactId: { $exists: true, $ne: null }, deletedAt: null }).lean()]);
   const rows = new Map<string, Row>();
   for (const s of snaps) {
@@ -65,7 +93,8 @@ async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'pr
     for (const a of await VendorRateApproval.find({ status: 'PENDING' }).lean()) {
       if (rows.has(a.zohoContactId)) continue;
       const v = vendors.find((x) => x.zohoContactId === a.zohoContactId);
-      rows.set(a.zohoContactId, { zohoContactId: a.zohoContactId, vendorNo: a.vendorNo ?? v?.zohoVendorNo ?? undefined, name: a.vendorName ?? v?.name ?? 'Zoho vendor', email: v?.email ?? undefined, mobile: v?.mobile ?? undefined, gstin: v?.gstin ?? undefined, pan: v?.pan ?? undefined, contactCode: undefined, zohoStatus: 'active', zohoModifiedAt: undefined, zohoCreatedAt: undefined, city: v?.district ?? null, address: v?.address ?? null, createdByName: null });
+      const i = a.info;
+      rows.set(a.zohoContactId, { zohoContactId: a.zohoContactId, vendorNo: a.vendorNo ?? v?.zohoVendorNo ?? undefined, name: a.vendorName ?? v?.name ?? 'Zoho vendor', email: v?.email ?? i?.email ?? undefined, mobile: v?.mobile ?? i?.mobile ?? undefined, gstin: v?.gstin ?? i?.gstin ?? undefined, pan: v?.pan ?? i?.pan ?? undefined, contactCode: i?.contactCode ?? undefined, zohoStatus: 'active', zohoModifiedAt: undefined, zohoCreatedAt: undefined, city: v?.district ?? i?.city ?? null, address: v?.address ?? i?.address ?? null, createdByName: i?.createdByName ?? null });
     }
   }
   let list = [...rows.values()];
@@ -77,6 +106,18 @@ async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'pr
   if (q.registered) {
     const reg = new Set(vendors.map((v) => v.zohoContactId));
     list = list.filter((r) => reg.has(r.zohoContactId) === (q.registered === 'yes'));
+  }
+  // "Vendors with cost": the cost added or changed last is on top (same dates the list shows). Other lists stay A to Z.
+  if (q.price === 'set') {
+    const stamp = new Map<string, number>();
+    for (const s of snaps) if (s.ratePerShop != null && s.updatedAt) stamp.set(s.zohoContactId, new Date(s.updatedAt).getTime());
+    for (const v of vendors) if (v.ratePerShop != null && v.updatedAt) stamp.set(v.zohoContactId as string, new Date(v.updatedAt).getTime());
+    // A cost waiting for approval counts from the moment its request was sent.
+    for (const a of await VendorRateApproval.find({ status: 'PENDING' }).select('zohoContactId createdAt').lean()) {
+      const t = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      if (t > (stamp.get(a.zohoContactId) ?? 0)) stamp.set(a.zohoContactId, t);
+    }
+    return list.sort((a, b) => (stamp.get(b.zohoContactId) ?? 0) - (stamp.get(a.zohoContactId) ?? 0) || a.name.localeCompare(b.name));
   }
   return list.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -117,28 +158,38 @@ export async function listZohoVendors(q: ListQuery) {
     const items = all.slice((q.page - 1) * q.limit, q.page * q.limit);
     return { items: await decorate(items), meta: pageMeta(q.page, q.limit, all.length) };
   }
-  const signage = (q.signageOnly ?? env.ZOHO_SIGNAGE_CREDITORS_ONLY) === 'true';
+  // A typed search always looks through every vendor in Zoho (a vendor of another Contact Code, e.g. "Creditors - Admin", must be found too);
+  // the Signage-only switch narrows only the browsing list.
+  const signage = !q.q?.trim() && (q.signageOnly ?? env.ZOHO_SIGNAGE_CREDITORS_ONLY) === 'true';
   if (signage) {
     let all = await signageRows();
     if (q.status) all = all.filter((r) => r.zohoStatus === q.status);
-    const t = q.q?.trim();
-    if (t) {
-      const re = new RegExp(escapeRegex(t), 'i');
-      const digits = t.replace(/\D/g, '');
-      all = all.filter((r) => [r.name, r.vendorNo, r.email].some((x) => x && re.test(x)) || (digits.length >= 4 && (r.mobile ?? '').replace(/\D/g, '').includes(digits)));
-    }
     let items = await decorate(all.slice((q.page - 1) * q.limit, q.page * q.limit));
     if (q.price === 'missing') items = items.filter((i) => i.price.ratePerShop == null);
     if (q.registered === 'no') items = items.filter((i) => !i.vendor);
     return { items, meta: pageMeta(q.page, q.limit, all.length) };
   }
-  const r = await zohoGet<{ contacts?: (ZohoContact & { last_modified_time?: string; created_time?: string })[]; page_context?: { has_more_page?: boolean } }>('/contacts', {
+  type Page = { contacts?: (ZohoContact & { last_modified_time?: string; created_time?: string })[]; page_context?: { has_more_page?: boolean } };
+  const call = (extra: Record<string, string>, perPage: number, page: number) => zohoGet<Page>('/contacts', {
     contact_type: 'vendor',
-    per_page: q.limit,
-    page: q.page,
+    per_page: perPage,
+    page,
     ...(q.status ? { filter_by: q.status === 'active' ? 'Status.Active' : 'Status.Inactive' } : {}),
-    ...searchParams(q.q),
+    ...extra,
   });
+  const term = q.q?.trim();
+  if (term) {
+    // Zoho's "contains" is loose (it matches on parts of the words), so the first 200 answers of each search are checked here
+    // against the whole text typed, and only the real matches are shown and paged.
+    const pages = await Promise.all(searchParams(term).map((s) => call(s, 200, 1)));
+    const seen = new Set<string>();
+    const hits = pages.flatMap((p) => p.contacts ?? []).filter((c) => !seen.has(c.contact_id) && !!seen.add(c.contact_id) && matchesTerm(c, term));
+    let found = await decorate(hits.map(toZohoVendorRow));
+    if (q.price === 'missing') found = found.filter((i) => i.price.ratePerShop == null);
+    if (q.registered === 'no') found = found.filter((i) => !i.vendor);
+    return { items: found.slice((q.page - 1) * q.limit, q.page * q.limit), meta: pageMeta(q.page, q.limit, found.length) };
+  }
+  const r = await call({}, q.limit, q.page);
   const rows: Row[] = (r.contacts ?? []).map(toZohoVendorRow);
   let items = await decorate(rows);
   if (q.price === 'missing') items = items.filter((i) => i.price.ratePerShop == null);

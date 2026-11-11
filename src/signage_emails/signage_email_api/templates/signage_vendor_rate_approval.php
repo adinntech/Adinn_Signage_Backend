@@ -13,6 +13,11 @@ echo '<p style="font-size:13px;line-height:1.7;color:#243857;margin:0 0 12px">Hi
 echo card('Vendor',rowsHtml([
  ['building','Vendor',$v['vendorName']??''],
  ['key','Vendor ID',$v['vendorNo']??''],
+ ['phone','Mobile',$v['mobile']??''],
+ ['mail','Email',$v['email']??''],
+ ['pin','Address',$v['address']??($v['city']??'')],
+ ['pan','PAN',$v['pan']??''],
+ ['gst','GST',$v['gstin']??''],
  ['person','Entered by',$a['requestedBy']??''],
 ]),'#f6f0ff','#7c3aed','#e4d6fb');
 
