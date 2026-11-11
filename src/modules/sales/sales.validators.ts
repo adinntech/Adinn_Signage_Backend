@@ -136,24 +136,36 @@ export const shopUploadBody = z.object({
     }),
 });
 /**
- * ASO: the client's SO contacts. Completely blank rows are dropped; a contact that is kept needs a name and a mobile
- * number, the email is optional. One contact is primary (the first one when none is marked).
+ * POC contacts (stored as soContacts). Completely blank rows are dropped; a contact that is kept needs a name and a
+ * phone number, designation and email are optional. One contact is primary (the first one when none is marked).
+ * `ref`: the client contact it was picked from (none for a contact added here).
  */
 export const soContactsBody = z.object({
   contacts: z
-    .array(z.object({ name: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional() }))
-    .max(50, 'Up to 50 SO contacts')
-    .transform((list) => list.filter((c) => [c.name, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
+    .array(z.object({ name: z.string().optional(), designation: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional(), ref: z.string().optional() }))
+    .max(50, 'Up to 50 POC contacts')
+    .transform((list) => list.filter((c) => [c.name, c.designation, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
     .pipe(
       z
         .array(
           z.object({
-            name: z.string().trim().min(1, 'Enter the contact name').max(120),
+            name: z.string().trim().min(1, 'Enter the POC name').max(120),
+            designation: z.string().trim().max(120).optional().transform((v) => v || undefined),
             phone: mobileRule,
             email: optionalEmail,
             isPrimary: z.boolean().optional(),
+            ref: z.string().trim().max(300).optional().transform((v) => v || undefined),
           }),
         )
+        .superRefine((list, ctx) => {
+          // The same client contact cannot be picked twice.
+          const seen = new Map<string, number>();
+          list.forEach((c, i) => {
+            if (!c.ref) return;
+            if (seen.has(c.ref)) ctx.addIssue({ code: 'custom', path: [i, 'name'], message: `Already selected as POC contact ${seen.get(c.ref)! + 1}` });
+            else seen.set(c.ref, i);
+          });
+        })
         .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),
     )
     .transform((list) => {

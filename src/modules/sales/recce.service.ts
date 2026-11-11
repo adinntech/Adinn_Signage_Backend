@@ -20,7 +20,7 @@ import type { quotationBody } from '../ratecards/ratecard.validators';
 import { User } from '../users/user.model';
 import { getZohoClient } from '../zoho/zoho.customers';
 import { belongsTo, getZohoEstimate, listClientEstimates, type EstimateOwner } from '../zoho/zoho.estimates';
-import { claimRoute, clientSnapshot, contactPersonsOf, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, routeOf } from './handover.service';
+import { claimRoute, clientSnapshot, contactPersonGaps, contactPersonsOf, exportShops, HANDOVER_TYPE_LABELS, handoverGaps, isCs, pointOfContact, routeOf, SO_CONTACT_GAP } from './handover.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
@@ -124,6 +124,19 @@ async function includedRateCard(orderId: Types.ObjectId, r: RateCardFlow) {
   return o?.rateCardArray?.[0] ?? null;
 }
 
+/**
+ * Assign Type & Details mandatory details on the Recce route: the client contact person (name and mobile), then the
+ * full handover of the selected type (SO: one POC contact; shop types: the shop list and one POC contact too). `o`: a plain order object.
+ */
+type StepGapInput = Parameters<typeof handoverGaps>[0] & Parameters<typeof clientOf>[0] & { orderContacts?: { name?: string | null; phone?: string | null }[] | null; soContacts?: { name?: string | null; phone?: string | null }[] | null };
+async function stepGaps(o: StepGapInput, client?: Awaited<ReturnType<typeof clientOf>>) {
+  const c = client === undefined ? await clientOf(o) : client;
+  const gaps = handoverGaps({ ...o, handoverFull: true });
+  // Recce route: one POC contact for every assign type (handoverGaps already asks it for SO).
+  const pocMissing = !!o.handoverType && o.handoverType !== 'ASO' && !(o.soContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim());
+  return [...contactPersonGaps(c, o), ...gaps, ...(pocMissing ? [SO_CONTACT_GAP] : [])];
+}
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
@@ -146,7 +159,9 @@ export async function getRecce(id: string, actor: Actor) {
   // The client's contact persons, or this order's own when the Zoho client has none.
   const contacts = contactPersonsOf(client, o);
   // The Recce team always gets the full handover (there is no "client details only" option here).
-  const handoverMissing = handoverGaps({ ...o, handoverFull: true });
+  const handoverMissing = await stepGaps(o, client);
+  // Operational point of contact: the primary POC contact, else the primary client contact.
+  const poc = pointOfContact(client, o);
   const sentOk = requests.some((e) => EMAIL_DONE.includes(e.status));
   // Step 1 is done when the BD confirmed it ("Continue"); orders from before the confirmation count once an email went.
   const cs = csMine(o, actor);
@@ -224,8 +239,10 @@ export async function getRecce(id: string, actor: Actor) {
     handoverType: (o.handoverType ?? null) as HandoverType | null,
     /** Last save of any handover detail (the Handover Type & Details card). */
     handoverUpdatedAt: o.handoverUpdatedAt ?? null,
-    /** Gaps of the full handover (step 1). */
+    /** Gaps of step 1: the client contact person, then the full handover. */
     handoverMissing,
+    /** Operational point of contact (primary POC contact, else the primary client contact). */
+    primaryContact: poc,
     codes,
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
     /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
@@ -299,7 +316,15 @@ export async function getRecce(id: string, actor: Actor) {
             ...custom.map((f) => [f.label!, f.value!] as [string, string]),
           ]),
         ) +
-        section('Project Details', rows([['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]])) +
+        section(
+          'Project Details',
+          rows([
+            ['Order Number', o.orderNo],
+            ['Assign Type', typeLabel],
+            ['Shops', shops],
+            ['Point of Contact', poc ? [poc.name, poc.designation, mobile(poc.phone), poc.email].filter(Boolean).join(' · ') : null],
+          ]),
+        ) +
         section(
           'Contact Persons',
           grid(contacts, [
@@ -310,12 +335,13 @@ export async function getRecce(id: string, actor: Actor) {
             ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
           ]),
         ) +
-        (o.handoverType === 'ASO'
+        (o.handoverType
           ? section(
-              'SO Contacts',
+              'POC Contacts',
               grid(o.soContacts ?? [], [
                 ['Name', (k) => k.name],
-                ['Mobile', (k) => mobile(k.phone)],
+                ['Designation', (k) => k.designation],
+                ['Phone', (k) => mobile(k.phone)],
                 ['Email', (k) => k.email],
                 ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
               ]),
@@ -345,7 +371,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   if (o.recce?.codesSavedAt || o.recce?.projectCode) throw codesSavedError();
   // Steps in order: the handover details come first (the email carries them).
   const client = await clientOf(o);
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
+  const gaps = await stepGaps(o.toObject(), client);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', `Complete Assign Type & Details first: ${gaps[0]}`, gaps.map((message) => ({ path: 'handover', message })));
   if (!o.recce?.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first (Continue: Project Code Request Email).', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
   // Orders with the Rate Card step: the rate card is saved (Save & Continue) or skipped first. Only the version included
@@ -414,11 +440,11 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
  * It stays editable afterwards (also after the codes and the assignment); each change is a new version with its PDF.
  */
 /**
- * Assign Type & Details mandatory details (assign type; shop list without row errors for the shop types; an SO contact
- * for SO): every forward transition out of step 1 checks them (Continue, Skip: Rate Card, the first Rate Card save).
+ * Assign Type & Details mandatory details (client contact person; assign type; shop list for the shop types; a POC
+ * contact for SO): every forward transition out of step 1 checks them (Continue, Skip: Rate Card, the first Rate Card save).
  */
-function assertHandoverComplete(o: Awaited<ReturnType<typeof liveOrder>>) {
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
+async function assertHandoverComplete(o: Awaited<ReturnType<typeof liveOrder>>) {
+  const gaps = await stepGaps(o.toObject());
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
 }
 
@@ -430,7 +456,7 @@ export async function saveRateCard(id: string, input: z.infer<typeof quotationBo
   if (first && !o.recce.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)))
     throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first (Continue: Rate Card).', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
   // First save completes the step: the mandatory details must still be complete (no bypass through a direct link).
-  if (first && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) assertHandoverComplete(o);
+  if (first && !(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) await assertHandoverComplete(o);
   // The PDF is generated and stored before anything is marked done; a failed save leaves the step as it was.
   const result = await saveQuotation(id, input, actor, { workflowAuthorized: isCs(actor), autoDate: true });
   const label = result.revision.label;
@@ -471,7 +497,7 @@ export async function skipRateCard(id: string, actor: Actor) {
   if (!o.recce.handoverDoneAt && !(csMine(o, actor) && handoverReceived(o)))
     throw new AppError(422, 'HANDOVER_INCOMPLETE', 'Confirm Assign Type & Details first.', [{ path: 'handover', message: 'Confirm Assign Type & Details first' }]);
   // Skip leaves out only the Rate Card, never the mandatory assignment details.
-  if (!(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) assertHandoverComplete(o);
+  if (!(csMine(o, actor) && handoverReceived(o)) && !(await emailDone(o._id))) await assertHandoverComplete(o);
   if (rateCardChoiceOf(o.recce) !== 'SKIPPED') {
     const now = new Date();
     const r = await SalesOrder.updateOne(
@@ -505,7 +531,7 @@ async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, est
 export async function confirmHandover(id: string, actor: Actor) {
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
-  assertHandoverComplete(o);
+  await assertHandoverComplete(o);
   await claimRecce(o, actor);
   if (!o.recce?.handoverDoneAt) {
     const now = new Date();
@@ -639,11 +665,12 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
   if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
   const client = await clientOf(o);
-  const gaps = handoverGaps({ ...o.toObject(), handoverFull: true });
+  const gaps = await stepGaps(o.toObject(), client);
   if (gaps.length) throw new AppError(422, 'HANDOVER_INCOMPLETE', gaps[0]!, gaps.map((message) => ({ path: 'handover', message })));
-  // Contact persons are optional. Those with a mobile and an email go on the project (ASO: the SO contacts too).
-  const so = o.handoverType === 'ASO' ? (o.soContacts ?? []) : [];
-  const contacts = [...contactPersonsOf(client, o), ...so]
+  // Contacts with a mobile and an email go on the project: the point of contact first, then the POC contacts and the
+  // client contact persons.
+  const poc = pointOfContact(client, o);
+  const contacts = [...(poc ? [poc] : []), ...(o.handoverType ? (o.soContacts ?? []) : []), ...contactPersonsOf(client, o)]
     .filter((k) => k.name && k.phone && k.email)
     .map((k) => ({ name: k.name!, email: k.email!, phone: k.phone! }))
     .filter((k, i, all) => all.findIndex((x) => x.phone === k.phone || x.email === k.email) === i)

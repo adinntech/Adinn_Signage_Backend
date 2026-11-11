@@ -140,7 +140,8 @@ export function renderQuotationPdf(q: QuotationPdfInput): Promise<Buffer> {
     const rightW = W - leftW - gap;
     const textW = leftW - 30;
     const addr = q.clientAddress?.trim() ?? '';
-    const attn = q.contact?.name ? `Kind Attn : ${q.contact.name}` : '';
+    // Kind Attn: the contact person, then their phone number when given.
+    const attn = q.contact?.name ? `Kind Attn : ${q.contact.name}${q.contact.phone ? ` · ${phoneText(q.contact.phone)}` : ''}` : '';
     const nameH = height(q.clientName, BOLD, 11, textW);
     const addrH = addr ? height(addr, SEMI, 9, textW) : 0;
     const attnH = attn ? height(attn, SEMI, 9, textW) : 0;

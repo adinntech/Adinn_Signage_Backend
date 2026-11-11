@@ -6,7 +6,7 @@ import { AppError } from '../../common/errors';
 import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { clientOf, contactPersonsOf } from '../clients/clientDetails';
+import { clientOf, pointOfContact } from '../clients/clientDetails';
 import { discardStoredFiles, storeEmbeddedFile } from '../files/file.service';
 import { mailAvailable } from '../notifications/mail.service';
 import { orderArray } from '../sales/order.service';
@@ -163,10 +163,9 @@ export async function getQuotation(orderId: string, actor: Actor) {
   const labelled = revisions.map((r) => ({ ...r, label: revisionLabel(r.revision) }));
   const latest = labelled[0] ?? null;
   const me = await User.findById(actor.id).select('name email phone').lean();
-  // Contact Person prefill: the client's primary contact (else its first); a Zoho client without contacts uses this
-  // order's saved contact persons the same way (primary, else the first). SO contacts are not used here.
-  const persons = contactPersonsOf(client, order);
-  const primary = persons.find((c) => c.isPrimary) ?? persons[0];
+  // Contact Person prefill (a new Rate Card only; a saved one keeps its values): the order's point of contact, i.e.
+  // the primary POC contact, else the primary client contact (the order's own contact persons for a Zoho client without any).
+  const primary = pointOfContact(client, order);
   // Rate Card step (Client Servicing): Bill To is the full address; elsewhere the city, as on the ADINN rate card.
   const fullAddress = fullAddressOf(client);
   const step = !!order.recce?.rateCardRequired;

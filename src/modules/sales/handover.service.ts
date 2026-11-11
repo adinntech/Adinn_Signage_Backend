@@ -5,7 +5,7 @@ import { AppError } from '../../common/errors';
 import { type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { clientNameOf, clientOf, contactPersonsOf } from '../clients/clientDetails';
+import { clientNameOf, clientOf, CONTACT_PERSON_GAP, contactPersonGaps, contactPersonsOf, pointOfContact } from '../clients/clientDetails';
 import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
@@ -71,8 +71,10 @@ type GapInput = {
   shopList?: { total?: number | null; error?: number | null } | null;
   soContacts?: { name?: string | null; phone?: string | null }[] | null;
 };
-/** ASO needs at least one SO contact with a name and a phone number (email optional). */
-export const SO_CONTACT_GAP = 'Add at least one SO Contact with name and phone number';
+/** SO needs at least one POC contact with a name and a phone number (designation and email optional). Stored as soContacts. */
+export const SO_CONTACT_GAP = 'Add at least one POC Contact with name and phone number';
+/** Client contact person gap and point of contact: shared from clientDetails (also used by the Rate Card). */
+export { CONTACT_PERSON_GAP, contactPersonGaps, pointOfContact };
 /** Toggle off = client details and contact persons only. Orders from before the toggle count as full. */
 const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
 
@@ -94,7 +96,7 @@ export function handoverGaps(o: GapInput): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client clientDetails clientType csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
@@ -120,8 +122,10 @@ export async function getHandover(id: string) {
     documents: [...(o.handoverDocumentsArray ?? [])].filter((d) => shop && d.kind === 'SHOP_LIST' && !d.shopType).sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)),
     /** Communication & attachments, oldest first (chat order). */
     messages: o.handoverMessagesArray ?? [],
-    /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
-    soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** POC contacts (stored as soContacts; kept when the type changes; required for SO, optional for the shop types). */
+    soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary, ref: k.ref ?? null })),
+    /** Operational point of contact: the primary POC contact, else the primary client contact. */
+    primaryContact: pointOfContact(await clientOf(o), o),
     /** Contact persons saved for this order only (used while the Zoho client has none). */
     orderContacts: (o.orderContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
     /** SO: Additional Documents (kept apart from chat files; kept when the type changes, shown for SO only), oldest first. */
@@ -259,25 +263,26 @@ async function swapShopSet(orderId: Types.ObjectId, from: string | null, to: str
   };
 }
 
-type SoContact = { name: string; phone: string; email?: string | undefined; isPrimary: boolean };
-const soLine = (k: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }) =>
-  [k.name, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
+type SoContact = { name: string; designation?: string | undefined; phone: string; email?: string | undefined; isPrimary: boolean; ref?: string | undefined };
+const soLine = (k: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }) =>
+  [k.name, k.designation, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
 
 /**
- * ASO: saves the whole SO contact list (validated and given one primary by soContactsBody). The list is kept apart
- * from the client's contact persons and stays on the order if the type changes later (shown for ASO only).
+ * POC contacts (SO, Only Shop Details, Shop + Measurement): saves the whole list (validated and given one primary by
+ * soContactsBody). Stored as soContacts, kept apart from the client's contact persons and kept when the type changes.
+ * Required (one at least) for SO only.
  */
 export async function setSoContacts(id: string, contacts: SoContact[], actor: Actor) {
   const o = await liveOrder(id);
   assertEditable(o, actor);
-  if (o.handoverType !== 'ASO') throw AppError.conflict('SO contacts are for ASO handovers. Choose ASO first.');
+  if (!o.handoverType) throw AppError.conflict('Choose the assign type first: SO, Only Shop Details or Shop + Measurement.');
   await handoverRoute(o);
   const before = (o.soContacts ?? []).map(soLine);
   const after = contacts.map(soLine);
-  const r = await SalesOrder.updateOne(openFilter(o, actor), { $set: { soContacts: contacts.map((k) => ({ ...k, email: k.email ?? null })), updatedBy: actor.id } });
+  const r = await SalesOrder.updateOne(openFilter(o, actor), { $set: { soContacts: contacts.map((k) => ({ ...k, designation: k.designation ?? null, email: k.email ?? null, ref: k.ref ?? null })), updatedBy: actor.id } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   if (before.join('\n') !== after.join('\n')) {
-    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `SO contacts saved (${contacts.length})` });
+    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `POC contacts saved (${contacts.length})` });
   }
   return getHandover(id);
 }
@@ -290,8 +295,8 @@ export { contactPersonsOf };
 
 /**
  * Zoho client without contact persons: saves this order's contact persons (validated and given one primary by
- * orderContactsBody). Kept on the order only; Zoho and the client record are not changed. Optional (an empty list
- * clears them) and never needed to continue or assign.
+ * orderContactsBody). Kept on the order only; Zoho and the client record are not changed. On the Recce route one
+ * contact person (name and mobile) is required to continue (contactPersonGaps).
  */
 export async function setOrderContacts(id: string, contacts: OrderContact[], actor: Actor) {
   const o = await liveOrder(id);
@@ -694,6 +699,27 @@ function detectHeader(g: SheetGrid): { index: number; score: number } | null {
   return best;
 }
 
+/**
+ * Header row when no shop / dealer column is recognised: the first row (within the scan) with at least two different
+ * values that fills at least half of the sheet's width. A title row above the table (one merged text, repeated in
+ * every cell, e.g. "ADINN | MADURAI RECCE …") is skipped this way.
+ */
+function fallbackHeader(g: SheetGrid): number {
+  const scan = g.rows.slice(0, HEADER_SCAN);
+  const width = Math.max(1, ...scan.map((r) => r.cells.filter((c) => String(c ?? '').trim()).length));
+  const i = scan.findIndex((r) => {
+    const vals = r.cells.map((c) => String(c ?? '').trim()).filter(Boolean);
+    return new Set(vals.map((v) => v.toLowerCase())).size >= 2 && vals.length * 2 >= width;
+  });
+  return i < 0 ? 0 : i;
+}
+
+/** Several sheets: the one whose header is recognised best, else the one with the most rows (never asked). */
+function pickSheet(sheets: SheetGrid[]): SheetGrid {
+  const scored = sheets.map((g) => ({ g, score: detectHeader(g)?.score ?? -1 }));
+  return scored.sort((a, b) => b.score - a.score || b.g.rows.length - a.g.rows.length)[0]!.g;
+}
+
 type UploadOptions = { sheet?: string | undefined; headerRow?: number | undefined; mapping?: Record<string, string> | undefined; preview?: boolean | undefined };
 
 /**
@@ -732,13 +758,10 @@ export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: str
     const lists = filled.filter((g) => g.rows.length > 1);
     if (lists.length === 1) sheet = lists[0];
   }
-  if (!sheet) {
-    const first = filled[0]!;
-    const h = headerNames(first.rows[0]!.cells, first.rows[0]!.cells.length);
-    return ask(first, 0, 'This workbook has several sheets with data. Choose the sheet with the shop list.', h, autoMap(h));
-  }
+  // Several sheets with data: the shop list is picked automatically (no sheet chooser).
+  if (!sheet) sheet = pickSheet(filled);
 
-  const headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? 0);
+  const headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? fallbackHeader(sheet));
   if (headerIndex < 0) throw new AppError(422, 'VALIDATION_ERROR', `Row ${opts.headerRow} is blank or outside the sheet`, [{ path: 'headerRow', message: 'Choose another header row' }]);
   const dataRows = sheet.rows.slice(headerIndex + 1);
   const headerCells = sheet.rows[headerIndex]!.cells;
@@ -1232,7 +1255,7 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
-export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null; orderContacts?: ContactLike[] | null }) {
+export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null; orderContacts?: ContactLike[] | null }) {
   // The Client record, or the client kept on the order (Client Servicing).
   const c = await clientOf(o);
   if (!c) return null;
@@ -1251,7 +1274,8 @@ export async function clientSnapshot(o: { client: unknown; clientDetails?: unkno
     customFields: crm ? (c.customFields ?? []).map((f) => ({ label: f.label, value: f.value })) : undefined,
     // The client's contact persons, or this order's own when the Zoho client has none.
     contacts: contactPersonsOf(c, o).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
-    soContacts: o.handoverType === 'ASO' ? (o.soContacts ?? []).map((k) => ({ name: k.name, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
+    // POC contacts of any assign type (stored as soContacts).
+    soContacts: o.handoverType && o.soContacts?.length ? o.soContacts.map((k) => ({ name: k.name, designation: k.designation ?? undefined, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
     takenAt: new Date(),
   };
 }
