@@ -330,7 +330,20 @@ export const MAX_ROW_IMAGES = 10;
 const IMAGE_RE = /\.(jpe?g|png|webp)$/i;
 const AUDIO_RE = /\.(mp3|m4a|webm|ogg|wav)$/i;
 /** Columns of the downloaded Excel that are not shop fields (ignored when the file is uploaded again). */
-const EXPORT_ONLY = ['row id', 'images', 'status', 'issues', 'modified at', 'modified by'];
+// 's.no': the serial column Download Excel adds (a sheet's own S.No column still matches its table column first).
+const EXPORT_ONLY = ['row id', 's.no', 'images', 'status', 'issues', 'modified at', 'modified by'];
+/** A sheet's own serial number column ("S.No", "Sl. No", "Sr No", "Serial No"): exports then add no second one. */
+const SERIAL_HEADER = /^(s\.?\s*no\.?|sl\.?\s*no\.?|sr\.?\s*no\.?|serial(\s*(no\.?|number))?)$/i;
+const hasSerialColumn = (headers: string[]) => headers.some((h) => SERIAL_HEADER.test(h.trim()));
+/**
+ * Download Excel: S.No first (1, 2, 3...) and the internal Row ID as the LAST, hidden column. The Row ID is not shown,
+ * but uploading the downloaded file again still updates those rows instead of adding them twice.
+ */
+function serialAndHiddenRowId(ws: ExcelJS.Worksheet, withSerial: boolean) {
+  if (withSerial) ws.getColumn(1).alignment = { horizontal: 'left' };
+  const last = ws.getColumn(ws.columnCount);
+  last.hidden = true;
+}
 
 const assertShopType = (o: { handoverType?: string | null }) => {
   if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Choose Shop Details Only or Shop + Measurement first');
@@ -982,7 +995,7 @@ export async function exportShops(id: string) {
   const columns = columnsOf(o);
   if (columns) return exportColumns(o, columns, sized);
   const cols: [string, (r: Record<string, any>) => unknown, number][] = [
-    ['Row ID', (r) => r.rowId, 26],
+    ['S.No', (r) => r.__sno, 7],
     ['Shop Name', (r) => r.shopName, 26],
     ['Dealer Name', (r) => r.dealerName, 24],
     ['Location', (r) => r.location, 18],
@@ -1005,13 +1018,15 @@ export async function exportShops(id: string) {
     ),
     ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0, 8]] as [string, (r: Record<string, any>) => unknown, number][]) : []),
     ['Modified At', (r) => istStamp(r.updatedAt), 22],
+    ['Row ID', (r) => r.rowId, 26],
   ];
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Shops');
   ws.columns = cols.map(([header, , width]) => ({ header, width }));
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
-  for (const r of o.handoverShopsArray ?? []) ws.addRow(cols.map(([, get]) => cellSafe(get(r as Record<string, any>) ?? '')));
+  (o.handoverShopsArray ?? []).forEach((r, i) => ws.addRow(cols.map(([, get]) => cellSafe(get({ ...(r as Record<string, any>), __sno: i + 1 }) ?? ''))));
+  serialAndHiddenRowId(ws, true);
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
@@ -1025,14 +1040,17 @@ async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[
   ];
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Shops');
-  const headers = ['Row ID', ...columns.map((c) => c.header), ...app.map(([h]) => h)];
-  ws.columns = headers.map((header, i) => ({ header, width: i === 0 ? 26 : Math.min(40, Math.max(12, header.length + 4)) }));
+  // S.No first unless the sheet has its own serial column (kept as uploaded); the Row ID last, hidden.
+  const serial = !hasSerialColumn(columns.map((c) => c.header));
+  const headers = [...(serial ? ['S.No'] : []), ...columns.map((c) => c.header), ...app.map(([h]) => h), 'Row ID'];
+  ws.columns = headers.map((header, i) => ({ header, width: serial && i === 0 ? 7 : i === headers.length - 1 ? 26 : Math.min(40, Math.max(12, header.length + 4)) }));
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
-  for (const r of (o.handoverShopsArray ?? []) as Record<string, any>[]) {
+  ((o.handoverShopsArray ?? []) as Record<string, any>[]).forEach((r, i) => {
     const cells = (r.cells ?? {}) as Record<string, string>;
-    ws.addRow([r.rowId, ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? ''))]);
-  }
+    ws.addRow([...(serial ? [i + 1] : []), ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? '')), r.rowId]);
+  });
+  serialAndHiddenRowId(ws, serial);
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
@@ -1096,12 +1114,14 @@ export async function exportShopsPdf(id: string) {
         ...[...new Set(rows.flatMap((r) => Object.keys(r.extra ?? {})))].map((k): Col => [k, (r) => r.extra?.[k]]),
         ...app,
       ];
+  // S.No first (never the internal Row ID), unless the sheet has its own serial column.
+  const serial = !hasSerialColumn(cols.map(([h]) => h));
   const client = { name: await clientNameOf(o) };
   const buffer = await renderShopListPdf({
     title: `${o.orderNo} · Shop List`,
     subtitle: `${client?.name ?? 'Client'} · ${HANDOVER_TYPE_LABELS[o.handoverType as HandoverType]} · ${rows.length} shop${rows.length === 1 ? '' : 's'} · ${istStamp(new Date())}`,
-    headers: cols.map(([h]) => h),
-    rows: rows.map((r) => cols.map(([, get]) => { const v = get(r); return v == null ? '' : String(v); })),
+    headers: [...(serial ? ['S.No'] : []), ...cols.map(([h]) => h)],
+    rows: rows.map((r, i) => [...(serial ? [String(i + 1)] : []), ...cols.map(([, get]) => { const v = get(r); return v == null ? '' : String(v); })]),
     images: sized ? await rowThumbs(rows) : undefined,
   });
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.pdf`, buffer };
