@@ -7,6 +7,8 @@ import { VendorPrice } from '../vendors/vendorPrice.model';
 import { pricedZohoContactIds, pricesOfZohoVendors, zohoSnapshot } from '../vendors/vendorPrice.service';
 import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
 import { zohoGet } from './zoho.client';
+import { ZohoVendorCity } from './zohoVendorCity.model';
+import { canonicalCity, cityFromAddress, cityOf } from './zohoCity';
 import { toZohoVendorRow, type ZohoContact } from './zoho.mapper';
 
 /**
@@ -23,7 +25,110 @@ export const zohoVendorListQuery = listQuery.extend({
   price: z.enum(['set', 'missing']).optional(),
   /** true: only the Signage creditors (Zoho Contact Code = ZOHO_VENDOR_CONTACT_CODE). false: every vendor in Zoho. Left out: ZOHO_SIGNAGE_CREDITORS_ONLY. */
   signageOnly: z.enum(['true', 'false']).optional(),
+  /** City filter: comma separated cities ("Madurai,Chengalpattu"). Vendors of any of them are listed. */
+  cities: z.string().trim().max(300).optional(),
 });
+
+/**
+ * City filter. The Zoho vendor list carries no address, so every vendor's details are read from Zoho once, in the background
+ * (about 90 a minute, Zoho's limit is 100), and kept with the vendor's city (ZohoVendorCity). The cities offered are the cities
+ * found; a vendor is listed under its city from that copy, so the filter is quick and covers every vendor in Zoho.
+ */
+const CITY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PACE_MS = 650;
+type SyncState = { running: boolean; done: number; total: number; startedAt: number; signageTotal: number; signageLeft: number; error?: string };
+const sync: SyncState = { running: false, done: 0, total: 0, startedAt: 0, signageTotal: 0, signageLeft: 0 };
+
+/** The cities are worked out again from the addresses already kept (no call to Zoho), so a better reading of the addresses applies at once. */
+async function recomputeCities() {
+  const ops: { updateOne: { filter: { _id: unknown }; update: { $set: { city: string | null } } } }[] = [];
+  for (const d of await ZohoVendorCity.find().select('city address addresses').lean()) {
+    const billing = d.addresses?.find((a) => a.kind === 'billing')?.city ?? null;
+    const city = cityOf(billing, d.address);
+    if (city !== (d.city ?? null)) ops.push({ updateOne: { filter: { _id: d._id }, update: { $set: { city } } } });
+  }
+  if (ops.length) await ZohoVendorCity.bulkWrite(ops as never);
+}
+let started = false;
+
+async function runCitySync() {
+  started = true;
+  sync.running = true; sync.done = 0; sync.total = 0; sync.startedAt = Date.now(); delete sync.error;
+  try {
+    await recomputeCities();
+    type Page = { contacts?: { contact_id: string }[]; page_context?: { has_more_page?: boolean } };
+    const ids: string[] = [];
+    for (let page = 1; page <= 100; page++) {
+      const r = await zohoGet<Page>('/contacts', { contact_type: 'vendor', per_page: 200, page });
+      for (const c of r.contacts ?? []) ids.push(c.contact_id);
+      if (!r.page_context?.has_more_page) break;
+    }
+    const fresh = new Set((await ZohoVendorCity.find({ checkedAt: { $gt: new Date(Date.now() - CITY_TTL_MS) } }).select('zohoContactId').lean()).map((k) => k.zohoContactId));
+    // The Signage creditors (a few hundred) are read first, so their cities are ready in minutes; the rest of Zoho follows.
+    const signage = new Set((await signageRows().catch(() => [] as Row[])).map((r) => r.zohoContactId));
+    const todo = ids.filter((id) => !fresh.has(id)).sort((a, b) => Number(signage.has(b)) - Number(signage.has(a)));
+    sync.signageTotal = signage.size; sync.signageLeft = todo.filter((id) => signage.has(id)).length;
+    sync.total = ids.length; sync.done = ids.length - todo.length;
+    for (const id of todo) {
+      try {
+        const s = await zohoSnapshot(id, false);
+        if (s) {
+          await ZohoVendorCity.updateOne({ zohoContactId: id }, { $set: {
+            zohoContactId: id, vendorNo: s.vendorNo ?? null, name: s.name, email: s.email ?? null, mobile: s.mobile ?? null, gstin: s.gstin ?? null, pan: s.pan ?? null,
+            contactCode: s.contactCode ?? null, zohoStatus: s.zohoStatus, zohoCreatedAt: s.zohoCreatedAt ?? null, createdByName: s.createdByName ?? null,
+            city: cityOf(s.city, s.address), address: s.address ?? null, state: s.state ?? null, addresses: s.addresses ?? [], checkedAt: new Date(),
+          } }, { upsert: true });
+        }
+      } catch (e) {
+        // Zoho refused (too many calls): wait a little and go on with the next vendor; it is read again on the next sync.
+        if (/429|too many|rate/i.test((e as Error).message)) await new Promise((r) => setTimeout(r, 15_000));
+      }
+      sync.done += 1;
+      if (signage.has(id) && sync.signageLeft > 0) sync.signageLeft -= 1;
+      await new Promise((r) => setTimeout(r, PACE_MS));
+    }
+  } catch (e) {
+    sync.error = (e as Error).message.slice(0, 200);
+  } finally {
+    sync.running = false;
+  }
+}
+
+/** Starts reading the vendors' addresses in the background (once at a time). */
+export function startZohoCitySync() {
+  if (!sync.running) void runCitySync();
+  return { ...sync };
+}
+
+/** The cities found so far (with how many vendors each) and how far the reading of the addresses is. */
+export async function zohoVendorCities() {
+  const [rows, have] = await Promise.all([
+    ZohoVendorCity.aggregate<{ _id: string; n: number }>([{ $match: { city: { $ne: null } } }, { $group: { _id: '$city', n: { $sum: 1 } } }, { $sort: { n: -1, _id: 1 } }]),
+    ZohoVendorCity.estimatedDocumentCount(),
+  ]);
+  // A fresh start of the server (or nothing read yet): continue reading now. Vendors already read are skipped, so it carries on where it stopped.
+  if (!sync.running && (!started || have === 0)) startZohoCitySync();
+  return { cities: rows.map((r) => ({ name: r._id, count: r.n })), sync: { running: sync.running, done: sync.done, total: sync.total, signageTotal: sync.signageTotal, signageLeft: sync.signageLeft, error: sync.error ?? null } };
+}
+
+/** Vendors of the chosen cities, from the copy read out of Zoho. */
+async function listByCities(q: ListQuery, chosen: string[]) {
+  const names = chosen.map((c) => canonicalCity(c) ?? c);
+  const typed = q.q?.trim();
+  const filter: Record<string, unknown> = { city: { $in: names } };
+  if (q.status) filter.zohoStatus = q.status;
+  // The Signage-only switch: only the Signage creditors (Zoho Contact Code), as in the browsing list.
+  if ((q.signageOnly ?? env.ZOHO_SIGNAGE_CREDITORS_ONLY) === 'true') filter.contactCode = new RegExp('^\\s*' + escapeRegex(env.ZOHO_VENDOR_CONTACT_CODE.trim()) + '\\s*$', 'i');
+  if (typed) { const re = new RegExp(escapeRegex(typed), 'i'); filter.$or = [{ name: re }, { vendorNo: re }, { mobile: re }, { email: re }, { gstin: re }, { pan: re }]; }
+  const all = await ZohoVendorCity.find(filter).sort({ name: 1 }).lean();
+  const rows: Row[] = all.map((s) => ({ zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null }));
+  let items = await decorate(rows);
+  if (q.price === 'missing') items = items.filter((i) => i.price.ratePerShop == null);
+  if (q.price === 'set') items = items.filter((i) => i.price.ratePerShop != null);
+  if (q.registered === 'no') items = items.filter((i) => !i.vendor);
+  return { items: items.slice((q.page - 1) * q.limit, q.page * q.limit), meta: { ...pageMeta(q.page, q.limit, items.length), syncing: sync.running } };
+}
+
 type ListQuery = z.infer<typeof zohoVendorListQuery>;
 
 type Row = ReturnType<typeof toZohoVendorRow> & { city?: string | null; address?: string | null; createdByName?: string | null };
@@ -38,7 +143,7 @@ function searchParams(term?: string): Record<string, string>[] {
   if (t.includes('@')) return [{ email_contains: t }];
   const digits = t.replace(/\D/g, '');
   if (/^\+?[\d\s-]+$/.test(t) && digits.length >= 4) return [{ contact_name_contains: digits }, { phone_contains: digits.length > 10 ? digits.slice(-10) : digits }];
-  return [{ contact_name_contains: t }, { company_name_contains: t }];
+  return [{ contact_name_contains: t }, { company_name_contains: t }, { address_contains: t }];
 }
 
 /** Letters and digits only, lower case: "M.K.M Tractors" and "mkm tractors" read the same. */
@@ -46,7 +151,8 @@ const squash = (v?: string) => (v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
 
 /** Every word typed must be found in the vendor's name (with its number), company, e-mail, phone, mobile, GST or PAN. */
 export function matchesTerm(c: ZohoContact, term: string): boolean {
-  const fields = [c.contact_name, c.company_name, c.email, c.phone, c.mobile, c.gst_no, c.pan_no].map(squash).filter(Boolean);
+  const b = c.billing_address;
+  const fields = [c.contact_name, c.company_name, c.email, c.phone, c.mobile, c.gst_no, c.pan_no, b?.city, b?.address, b?.state].map(squash).filter(Boolean);
   const words = term.split(/s+/).map(squash).filter(Boolean);
   return words.length > 0 && words.every((w) => fields.some((f) => f.includes(w)));
 }
@@ -54,9 +160,23 @@ export function matchesTerm(c: ZohoContact, term: string): boolean {
 /** Who already holds each Zoho vendor in the vendor master, and the price typed for it. */
 async function decorate(rows: Row[]) {
   const ids = rows.map((r) => r.zohoContactId);
-  const linked = await Vendor.find({ zohoContactId: { $in: ids }, deletedAt: null }).select('zohoContactId code status').lean();
+  const linked = await Vendor.find({ zohoContactId: { $in: ids }, deletedAt: null }).select('zohoContactId code status district address mobile').lean();
   const byZoho = new Map(linked.map((v) => [v.zohoContactId, { id: String(v._id), code: v.code, status: v.status }]));
   const prices = await pricesOfZohoVendors(ids);
+  // The Zoho list call carries no address, so the city / address (and a missing phone) come from what was kept when the vendor's
+  // details were read from Zoho (cost added, registered), the same data the "Vendors with cost" list shows.
+  const [kept, copies] = await Promise.all([VendorPrice.find({ zohoContactId: { $in: ids } }).select('zohoContactId city address mobile').lean(), ZohoVendorCity.find({ zohoContactId: { $in: ids } }).select('zohoContactId city address').lean()]);
+  const copyBy = new Map(copies.map((k) => [k.zohoContactId, k]));
+  const keptBy = new Map(kept.map((k) => [k.zohoContactId, k]));
+  const linkedBy = new Map(linked.map((v) => [v.zohoContactId as string, v]));
+  rows = rows.map((r) => {
+    const k = keptBy.get(r.zohoContactId);
+    const v = linkedBy.get(r.zohoContactId);
+    const address = r.address ?? v?.address ?? k?.address ?? copyBy.get(r.zohoContactId)?.address ?? null;
+    // Zoho often has the city only inside the address ("..., Indiranagar,Bangalore - 560075"): it is read from there when the city field is empty.
+    const city = canonicalCity(r.city) ?? canonicalCity(v?.district) ?? canonicalCity(k?.city) ?? copyBy.get(r.zohoContactId)?.city ?? cityFromAddress(address) ?? r.city ?? v?.district ?? k?.city ?? null;
+    return { ...r, city, address, mobile: r.mobile ?? v?.mobile ?? k?.mobile ?? undefined };
+  });
   return rows.map((r) => ({ ...r, _id: r.zohoContactId, vendor: byZoho.get(r.zohoContactId) ?? null, price: prices.get(r.zohoContactId) ?? { ratePerShop: null, farRatePerShop: null, source: null } }));
 }
 
@@ -80,7 +200,7 @@ async function storedRows(q: Pick<ListQuery, 'q' | 'status' | 'registered' | 'pr
   const rows = new Map<string, Row>();
   for (const s of snaps) {
     if (s.ratePerShop == null) continue;
-    rows.set(s.zohoContactId, { zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null });
+    rows.set(s.zohoContactId, { zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: canonicalCity(s.city) ?? cityFromAddress(s.address) ?? s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null });
   }
   for (const v of vendors) {
     const id = v.zohoContactId as string;
@@ -153,6 +273,8 @@ async function signageRows(): Promise<Row[]> {
  * live from Zoho Books, one page at a time (Zoho does not say how many vendors match, only whether another page exists).
  */
 export async function listZohoVendors(q: ListQuery) {
+  const cityList = (q.cities ?? '').split(',').map((c) => c.trim()).filter(Boolean).slice(0, 10);
+  if (cityList.length) return listByCities(q, cityList);
   if (q.price === 'set' || q.registered === 'yes') {
     const all = await storedRows(q);
     const items = all.slice((q.page - 1) * q.limit, q.page * q.limit);
@@ -184,7 +306,24 @@ export async function listZohoVendors(q: ListQuery) {
     const pages = await Promise.all(searchParams(term).map((s) => call(s, 200, 1)));
     const seen = new Set<string>();
     const hits = pages.flatMap((p) => p.contacts ?? []).filter((c) => !seen.has(c.contact_id) && !!seen.add(c.contact_id) && matchesTerm(c, term));
-    let found = await decorate(hits.map(toZohoVendorRow));
+    const rows: Row[] = hits.map(toZohoVendorRow);
+    // The Zoho list carries no city or address, so what is typed (a city such as "beng", an address part, GST / PAN, phone, name) is also
+    // looked up in the copy of the vendors' details read from Zoho (see the city filter) and in the cities kept with a cost.
+    const have = new Set(rows.map((r) => r.zohoContactId));
+    const re = new RegExp(escapeRegex(term), 'i');
+    const fromCopy = await ZohoVendorCity.find({ ...(q.status ? { zohoStatus: q.status } : {}), $or: [{ name: re }, { vendorNo: re }, { mobile: re }, { email: re }, { gstin: re }, { pan: re }, { city: re }, { state: re }, { address: re }] }).limit(300).lean();
+    for (const s of fromCopy) {
+      if (have.has(s.zohoContactId)) continue;
+      have.add(s.zohoContactId);
+      rows.push({ zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null });
+    }
+    const byCity = await VendorPrice.find({ city: re }).limit(200).lean();
+    for (const s of byCity) {
+      if (have.has(s.zohoContactId)) continue;
+      if (q.status && (s.zohoStatus === 'inactive' ? 'inactive' : 'active') !== q.status) continue;
+      rows.push({ zohoContactId: s.zohoContactId, vendorNo: s.vendorNo ?? undefined, name: s.name ?? 'Zoho vendor', email: s.email ?? undefined, mobile: s.mobile ?? undefined, gstin: s.gstin ?? undefined, pan: s.pan ?? undefined, contactCode: s.contactCode ?? undefined, zohoStatus: s.zohoStatus === 'inactive' ? 'inactive' : 'active', zohoModifiedAt: undefined, zohoCreatedAt: s.zohoCreatedAt ?? undefined, city: s.city ?? null, address: s.address ?? null, createdByName: s.createdByName ?? null });
+    }
+    let found = await decorate(rows);
     if (q.price === 'missing') found = found.filter((i) => i.price.ratePerShop == null);
     if (q.registered === 'no') found = found.filter((i) => !i.vendor);
     return { items: found.slice((q.page - 1) * q.limit, q.page * q.limit), meta: pageMeta(q.page, q.limit, found.length) };

@@ -7,7 +7,7 @@ import { actorOf, objectId } from '../../common/query';
 import { receive } from '../files/file.controller';
 import { z } from 'zod';
 import { lookupZohoVendor, zohoVendorDetails } from '../zoho/zoho.service';
-import { exportZohoVendors, listZohoVendors, zohoExportQuery, zohoVendorListQuery, zohoVendorStatus } from '../zoho/zoho.vendors';
+import { exportZohoVendors, listZohoVendors, zohoExportQuery, zohoVendorListQuery, startZohoCitySync, zohoVendorCities, zohoVendorStatus } from '../zoho/zoho.vendors';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
@@ -61,7 +61,9 @@ vendorRouter.post('/import', ...write, upload, asyncHandler(async (req, res) => 
 }));
 vendorRouter.post('/', ...write, asyncHandler(async (req, res) => ok(res, await svc.createVendor(svc.vendorBody.parse(req.body), actorOf(req)), undefined, 201)));
 // Zoho vendors: read live from Zoho Books (only vendors that got a cost are stored). Not registered vendors; "Register" is a separate step.
-vendorRouter.get('/zoho-directory', ...read, asyncHandler(async (req, res) => { const r = await listZohoVendors(zohoVendorListQuery.parse(req.query)); ok(res, r.items, r.meta); }));
+vendorRouter.get('/zoho-directory/cities', ...read, asyncHandler(async (_req, res) => ok(res, await zohoVendorCities())));
+vendorRouter.post('/zoho-directory/cities/sync', ...read, asyncHandler(async (_req, res) => ok(res, startZohoCitySync())));
+vendorRouter.get('/zoho-directory',...read, asyncHandler(async (req, res) => { const r = await listZohoVendors(zohoVendorListQuery.parse(req.query)); ok(res, r.items, r.meta); }));
 vendorRouter.get('/zoho-directory/export', ...read, asyncHandler(async (req, res) => download(res, await exportZohoVendors(zohoExportQuery.parse(req.query)), 'zoho-vendors')));
 vendorRouter.get('/zoho-directory/status', ...read, asyncHandler(async (req, res) => ok(res, await zohoVendorStatus(req.query.signageOnly === 'true' || req.query.signageOnly === 'false' ? req.query.signageOnly : undefined, req.query.count === 'true'))));
 // Vendor price management: price per shop of one Zoho vendor (typed in the list).

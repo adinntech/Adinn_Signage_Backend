@@ -151,7 +151,9 @@ async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: s
   // Already answered: the first clear answer stands. A later mail is only logged, so nobody is surprised by a changed cost.
   // Already answered: a clear answer in a NEWER mail than the one that decided (a corrected reply: "sorry, not approved") changes it; the history keeps both.
   if (a.status !== 'PENDING') {
-    const decided = findDecision(fresh);
+    const found = findDecision(fresh);
+    if (found === 'HOLD') { await log(`On hold (mail said wait), kept as ${a.status}`); return 'saved'; }
+    const decided = found;
     const base = a.decidedBy?.includes('(manual)') ? a.decidedAt : (a.reply?.receivedAt ?? a.decidedAt);
     if (!decided) { await log(`Not clear, kept as ${a.status}`); return 'saved'; }
     if (decided === a.status) { await log(`Same answer again (${a.status})`); return 'duplicate'; }
@@ -161,6 +163,12 @@ async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: s
     return changed ? 'confirmed' : 'duplicate';
   }
   const decision = findDecision(fresh);
+  if (decision === 'HOLD') {
+    // Hold / wait / stop: not decided, the request stays "Waiting for approval" until a clear yes or no comes.
+    await VendorRateApproval.updateOne({ _id: a._id }, { $set: { reply } });
+    await log('On hold, waiting for the final answer');
+    return 'saved';
+  }
   if (!decision) {
     // Neither a clear yes nor a clear no: kept for a person, still waiting; a later clear reply decides.
     await VendorRateApproval.updateOne({ _id: a._id }, { $set: { reply } });

@@ -105,21 +105,26 @@ export const snippetOf = (text: string, max = 300) => plain(text).replace(/\s+/g
 export type Decision = 'APPROVED' | 'NOT_APPROVED';
 // Strong words decide on their own. Weak words ("proceed", "go ahead", "fine") only count when no strong word is present, so
 // "Not approved, proceed with the company rate" is still a no.
-const NO_STRONG = /\b(not\s+approved|not\s+approve|disapproved?|un-?approved|reject(?:ed|s)?|declined?|denied|deny|refused?|not\s+allowed|not\s+ok(?:ay)?|not\s+agreed|cancel(?:led)?|do\s+not\s+approve|don'?t\s+approve|no\s+approval|not\s+accepted|not\s+(?:possible|acceptable|given|permitted)|(?:did\s+not|didn'?t|does\s+not|doesn'?t|will\s+not|won'?t|cannot|can'?t|never|not|unable\s+to)\s+(?:\w+\s+)?(?:approv|accept|agree|allow|sanction|grant|permit|authori[sz])\w*)\b/;
-const NO_WEAK = /(?:\b(?:do\s+not\s+proceed|don'?t\s+proceed|hold\s+on|on\s+hold|not\s+now|no\s+need)\b|^\s*(?:no|nope|nah)\b)/;
+const NO_STRONG = /\b(not\s+approved|not\s+approve|disapproved?|un-?approved|reject(?:ed|s)?|declined?|denied|deny|refused?|not\s+allowed|not\s+ok(?:ay)?|not\s+agreed|cancel(?:led)?|do\s+not\s+approve|don'?t\s+approve|no\s+approval|not\s+accepted|not\s+(?:yet\s+)?(?:done|fine|good|sure|allowed|finali[sz]ed|confirmed|alright|ready|cleared|sorted|moved|processed|updated|released|completed|passed)|not\s+(?:possible|acceptable|given|permitted)|(?:did\s+not|didn'?t|does\s+not|doesn'?t|will\s+not|won'?t|cannot|can'?t|never|not|unable\s+to)\s+(?:\w+\s+)?(?:approv|accept|agree|allow|sanction|grant|permit|authori[sz])\w*)\b/;
+const NO_WEAK = /(?:\b(?:do\s+not\s+proceed|don'?t\s+proceed|no\s+need)\b|^\s*(?:no|nope|nah)\b)/;
+// NO_STRONG also holds the negated yes words ("Not done", "not yet fine", "not finalised"): "Done" alone is a yes, "Not done" is a no.
+// Hold words: neither yes nor no, the request keeps waiting (status stays "Waiting for approval").
+const HOLD = /(?:\b(?:hold|on\s+hold|holding|wait|waiting|stop|stopped|pause[d]?|pending|postpone[d]?|defer(?:red)?|not\s+now|later|under\s+review|revert\s+back)\b|^\s*not\s+yet\W*$)/;
 const YES_STRONG = /\b(approved|approve|accepted|accept|agreed|confirmed|ok|okay|sanctioned|granted)\b/;
-const YES_WEAK = /\b(proceed|go\s+ahead|fine|sure|done|yes|alright|good\s+to\s+go|allowed)\b/;
+const YES_WEAK = /\b(proceed|go\s+ahead|fine|sure|done|yes|alright|good\s+to\s+go|allowed|moved|processed|updated|released|completed|passed|cleared|sorted|finali[sz]ed)\b/;
 /**
  * The answer to an amount approval request ("Approved", "OK, proceed", "approved after some time", "Rejected", "Not approved"...).
  * "Not approved" contains the word approved, so negatives are cut out first. A strong yes and a strong no together, or no
  * decision word at all, is left for a person (null).
  */
-export function findDecision(text: string): Decision | null {
+export function findDecision(text: string): Decision | 'HOLD' | null {
   // A question ("Are you sure? Do you want to approve?") is not an answer, so sentences ending in ? are left out.
   const t = text.toLowerCase().replace(/[^.\n]*\?/g, ' ').replace(/\s+/g, ' ');
   const noS = NO_STRONG.test(t);
   const yesS = YES_STRONG.test(t.replace(new RegExp(NO_STRONG.source, 'g'), ' '));
   if (noS && yesS) return null;
+  // Hold / wait / stop alone puts the request on hold. Mixed with a clear yes or no it is contradictory: a person decides.
+  if (HOLD.test(t)) return noS || yesS ? null : 'HOLD';
   if (noS) return 'NOT_APPROVED';
   if (yesS) return NO_WEAK.test(t) ? null : 'APPROVED';
   const noW = NO_WEAK.test(t);

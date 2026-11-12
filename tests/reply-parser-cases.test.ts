@@ -46,6 +46,8 @@ describe('the approver\'s answer, in many ways', () => {
     // Real replies: a negative word makes it a no, even when the approval word comes in another form ("granted", "permitted").
     ['Sorry sorry Not Granted. On Wed, Nov 11, 2026 at 6:32 PM Karthiyayini T G wrote:', 'NOT_APPROVED'], ['Not granted', 'NOT_APPROVED'], ['Not yet granted', 'NOT_APPROVED'],
     ['Cannot be permitted', 'NOT_APPROVED'], ['Not possible', 'NOT_APPROVED'], ['Unable to approve this rate', 'NOT_APPROVED'], ['Not sanctioned', 'NOT_APPROVED'],
+    ['Not done', 'NOT_APPROVED'], ['Not Done.', 'NOT_APPROVED'], ['Not yet finalised', 'NOT_APPROVED'], ['Done', 'APPROVED'], ['Moved.', 'APPROVED'], ['Moved', 'APPROVED'], ['Not moved', 'NOT_APPROVED'], ['Not yet moved.', 'NOT_APPROVED'], ['Updated', 'APPROVED'], ['Not updated', 'NOT_APPROVED'],
+    ['Hold', 'HOLD'], ['Please wait', 'HOLD'], ['Stop', 'HOLD'], ['On hold for now', 'HOLD'], ['Not now', 'HOLD'], ['Not yet', 'HOLD'], ['Pending, will update later', 'HOLD'],
     ['No', 'NOT_APPROVED'], ['No. Use the company rate', 'NOT_APPROVED'], ['Granted', 'APPROVED'], ['Approved. Nobody objects', 'APPROVED'],
   ])('%j -> %s', (text, d) => expect(findDecision(text)).toBe(d));
 

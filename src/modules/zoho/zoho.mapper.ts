@@ -13,6 +13,7 @@ export interface ZohoContact {
   status?: string;
   industry_type?: string;
   billing_address?: { address?: string; street2?: string; city?: string; state?: string; zip?: string };
+  shipping_address?: { address?: string; street2?: string; city?: string; state?: string; zip?: string };
   contact_persons?: { first_name?: string; last_name?: string; email?: string; phone?: string; mobile?: string; designation?: string; is_primary_contact?: boolean }[];
 }
 
@@ -89,6 +90,9 @@ export function toZohoVendorDetail(z: ZohoContact & { created_by_name?: string }
   return {
     city: clean(b.city, 80),
     address: clean([b.address, b.street2, b.city, b.state, b.zip].filter(Boolean).join(', '), 300),
+    state: clean(b.state, 80),
+    /** Every address Zoho has for the vendor (billing, shipping), kept as separate parts. */
+    addresses: ([['billing', z.billing_address], ['shipping', z.shipping_address]] as const).flatMap(([type, a]) => (a && (a.address || a.street2 || a.city || a.state || a.zip) ? [{ kind: type, address: clean(a.address, 200) ?? null, street2: clean(a.street2, 200) ?? null, city: clean(a.city, 80) ?? null, state: clean(a.state, 80) ?? null, zip: clean(a.zip, 12) ?? null }] : [])),
     createdByName: clean(z.created_by_name, 120),
   };
 }
