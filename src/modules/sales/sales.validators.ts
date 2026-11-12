@@ -36,7 +36,8 @@ export const recceAssignBody = z
     assigneeId: objectId,
     startDate: day,
     targetDate: day,
-    district: z.string().trim().min(2, 'Enter the district / location').max(120),
+    // Optional: no longer asked in the Assign to Recce step (older clients may still send it).
+    district: z.string().trim().max(120).optional().or(z.literal('').transform(() => undefined)),
     priority: z.enum(PRIORITIES).default('MEDIUM'),
     note: z.string().trim().max(2000).optional().or(z.literal('').transform(() => undefined)),
   })

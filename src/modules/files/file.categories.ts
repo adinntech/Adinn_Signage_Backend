@@ -163,13 +163,19 @@ export interface KeyInput {
   now?: Date;
   /** Injectable for deterministic tests. */
   random?: string;
+  /** Orders created by Client Servicing (Create Project): their `BD/Sales/` files go under `Client_Service/Create_Project/`. */
+  csCreated?: boolean;
 }
+
+const BD_SALES_ROOT = 'BD/Sales/';
+const CS_SALES_ROOT = 'Client_Service/Create_Project/';
 
 /** e.g. BD/Client_Details/AMUL/SGN-AMUL-2026-001/20261019-101530_k3j9x2_shop-list.xlsx */
 export function buildFileKey(i: KeyInput): string {
   const ext = path.extname(i.originalName).toLowerCase();
   const base = safeSegment(path.basename(i.originalName, path.extname(i.originalName)), 'file', 80);
   const rand = i.random ?? Math.random().toString(36).slice(2, 8).padEnd(6, '0');
-  const folder = CATEGORY_RULES[i.category].folder(safeSegment(i.clientName, 'Client'), safeSegment(i.projectCode, 'Project'));
+  const ruleFolder = CATEGORY_RULES[i.category].folder(safeSegment(i.clientName, 'Client'), safeSegment(i.projectCode, 'Project'));
+  const folder = i.csCreated && ruleFolder.startsWith(BD_SALES_ROOT) ? CS_SALES_ROOT + ruleFolder.slice(BD_SALES_ROOT.length) : ruleFolder;
   return `${folder}/${stamp(i.now ?? new Date())}_${rand}_${base}${ext}`;
 }
