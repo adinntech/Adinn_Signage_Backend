@@ -7,6 +7,7 @@ import { csQuotationBody, quotationBody } from '../ratecards/ratecard.validators
 import * as quotation from '../ratecards/quotation.service';
 import * as approval from './approval.service';
 import * as handover from './handover.service';
+import * as shopVersions from './shopVersions';
 import * as leads from './lead.service';
 import * as onboard from './onboarding.service';
 import * as recce from './recce.service';
@@ -135,6 +136,18 @@ export const exportShops = asyncHandler(async (req, res) => {
   const pdf = req.query.format === 'pdf';
   const f = pdf ? await handover.exportShopsPdf(id(req)) : await handover.exportShops(id(req));
   res.setHeader('Content-Type', pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(f.buffer);
+});
+/* Shop list version history (current assign type). */
+const versionNo = (req: Request) => z.coerce.number().int().min(1).max(100000).parse(req.params.version);
+export const shopVersionList = asyncHandler(async (req, res) => ok(res, await handover.shopVersions(id(req), actorOf(req))));
+export const shopVersion = asyncHandler(async (req, res) => ok(res, await shopVersions.getShopVersion(id(req), versionNo(req))));
+export const shopVersionCompare = asyncHandler(async (req, res) => ok(res, await shopVersions.compareShopVersion(id(req), versionNo(req))));
+export const shopVersionExport = asyncHandler(async (req, res) => {
+  const f = await shopVersions.exportShopVersion(id(req), versionNo(req));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
   res.setHeader('Cache-Control', 'no-store');
   res.send(f.buffer);

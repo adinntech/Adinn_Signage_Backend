@@ -16,6 +16,7 @@ import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type AssignRoute, type HandoverType } from './sales.model';
 import { renderShopListPdf } from './shop-list.pdf';
+import { ensureBaselineVersion, listShopVersions, recordShopVersion, type VersionKind, type VersionTable } from './shopVersions';
 
 /** Client Servicing only sees orders handed to them; everyone else with sales access sees all. */
 export const isCs = (actor: Actor) => actor.role === 'CLIENT_SERVICING';
@@ -436,6 +437,93 @@ async function findRow(orderId: Types.ObjectId, rowId: string) {
 
 type ShopRowBody = ShopRowInput & { extra?: Extra | undefined; cells?: Record<string, string> | undefined };
 
+/* ------------------------- version history (snapshots of the whole table) ------------------------- */
+
+type TableDoc = { handoverType?: string | null; handoverShopsArray?: unknown[] | null; shopColumns?: unknown; shopList?: { fileName?: string | null } | null };
+const text = (v: unknown) => (v == null ? '' : String(v));
+/**
+ * The shop table as shown (for a version): the uploaded columns in sheet order with their cells, or the shop fields of
+ * older tables; Shop + Measurement without its own size column adds the app Size. Rows keep their order and Row ID.
+ */
+function shopTableOf(o: TableDoc): VersionTable {
+  const rows = (o.handoverShopsArray ?? []) as Record<string, any>[];
+  const sized = o.handoverType === 'SHOP_MEASUREMENT';
+  const size = (r: Record<string, any>) => (r.width && r.height ? `${r.width} x ${r.height}${r.unit ? ` ${r.unit}` : ''}` : '');
+  const columns = columnsOf(o);
+  let cols: { id: string; header: string; get: (r: Record<string, any>) => unknown }[];
+  if (columns) {
+    cols = columns.map((c, i) => ({ id: c.id, header: c.header.trim() || `Column ${i + 1}`, get: (r) => r.cells?.[c.id] }));
+    if (sized && !hasSizeColumn(columns)) cols.push({ id: 'app:size', header: 'Size (W x H)', get: size });
+  } else {
+    const f = (id: string, header: string, get: (r: Record<string, any>) => unknown) => ({ id: `f:${id}`, header, get });
+    cols = [
+      f('shopName', 'Shop Name', (r) => r.shopName),
+      f('dealerName', 'Dealer Name', (r) => r.dealerName),
+      f('location', 'Location', (r) => r.location),
+      f('district', 'District', (r) => r.district),
+      f('address1', 'Address 1', (r) => r.address1),
+      f('address2', 'Address 2', (r) => r.address2),
+      f('address3', 'Address 3', (r) => r.address3),
+      f('pincode', 'Pincode', (r) => r.pincode),
+      f('mobile', 'Mobile', (r) => [r.mobile, r.mobileAlt].filter(Boolean).join(' / ')),
+      f('gstin', 'GST No', (r) => r.gstin),
+      f('contactPerson', 'Contact Person', (r) => r.contactPerson),
+      ...(sized ? [f('size', 'Size (W x H)', size)] : []),
+      f('boardType', 'Board Type', (r) => r.boardType),
+      f('quantity', 'Qty', (r) => r.quantity),
+      f('remarks', 'Remarks', (r) => r.remarks),
+      f('clientSiteCode', 'Client Site Code', (r) => r.clientSiteCode),
+      ...[...new Set(rows.flatMap((r) => Object.keys(r.extra ?? {})))].map((k) => ({ id: `x:${k}`, header: k, get: (r: Record<string, any>) => r.extra?.[k] })),
+    ];
+  }
+  return {
+    columns: cols.map(({ id, header }) => ({ id, header })),
+    rows: rows.map((r, i) => ({
+      rowId: text(r.rowId) || `row-${r.rowNumber ?? i + 1}`,
+      cells: Object.fromEntries(cols.map((c) => [c.id, text(c.get(r))]).filter(([, v]) => v.trim() !== '')),
+    })),
+  };
+}
+
+const TABLE_FIELDS = 'handoverType handoverShopsArray shopColumns shopList';
+/** Before a change: an order with shop data but no versions yet keeps that data as V1 ("Existing data"). */
+async function baselineVersion(o: { _id: Types.ObjectId; handoverType?: string | null }, actor: Actor) {
+  if (!isShopType(o.handoverType)) return;
+  try {
+    await ensureBaselineVersion({
+      orderId: o._id,
+      type: o.handoverType!,
+      actor,
+      load: async () => {
+        const doc = (await SalesOrder.findById(o._id).select(TABLE_FIELDS).lean()) as TableDoc | null;
+        return doc ? { table: shopTableOf(doc), fileName: doc.shopList?.fileName ?? null } : null;
+      },
+    });
+  } catch (e) {
+    console.error('shop list baseline version failed', { orderId: String(o._id) }, e);
+  }
+}
+/**
+ * After a successful change: the table as saved becomes the next version (none when it equals the latest). The
+ * change itself is already saved; a failure here is logged and never undoes or fails it.
+ */
+async function saveVersion(orderId: Types.ObjectId, actor: Actor, kind: VersionKind, fileName?: string | null) {
+  try {
+    const doc = (await SalesOrder.findById(orderId).select(TABLE_FIELDS).lean()) as TableDoc | null;
+    if (!doc || !isShopType(doc.handoverType)) return;
+    await recordShopVersion({ orderId, type: doc.handoverType!, table: shopTableOf(doc), kind, fileName: fileName !== undefined ? fileName : (doc.shopList?.fileName ?? null), actor });
+  } catch (e) {
+    console.error('shop list version save failed', { orderId: String(orderId), kind }, e);
+  }
+}
+
+/** Versions of the current type; an order with shop data from before version history gets its V1 first. */
+export async function shopVersions(id: string, actor: Actor) {
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverType').lean();
+  if (o) await baselineVersion(o, actor);
+  return listShopVersions(id);
+}
+
 /* ------------------------- imported columns (the sheet as uploaded) ------------------------- */
 
 /** One column of the uploaded Excel: stable id, original header text (may be blank or repeated), and the shop field it feeds internally. */
@@ -503,6 +591,7 @@ export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) 
   if (columns && !Object.keys(cells!).length && !MEASURE_FIELDS.some((f) => values[f])) throw new AppError(422, 'VALIDATION_ERROR', 'Fill at least one cell', [{ path: 'cells', message: 'Fill at least one cell' }]);
   await handoverRoute(o);
   await ensureRowIds(o._id);
+  await baselineVersion(o, actor);
   const c = columns ? deriveRow(cells!, columns, o.handoverType, values) : cleanRow(values, o.handoverType);
   const last = await SalesOrder.findById(o._id).select('handoverShopsArray.rowNumber').lean();
   const rowNumber = Math.max(0, ...(last?.handoverShopsArray ?? []).map((r) => r.rowNumber ?? 0)) + 1;
@@ -516,6 +605,7 @@ export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) 
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'ADD');
   return row;
 }
 
@@ -558,11 +648,13 @@ export async function updateShopRow(id: string, rowId: string, values: ShopRowBo
     });
   }
   await handoverRoute(o);
+  await baselineVersion(o, actor);
   Object.assign(set, { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id });
   for (const f of SHOP_FIELDS) set[`handoverShopsArray.$.${f}`] = c.fields[f];
   const r = await SalesOrder.updateOne({ ...openFilter(o, actor), 'handoverShopsArray.rowId': rowId }, { $set: set, $push: { handoverShopLogs: log } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'EDIT');
   return findRow(o._id, rowId);
 }
 
@@ -572,6 +664,7 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   assertEditable(o, actor);
   await handoverRoute(o);
   const before = await findRow(o._id, rowId);
+  await baselineVersion(o, actor);
   const columns = columnsOf(o);
   const log = columns
     ? shopLog(actor, 'DELETE', rowId, { before: measureOf(before), cells: cellChanges(columns, cleanCells(before.cells as Cells | undefined, columns), null), label: labelOf(before, columns) })
@@ -584,6 +677,7 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   for (const f of (before.attachments ?? []) as StoredFile[]) await eraseStoredFile(f, actor, ownerOf(o._id));
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'DELETE');
   return { rowId, deleted: true };
 }
 
@@ -838,6 +932,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   assertEditable(o, actor);
   assertShopType(o);
   await ensureRowIds(o._id);
+  await baselineVersion(o, actor);
 
   const parsed = resolveImport(await readGrids(file.buffer, file.originalname), opts, o.handoverType);
   const doc = await SalesOrder.findById(o._id).select('handoverShopsArray shopColumns shopList.fileHash').lean();
@@ -948,6 +1043,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     throw AppError.conflict('The shop list changed meanwhile (or the order was handed over). Reload and upload again.');
   }
   await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${source}: ${added.length} rows added, ${updates.size} updated` });
+  await saveVersion(o._id, actor, 'UPLOAD', shopList.fileName);
   return {
     ...(await getHandover(id)),
     imported: {
@@ -969,12 +1065,15 @@ export async function removeShopList(id: string, actor: Actor) {
   const doc = await SalesOrder.findById(o._id).select('handoverShopsArray').lean();
   const count = doc?.handoverShopsArray?.length ?? 0;
   const oldRowFiles = await rowFiles(o._id);
+  await baselineVersion(o, actor);
   const r = await SalesOrder.updateOne(openFilter(o, actor), {
     $set: { handoverShopsArray: [], shopColumns: null, shopList: null, declaredShopTotal: null, updatedBy: actor.id },
     $push: { handoverShopLogs: shopLog(actor, 'CLEAR', null, { note: `${count} row${count === 1 ? '' : 's'} cleared` }) },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   for (const f of oldRowFiles) await eraseStoredFile(f, actor, ownerOf(o._id));
+  // Clear All: an empty version (previous versions stay).
+  if (count) await saveVersion(o._id, actor, 'CLEAR', null);
   return getHandover(id);
 }
 

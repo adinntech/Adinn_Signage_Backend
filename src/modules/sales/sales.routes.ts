@@ -76,6 +76,11 @@ salesRouter.post('/orders/:id/handover/shop-rows', csFlow, c.addShopRow);
 salesRouter.put('/orders/:id/handover/shop-rows/:rowId', csFlow, c.updateShopRow);
 salesRouter.delete('/orders/:id/handover/shop-rows/:rowId', csFlow, c.deleteShopRow);
 salesRouter.get('/orders/:id/handover/shop-history', read, c.shopHistory);
+// Shop list version history (V1, V2...): list, one version, compare with the version before, Excel of a version
+salesRouter.get('/orders/:id/handover/shop-versions', read, c.shopVersionList);
+salesRouter.get('/orders/:id/handover/shop-versions/:version', read, c.shopVersion);
+salesRouter.get('/orders/:id/handover/shop-versions/:version/compare', read, c.shopVersionCompare);
+salesRouter.get('/orders/:id/handover/shop-versions/:version/export', read, c.shopVersionExport);
 salesRouter.post('/orders/:id/handover/shop-rows/:rowId/files', csFlow, receive, c.addShopFiles);
 salesRouter.delete('/orders/:id/handover/shop-rows/:rowId/files/:fileId', csFlow, c.removeShopFile);
 // Communication & attachments (chat): text, files and voice notes
