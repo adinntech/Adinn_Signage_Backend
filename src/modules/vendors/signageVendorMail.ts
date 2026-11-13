@@ -79,14 +79,17 @@ export function buildSignageVendorPayload(m: SignageVendorMail): Record<string, 
 export const INLINE_BYTES = 400 * 1024;
 const PIECE_BYTES = 512 * 1024;
 
-/** Sends every file to the PHP API in pieces (action "stage") and returns the attachment list that refers to them. */
-async function stageAttachments(files: SignageVendorMail['attachments']) {
+/**
+ * Sends every file to the PHP API in pieces (action "stage") and returns the attachment list that refers to them.
+ * `post`: how one piece is sent (the vendor mail's poster by default; the project code request passes its own API call).
+ */
+export async function stageAttachments(files: SignageVendorMail['attachments'], post: (payload: Record<string, unknown>) => Promise<unknown> = postSignageMail) {
   const out: Record<string, unknown>[] = [];
   for (const a of files) {
     const uploadId = randomBytes(16).toString('hex');
     const total = Math.max(1, Math.ceil(a.content.length / PIECE_BYTES));
     for (let i = 0; i < total; i++) {
-      await postSignageMail({ action: 'stage', uploadId, index: i, total, base64: a.content.subarray(i * PIECE_BYTES, (i + 1) * PIECE_BYTES).toString('base64') });
+      await post({ action: 'stage', uploadId, index: i, total, base64: a.content.subarray(i * PIECE_BYTES, (i + 1) * PIECE_BYTES).toString('base64') });
     }
     out.push({ filename: safeFileName(a.filename), size: a.content.length, uploadId, chunks: total, ...(a.label ? { label: a.label } : {}) });
   }

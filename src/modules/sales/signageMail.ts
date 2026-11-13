@@ -1,7 +1,7 @@
 import { env } from '../../config/env';
 import { readStoredFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
-import { explainSignageError, signageAttachmentProblem } from '../vendors/signageVendorMail';
+import { explainSignageError, INLINE_BYTES, signageAttachmentProblem, stageAttachments } from '../vendors/signageVendorMail';
 
 /** The project code request email goes through the signage email API when its URL and key are set. */
 export const signageMailAvailable = () => env.signageProjectMailEnabled;
@@ -9,6 +9,8 @@ export const signageMailAvailable = () => env.signageProjectMailEnabled;
 export interface SignageMail {
   to: string[];
   cc: string[];
+  /** Blind copies: sent as `bccEmail` (like the vendor registration mail), never shown to the other recipients. */
+  bcc?: string[] | undefined;
   subject: string;
   requestId: string;
   /** Plain text of the edited message (the API's `message`); the HTML goes in `messageHtml`. */
@@ -72,6 +74,7 @@ export function signagePayload(m: SignageMail) {
     mailtype: 'project',
     toEmail: m.to,
     ccEmail: m.cc,
+    ...(m.bcc?.length ? { bccEmail: m.bcc } : {}),
     subject: m.subject,
     requestId: m.requestId,
     requestDate: requestDateIst(),
@@ -95,36 +98,60 @@ type Reply = { success?: boolean | string; status?: string | boolean | number; m
  */
 export async function sendViaSignageMail(m: SignageMail): Promise<string> {
   if (!env.SIGNAGE_MAIL_API_URL || !env.SIGNAGE_MAIL_API_KEY) throw new Error('The signage email API is not configured (SIGNAGE_MAIL_API_URL / SIGNAGE_MAIL_API_KEY)');
-  // Same attachment format as the vendor registration mail: the real files (filename, size, base64), within the same limits.
+  const url = env.SIGNAGE_MAIL_API_URL;
+  const key = env.SIGNAGE_MAIL_API_KEY;
+  // The real files, within the same limits as the vendor registration mail.
   const files = await Promise.all(m.attachments.map((a) => readStoredFile(a)));
   const problem = signageAttachmentProblem(files.map((f) => ({ name: f.name, size: f.content.length })));
   if (problem) throw new Error(problem);
   const payload = signagePayload(m);
-  const wire = { ...payload, attachments: payload.attachments.map((a, i) => ({ ...a, filename: a.name, base64: files[i]!.content.toString('base64') })) };
   const explain = (message: string) => explainSignageError(message, { attachments: payload.attachments.map((a, i) => ({ filename: a.name, content: files[i]!.content })) });
-  let res: Response;
-  try {
-    res = await fetch(env.SIGNAGE_MAIL_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-API-Key': env.SIGNAGE_MAIL_API_KEY },
-      body: JSON.stringify(wire),
-      signal: AbortSignal.timeout(60_000),
-    });
-  } catch (e) {
-    throw new Error(`The signage email API could not be reached: ${e instanceof Error ? e.message : 'network error'}`);
-  }
-  const raw = (await res.text()).slice(0, 2000);
-  let body: Reply | null;
-  try {
-    body = JSON.parse(raw) as Reply;
-  } catch {
-    body = null;
-  }
-  const flag = (v: unknown) => v === true || v === 1 || (typeof v === 'string' && /^(true|1|ok|success|sent)$/i.test(v.trim()));
-  const accepted = res.ok && !!body && (flag(body.success) || flag(body.status));
-  if (!accepted) {
-    const why = body?.message ?? body?.error ?? (raw || `HTTP ${res.status}`);
-    throw new Error(explain(`The signage email API did not confirm the email (HTTP ${res.status}): ${String(why).slice(0, 400)}`));
-  }
-  return raw;
+
+  /** One POST to the signage email API; resolves with the reply text only when the API confirms it (success flag). */
+  const post = async (body: Record<string, unknown>, what: string) => {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-API-Key': key },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (e) {
+      throw new Error(`The signage email API could not be reached: ${e instanceof Error ? e.message : 'network error'}`);
+    }
+    const raw = (await res.text()).slice(0, 2000);
+    let reply: Reply | null;
+    try {
+      reply = JSON.parse(raw) as Reply;
+    } catch {
+      reply = null;
+    }
+    const flag = (v: unknown) => v === true || v === 1 || (typeof v === 'string' && /^(true|1|ok|success|sent)$/i.test(v.trim()));
+    if (!(res.ok && !!reply && (flag(reply.success) || flag(reply.status)))) {
+      const why = reply?.message ?? reply?.error ?? (raw || `HTTP ${res.status}`);
+      throw new Error(explain(`The signage email API did not confirm ${what} (HTTP ${res.status}): ${String(why).slice(0, 400)}`));
+    }
+    return raw;
+  };
+
+  // Like the vendor registration mail: small mails carry the files inline (base64); bigger ones send each file first
+  // in pieces (action "stage") and the mail then refers to them (uploadId + chunks), so a web server in front of the
+  // PHP API that takes about 1 MB per request never cuts the attachments off.
+  const totalBytes = files.reduce((n, f) => n + f.content.length, 0);
+  const staged =
+    totalBytes > INLINE_BYTES
+      ? await stageAttachments(
+          payload.attachments.map((a, i) => ({ filename: a.name, content: files[i]!.content })),
+          (piece) => post(piece, 'an attachment piece'),
+        )
+      : null;
+  const wire = {
+    ...payload,
+    attachments: payload.attachments.map((a, i) => {
+      const ref = staged?.[i] as { uploadId?: string; chunks?: number } | undefined;
+      return ref ? { ...a, filename: a.name, uploadId: ref.uploadId, chunks: ref.chunks } : { ...a, filename: a.name, base64: files[i]!.content.toString('base64') };
+    }),
+  };
+  return post(wire, 'the email');
 }

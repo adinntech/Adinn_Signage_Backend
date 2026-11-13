@@ -232,6 +232,8 @@ const emailList = z
 export const sendEmailBody = z.object({
   to: emailList.refine((l) => l.length > 0, 'Enter at least one recipient'),
   cc: emailList.default([]),
+  /** Blind copies (Project Code Request Email): never shown to the To / CC recipients. */
+  bcc: emailList.default([]),
   subject: z.string().trim().min(1, 'Enter the email subject').max(250),
   body: z.string().trim().min(1, 'Enter the email content').max(20000),
   requestKey,

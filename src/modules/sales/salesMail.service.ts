@@ -133,6 +133,7 @@ async function deliverOnce(rec: DeliverInput) {
         apiResponse = await sendViaSignageMail({
           to: rec.to,
           cc: rec.cc,
+          bcc: rec.bcc ?? [],
           subject: rec.subject,
           requestId: requestId!,
           text: htmlToText(rec.body),
@@ -173,6 +174,7 @@ async function deliverOnce(rec: DeliverInput) {
     from: rec.from ?? env.MAIL_FROM ?? '',
     to: rec.to,
     cc: rec.cc,
+    ...(rec.bcc?.length ? { bcc: rec.bcc } : {}),
     subject: rec.subject,
     body: rec.body,
     attachments: rec.attachments,
@@ -253,13 +255,53 @@ export async function sendRateCard(orderId: string, input: z.infer<typeof sendEm
   });
 }
 
+export type AttachmentCategory = 'RATE_CARD' | 'SHOP_LIST' | 'SO_DOCUMENT' | 'COMMUNICATION' | 'GST_CERTIFICATE' | 'ADDED';
+/**
+ * What each file of a project code request email was (from the order's own records, matched by file id), and whether
+ * its stored file can still be opened (metadata without a storage location = unavailable). Read-only: the sent email
+ * record is not changed.
+ */
+async function attachmentInfo(orderId: string) {
+  const o = await SalesOrder.findById(orderId)
+    .select('rateCardArray.pdf.fileId handoverDocumentsArray.kind handoverDocumentsArray.file.fileId handoverMessagesArray.attachments.fileId')
+    .lean();
+  const ids = (list: unknown[]) => new Set(list.filter(Boolean).map((x) => String(x)));
+  const rateCards = ids((o?.rateCardArray ?? []).map((r) => (r as { pdf?: { fileId?: unknown } }).pdf?.fileId));
+  const soDocs = ids((o?.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SO_DOCUMENT').map((d) => (d.file as { fileId?: unknown } | null)?.fileId));
+  const chat = ids((o?.handoverMessagesArray ?? []).flatMap((m) => ((m as { attachments?: { fileId?: unknown }[] }).attachments ?? []).map((a) => a.fileId)));
+  return (a: { fileId?: unknown; name?: string | null; key?: string | null; storage?: string | null }, gst: Set<string>): { category: AttachmentCategory; available: boolean } => {
+    const id = String(a.fileId);
+    const category: AttachmentCategory = rateCards.has(id)
+      ? 'RATE_CARD'
+      : soDocs.has(id)
+        ? 'SO_DOCUMENT'
+        : chat.has(id)
+          ? 'COMMUNICATION'
+          : gst.has(id)
+            ? 'GST_CERTIFICATE'
+            : /_shop_list\.xlsx$/i.test(a.name ?? '')
+              ? 'SHOP_LIST'
+              : 'ADDED';
+    return { category, available: !!a.key && !!a.storage };
+  };
+}
+
 export async function listEmails(orderId: string, kind?: Kind) {
   const o = await orderArray(orderId, 'salesprofile', ['sentBy']);
-  return (o.salesprofile ?? [])
+  const list = (o.salesprofile ?? [])
     .filter((e) => !kind || e.kind === kind)
     .sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0) || (String(b._id) > String(a._id) ? 1 : -1))
     .slice(0, 200)
     .map((r) => ({ ...r, revisionLabel: r.rateCardRevision ? revisionLabel(r.rateCardRevision) : null }));
+  if (!list.some((e) => e.kind === 'PROJECT_CODE_REQUEST')) return list;
+  // Project code requests: each sent file's category and availability (the attachments themselves stay as recorded).
+  const info = await attachmentInfo(orderId);
+  return list.map((e) => {
+    if (e.kind !== 'PROJECT_CODE_REQUEST') return e;
+    const p = e.apiPayload as { attachments?: { fileId?: string; docType?: string }[] } | null | undefined;
+    const gst = new Set((p?.attachments ?? []).filter((x) => x.docType === 'gst' && x.fileId).map((x) => x.fileId!));
+    return { ...e, attachmentInfo: Object.fromEntries((e.attachments ?? []).map((a) => [String(a.fileId), info(a, gst)])) };
+  });
 }
 
 /** Resend exactly the same content and attachment (the original PDF revision, not the latest). */
@@ -276,6 +318,7 @@ export async function resendEmail(emailId: string, actor: Actor) {
     kind: e.kind as Kind,
     to: e.to,
     cc: e.cc,
+    bcc: (e as { bcc?: string[] | null }).bcc ?? undefined,
     subject: e.subject ?? '',
     body: e.body ?? '',
     attachments: (e.attachments ?? []).filter((a) => a.fileId) as Attachment[],

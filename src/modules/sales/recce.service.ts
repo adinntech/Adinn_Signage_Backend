@@ -383,6 +383,10 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   const clientCode = o.recce?.clientId ?? (o.clientType === 'EXISTING' ? await zohoClientIdOf(client) : client?.zohoCustomerNo) ?? '';
   // The first email takes the Recce route (the Client Servicing route is then disabled).
   await claimRecce(o, actor);
+  // liveOrder() leaves out the activity arrays (WITHOUT_ARRAYS), which dropped the SO Additional Documents from every
+  // send: the documents that go with the email are read here, from the same fields the draft and the panel read.
+  const docSource = ((await SalesOrder.findById(o._id).select('handoverType handoverDocumentsArray handoverMessagesArray.attachments').lean()) ?? {}) as Parameters<typeof soDocuments>[0] &
+    Parameters<typeof chatDocuments>[0];
   const stored: StoredFile[] = [];
   // Signage email API: where each file comes from (first source wins, like the de-duplication below).
   const docTypes: Record<string, string> = {};
@@ -404,18 +408,42 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     const attachments = uniqueFiles([
       ...tag(rateCardPdf ? [rateCardPdf] : [], 'ratecard'),
       ...stored,
-      ...tag(chatDocuments(o.toObject()), 'communication'),
-      ...tag(soDocuments(o.toObject()), 'so'),
+      ...tag(chatDocuments(docSource), 'communication'),
+      ...tag(soDocuments(docSource), 'so'),
       ...tag(newClientCertificates(o.clientType, client), 'gst'),
     ]);
+    // Never send with fewer files than expected: a file without a stored copy stops the send, naming the file.
+    const unreadable = attachments.filter((f) => !f.fileId || !f.key || !f.storage);
+    if (unreadable.length)
+      throw new AppError(
+        422,
+        'ATTACHMENT_UNAVAILABLE',
+        `${unreadable.map((f) => f.name ?? 'A file').join(', ')} could not be attached (the stored file is missing). Remove it or upload it again, then send.`,
+        unreadable.map((f) => ({ path: 'attachments', message: `${f.name ?? 'file'} could not be attached` })),
+      );
+    // The message's Attachments list shows exactly the files that go (a draft typed earlier may list other files).
+    const notes: Record<string, string> = {
+      ratecard: included ? `Rate Card ${revisionLabel(included.revision)}` : 'Rate Card',
+      shoplist: `Shop list, ${o.shopList?.total ?? 0} shop${o.shopList?.total === 1 ? '' : 's'}${o.handoverType === 'SHOP_MEASUREMENT' ? ' (with sizes)' : ''}`,
+      so: 'SO document',
+      gst: 'GST certificate',
+    };
+    const names = safeNames(attachments);
+    const list = attachments.map((f, i) => {
+      const note = notes[docTypes[String(f.fileId)] ?? ''];
+      return `<li>${escapeHtml(names[i]!)}${note ? ` (${escapeHtml(note)})` : ''}</li>`;
+    });
+    const ATTACHMENTS_SECTION = /<h3>\s*Attachments\s*<\/h3>\s*<ul>[\s\S]*?<\/ul>/i;
+    const body = ATTACHMENTS_SECTION.test(input.body) ? input.body.replace(ATTACHMENTS_SECTION, () => (list.length ? `<h3>Attachments</h3><ul>${list.join('')}</ul>` : '')) : input.body;
     const sent = await deliver({
       order: o._id,
       client: o.client,
       kind: 'PROJECT_CODE_REQUEST',
       to: input.to,
       cc: input.cc,
+      bcc: input.bcc,
       subject: input.subject,
-      body: sanitizeHtml(input.body),
+      body: sanitizeHtml(body),
       attachments,
       rateCardRevision: included?.revision ?? undefined,
       requestKey: input.requestKey,

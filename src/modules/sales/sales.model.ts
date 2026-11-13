@@ -58,6 +58,8 @@ const emailSchema = new Schema({
   from: String,
   to: [String],
   cc: [String],
+  /** Blind copies (kept for Email History and Resend; the mail never shows them to the other recipients). */
+  bcc: { type: [String], default: undefined },
   subject: String,
   body: String,
   attachments: [fileRef],
