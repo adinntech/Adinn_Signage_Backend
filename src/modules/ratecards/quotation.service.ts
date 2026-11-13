@@ -128,6 +128,8 @@ export function quotationChanges(prev: Snapshot | null, next: Snapshot): Change[
   };
   upd('Client Address', prev.clientAddress, next.clientAddress);
   upd('Contact Person', prev.contact?.name, next.contact?.name);
+  // Compared as the 10 digits, so "+91 98765 43210" and "9876543210" are the same phone.
+  upd('Contact Phone', (prev.contact?.phone ?? '').replace(/\D/g, '').slice(-10), (next.contact?.phone ?? '').replace(/\D/g, '').slice(-10));
   upd('Quotation Date', day(prev.quotationDate), day(next.quotationDate));
   upd('Subject', prev.subject, next.subject);
   upd('Terms & Conditions', htmlToText(prev.terms ?? ''), htmlToText(next.terms ?? ''));
@@ -182,19 +184,15 @@ export async function getQuotation(orderId: string, actor: Actor) {
         terms: DEFAULT_TERMS,
         regards: { name: me?.name ?? '', designation: 'Business Development Manager', mobile: me?.phone ?? '', email: me?.email ?? '' },
       };
-  // Rate Card step with a saved version: the point of contact changed in Assign Type & Details after it was saved. The
-  // saved version is never changed; the editor offers the new contact as an unsaved change (saving makes the next
-  // version). Only when the saved contact came from the order's contacts (a name typed by hand is left alone).
+  // Rate Card step with a saved version: the point of contact changed in Assign Type & Details after it was saved
+  // (including a saved contact that was removed there). The contact is never typed in this step, so it always follows
+  // the point of contact. The saved version is never changed; the editor shows the new contact as an unsaved change
+  // (saving makes the next version).
   const norm = (s?: string | null) => (s ?? '').trim().toLowerCase();
   const digits = (s?: string | null) => (s ?? '').replace(/\D/g, '').slice(-10);
-  const known = new Set(
-    [...((order.soContacts ?? []) as { name?: string | null }[]), ...((client.contacts ?? []) as { name?: string | null }[]), ...((order.orderContacts ?? []) as { name?: string | null }[])]
-      .map((k) => norm(k.name))
-      .filter(Boolean),
-  );
   const saved = latest?.contact;
   const pocUpdate =
-    step && latest && primary?.name && (norm(saved?.name) !== norm(primary.name) || (!!digits(primary.phone) && digits(saved?.phone) !== digits(primary.phone))) && (!norm(saved?.name) || known.has(norm(saved?.name)))
+    step && latest && primary?.name && (norm(saved?.name) !== norm(primary.name) || digits(saved?.phone) !== digits(primary.phone))
       ? { name: primary.name, phone: digits(primary.phone), previousName: saved?.name ?? '', previousPhone: digits(saved?.phone) }
       : null;
   return {
@@ -281,6 +279,16 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
   if (locked) throw AppError.conflict(locked);
 
   const latest = await latestRevision(orderId);
+  // Rate Card step: Bill To and the contact person / phone are not typed. They are always the client's address and the
+  // order's point of contact, whatever the request carries (the editor shows the same values read-only).
+  if (order.recce?.rateCardRequired) {
+    const primary = pointOfContact(client, order);
+    input = {
+      ...input,
+      clientAddress: fullAddressOf(client) || client.city || input.clientAddress,
+      contact: primary?.name ? { ...input.contact, name: primary.name, phone: (primary.phone ?? '').replace(/\D/g, '').slice(-10) || undefined } : input.contact,
+    };
+  }
   const { next, changes } = await prepareRevision(input, latest as Snapshot | null, !!opts.autoDate);
   if (latest && !changes.length) return { saved: false, revision: { ...latest, label: revisionLabel(latest.revision) } };
 
