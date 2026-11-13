@@ -68,7 +68,7 @@ try{
  if($type==='vendor'&&clean($vendor['vendorName']??'')==='')throw new InvalidArgumentException('vendor.vendorName required');
  $data['bodyHtml']=safeHtml($data['bodyHtml']??'');
  $subject=clean($data['subject']??'');
- if($subject==='')$subject=$isAuth?'Your Signage verification code':($type==='rateapproval'?'Vendor Amount Approval - '.$requestId:($type==='vendor'?'Vendor Registration Request - '.$requestId:ucfirst($type).' Signage Code Request - '.$requestId));
+ if($subject==='')$subject=$isAuth?'Your Signage Verification Code':($type==='rateapproval'?'Vendor Rate Approval Request - '.$requestId:($type==='vendor'?'Vendor Registration Request - '.$requestId:(['combined'=>'Client and Project Code Request','client'=>'Client Code Request','project'=>'Project Code Request'][$type]??'Code Request').' - '.$requestId));
  if(strlen($subject)>200||preg_match('/[\r\n]/',$subject))throw new InvalidArgumentException('Invalid subject');
  $attachments=[];
  foreach(($data['attachments']??[]) as $a){

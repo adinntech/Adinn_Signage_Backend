@@ -78,21 +78,21 @@ async function assertRequestable(o: Doc, client: { approvedCode?: string | null 
 const row = (r: string, v: string) => `${r}: <strong>${escapeHtml(v)}</strong>`;
 
 function defaultDrafts(o: Doc, client: { name?: string | null; clientNo?: string | null; gstin?: string | null; onboarding?: { pan?: string | null } | null }, me: string) {
-  const sig = `<p>Regards,<br>${escapeHtml(me)}<br>Client Servicing</p>`;
+  const sig = `<p>Thank you,<br>${escapeHtml(me)}<br>Client Servicing</p>`;
   const clientBlock =
-    `<h3>Client Code Request</h3><p>Please create a client code for the client below.</p>` +
+    `<p>Please create a client code for the client below and reply with it as <strong>Client Code: ABC123</strong>.</p>` +
     `<p>${[row('Client', client.name ?? '-'), row('Client ID', client.clientNo ?? '-'), row('GST Number', client.gstin ?? '-'), row('PAN', client.onboarding?.pan ?? '-')].join('<br>')}</p>`;
   const projectBlock =
-    `<h3>Project Code Request</h3><p>Please create a project code for the order below.</p>` +
+    `<p>Please create a project code for the order below and reply with it as <strong>Project Code: 12345678</strong>.</p>` +
     `<p>${[row('Client', client.name ?? '-'), row('Order No', o.orderNo)].join('<br>')}</p>`;
   if (signageMailAvailable()) {
     // The PHP template prints every detail; this text only goes out as "Additional Notes".
-    const note = (what: string) => `<p>Please create the ${what} and confirm once it is done.</p>`;
+    const note = (what: string, example: string) => `<p>Kindly create the ${what} and reply to this mail with it, for example <strong>${example}</strong>.</p>`;
     const s = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
     return {
-      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code') },
-      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code') },
-      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code') },
+      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
+      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code', 'Client Code: ABC123') },
+      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code', 'Project Code: 12345678') },
     };
   }
   const subj = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;

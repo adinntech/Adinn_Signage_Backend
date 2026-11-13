@@ -79,7 +79,7 @@ describe('vendor cost above the company rate (Admin > Cost Rates: 300 near, 350 
     const res = await put({ ratePerShop: 500, farRatePerShop: 600 });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.data).toMatchObject({ ratePerShop: 280, farRatePerShop: 340, pending: { ratePerShop: 500, farRatePerShop: 600, limitRate: 300, limitFar: 350 } });
-    expect(res.body.data.pending.requestId).toMatch(/^ADN-Signage-vap-\d{8,}$/);
+    expect(res.body.data.pending.requestId).toMatch(/^Adn-Signage-VenRate-\d{8,}$/);
     const { VendorRateApproval } = await import('../src/modules/vendors/vendorRateApproval.model');
     const row = await VendorRateApproval.findOne({ requestId: res.body.data.pending.requestId }).lean();
     expect(row).toMatchObject({ status: 'PENDING', to: ['approver@t.com'], cc: ['boss@t.com'] });
@@ -182,19 +182,33 @@ describe('the approver replies', () => {
     expect(await send('Not okay', '<d@t>', 4)).toBe('duplicate'); // same answer again
   });
 
-  it('Operations can change the status by hand, both ways, and it is written in the history', async () => {
+  it('Operations can only reject by hand, only after a reply was read, with a reason kept in the history', async () => {
     const id = await ask(560, 660);
-    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'APPROVED' })).status).toBe(200);
+    const put = (body: object) => api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send(body);
+    expect((await put({ decision: 'NOT_APPROVED' })).status).toBe(409); // no reply read yet
+    const { processReply } = await import('../src/modules/mailReplies/mailReply.service');
+    await processReply({ messageId: '<m1@t>', from: ['approver@t.com'], subject: `Re: Vendor amount approval - ${id}`, text: 'Okay. Thanks', receivedAt: new Date(Date.now() + 60_000) });
     expect(await price()).toMatchObject({ ratePerShop: 560, farRatePerShop: 660 });
-    expect((await price()).approval).toMatchObject({ status: 'APPROVED', decidedBy: 'OPS (manual)' });
-    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'NOT_APPROVED' })).status).toBe(200);
+    expect((await put({ decision: 'APPROVED' })).status).toBe(422); // approval comes from the reply only
+    expect((await put({ decision: 'NOT_APPROVED', reason: 'Wrong reading of the reply' })).status).toBe(200);
     expect(await price()).toMatchObject({ ratePerShop: 300, farRatePerShop: 350 });
-    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'NOT_APPROVED' })).status).toBe(409); // already that status
-    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'MAYBE' })).status).toBe(422);
+    expect((await put({ decision: 'NOT_APPROVED' })).status).toBe(409); // already that status
     const { VendorRateApproval } = await import('../src/modules/vendors/vendorRateApproval.model');
-    expect((await VendorRateApproval.findOne({ requestId: id }).lean())!.history?.map((h) => h.outcome)).toEqual(['Status changed by OPS: PENDING to APPROVED', 'Status changed by OPS: APPROVED to NOT_APPROVED']);
+    expect((await VendorRateApproval.findOne({ requestId: id }).lean())!.history?.map((h) => h.outcome).at(-1)).toBe('Status changed by OPS: APPROVED to NOT_APPROVED. Reason: Wrong reading of the reply');
     // a newer request takes over: the older one can no longer be changed
     await ask(570, 670);
-    expect((await api().put(`/api/v1/vendors/rate-approvals/${id}/decision`).set(as('OPS')).send({ decision: 'APPROVED' })).status).toBe(409);
+    expect((await put({ decision: 'NOT_APPROVED' })).status).toBe(409);
+  });
+
+  it('the cost history lists every change (who, old and new), the requests, and the latest request with its replies', async () => {
+    const res = await api().get(`/api/v1/vendors/zoho-directory/${CONTACT}/price-history`).set(as('OPS'));
+    expect(res.status).toBe(200);
+    const { changes, requests, approval } = res.body.data;
+    expect(changes.length).toBeGreaterThan(1);
+    expect(changes.some((c: { by: string; ratePerShop: { to: number } | null }) => c.by === 'OPS' && c.ratePerShop?.to === 300)).toBe(true); // the company rate applied after the rejection
+    expect(requests.length).toBeGreaterThan(1);
+    expect(requests.find((r: { requested: { ratePerShop: number } }) => r.requested.ratePerShop === 560)).toMatchObject({ status: 'NOT_APPROVED', limit: { ratePerShop: 300 } });
+    expect(approval).toMatchObject({ status: 'PENDING', ratePerShop: 570 });
+    expect((await api().get(`/api/v1/vendors/zoho-directory/${CONTACT}/price-history`).set(as('BD'))).status).toBe(401); // no such token
   });
 });

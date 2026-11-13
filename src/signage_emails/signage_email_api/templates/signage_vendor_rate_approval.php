@@ -1,39 +1,39 @@
 <?php require_once __DIR__.'/_common.php';
-/* Vendor amount approval request. The CRM sends only the figures (vendor.*, amounts.*); the whole mail is laid out here.
+/* Vendor rate approval request. The CRM sends only the figures (vendor.*, amounts.*); the whole mail is laid out here.
    The approver answers by replying APPROVED or NOT APPROVED; the CRM reads the reply and applies the amount. */
 $v=is_array($data['vendor']??null)?$data['vendor']:[];
 $a=is_array($data['amounts']??null)?$data['amounts']:[];
 
-pageStart('Vendor Amount Approval Request','A vendor cost is above the company rate. Please reply APPROVED or NOT APPROVED.',$config);
-chips($data,'Vendor Amount Approval');
+pageStart('Vendor Rate Approval Request','The rate entered for the vendor below is above the company rate set by Admin. Please review and confirm.',$config,'tag');
+chips($data,'Rate Approval');
 
-echo '<p style="font-size:13px;line-height:1.7;color:#243857;margin:0 0 12px">Hi Team,<br>The cost below was entered for a vendor and is <strong>above the company rate</strong>. Please reply to this mail with <strong>APPROVED</strong> or <strong>NOT APPROVED</strong>.</p>';
+para('Dear Sir/Madam,');
 
+echo card('Vendor Details',rowsHtml([
+ ['','Vendor',$v['vendorName']??''],
+ ['','Vendor ID',$v['vendorNo']??''],
+ ['','Mobile',$v['mobile']??''],
+ ['','Email',$v['email']??''],
+ ['','Address',$v['address']??($v['city']??'')],
+ ['','PAN',$v['pan']??''],
+ ['','GST',$v['gstin']??''],
+ ['','Entered by',$a['requestedBy']??''],
+]),'#eef1fb','','#e4d6fb',null,'building');
 
-echo card('Vendor',rowsHtml([
- ['building','Vendor',$v['vendorName']??''],
- ['key','Vendor ID',$v['vendorNo']??''],
- ['phone','Mobile',$v['mobile']??''],
- ['mail','Email',$v['email']??''],
- ['pin','Address',$v['address']??($v['city']??'')],
- ['pan','PAN',$v['pan']??''],
- ['gst','GST',$v['gstin']??''],
- ['person','Entered by',$a['requestedBy']??''],
-]),'#f6f0ff','#7c3aed','#e4d6fb');
-
-/* Company rate (struck out) against what was requested, per price. Current is what the vendor has now. */
-if(!function_exists("amountRow")){function amountRow(string $label,$limit,$current,$requested):string{
- $cell='padding:9px 8px;border-bottom:1px solid #edf1f7;font-size:13px;';
- return '<tr><td style="'.$cell.'font-size:12px;color:#6a7890">'.esc($label).'</td>'
-  .'<td align="center" style="'.$cell.'color:#8a94a6;text-decoration:line-through">'.esc($limit).'</td>'
-  .'<td align="center" style="'.$cell.'color:#10244a">'.esc($current===''||$current===null?'-':$current).'</td>'
-  .'<td align="center" style="'.$cell.'font-weight:700;color:#c2410c;background:#fff4e6">'.esc($requested).'</td></tr>';
+/* Company rate (struck out) against what was requested. Current is what the vendor has now. */
+if(!function_exists('amountRow')){function amountRow(string $label,$limit,$current,$requested):string{
+ $cell='padding:8px 8px 8px 0;border-bottom:1px solid #f0f1f3;font-size:13px;';
+ return '<tr><td style="'.$cell.'color:'.MAIL_MUTED.'">'.esc($label).'</td>'
+  .'<td align="right" style="'.$cell.'color:#9ca3af;text-decoration:line-through">'.esc($limit).'</td>'
+  .'<td align="right" style="'.$cell.'color:'.MAIL_INK.'">'.esc($current===''||$current===null?'-':$current).'</td>'
+  .'<td align="right" style="'.$cell.'color:'.MAIL_ACCENT.';padding-right:0">'.esc($requested).'</td></tr>';
 }}
-$head=function(string $t,string $extra=''):string{return '<td align="center" style="padding:8px;font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:#6a7890;border-bottom:2px solid #fbd9b5;'.$extra.'">'.esc($t).'</td>';};
-echo card('Amount per shop','<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="padding:8px;border-bottom:2px solid #fbd9b5">&nbsp;</td>'.$head('Company rate').$head('Current').$head('Requested','color:#c2410c;background:#fff4e6;').'</tr>'
+$head=function(string $t,string $align='right'):string{return '<td align="'.$align.'" style="padding:8px 8px 8px 0;font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:'.MAIL_MUTED.';border-bottom:1px solid #d1d5db">'.esc($t).'</td>';};
+echo card('Rate Details','<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'.$head('Item','left').$head('Company rate').$head('Current').$head('Requested').'</tr>'
  .amountRow('Price per shop',$a['limitRate']??'',$a['currentRate']??'',$a['requestedRate']??'')
- .amountRow('Travelling cost',$a['limitFar']??'',$a['currentFar']??'',$a['requestedFar']??'')
- .'</table><p style="margin:8px 0 0;font-size:11px;color:#6a7890"><span style="text-decoration:line-through">Struck out</span> = the company rate set by Admin. <strong style="color:#c2410c">Requested</strong> is above it and needs your answer.</p>','#fff4e6','#f97316','#fbd9b5');
+ .amountRow('Travelling cost per shop',$a['limitFar']??'',$a['currentFar']??'',$a['requestedFar']??'')
+ .'</table>','#fff4e6','','#fbd9b5',null,'tag');
 
-noteBar('Reply APPROVED to accept the requested amount. Reply NOT APPROVED (or REJECTED) and the company rate is applied instead. Please keep the Request ID in the subject.');
+replyChoices();
+echo '<p style="font-size:11px;line-height:1.6;color:'.MAIL_MUTED.';margin:0 0 16px">APPROVED accepts the requested rate. NOT APPROVED keeps the company rate. Please keep the Request ID in the subject.</p>';
 pageEnd('Regards,','Operations Team',$config);

@@ -1,4 +1,4 @@
-import { Schema, model } from 'mongoose';
+﻿import { Schema, model } from 'mongoose';
 import { storedFileSchema } from '../files/storedFile.schema';
 
 export const VENDOR_TYPES = ['ONE_MAN', 'ORGANIZATION'] as const;
@@ -73,11 +73,11 @@ const vendorSchema = new Schema(
       mailSentAt: Date,
       vendorIdAt: Date,
       /** The reply from Accounts read from the reply mailbox, with the vendor ID found in it (a person still confirms it). */
-      reply: { messageId: String, from: String, receivedAt: Date, snippet: String, detectedVendorNo: String },
+      reply: { messageId: String, from: String, receivedAt: Date, snippet: String, detectedVendorNo: String, status: String, reason: String },
       /** Every reply read for this request, newest last: a later reply overwrites `reply` (the one shown) but nothing is lost. `at`: when it was read. */
       /** Every time the vendor ID was set or corrected: who, when, from, to. */
       idHistory: [{ _id: false, at: Date, by: { type: Schema.Types.ObjectId, ref: 'User' }, byName: String, from: String, to: String }],
-      replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedVendorNo: String, note: String }],
+      replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedVendorNo: String, note: String, status: String, reason: String }],
       vendorIdBy: { type: Schema.Types.ObjectId, ref: 'User' },
       /** The mail being written (Save as Draft / autosave), kept until it is sent. */
       /** createdAt / createdBy: when and by whom it was first saved; savedAt / savedBy: the last save. */

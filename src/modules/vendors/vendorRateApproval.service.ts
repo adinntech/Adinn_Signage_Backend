@@ -79,7 +79,7 @@ export async function requestRateApproval(input: RequestInput, actor: Actor) {
       toEmail: routing.to,
       ccEmail: routing.cc,
       ...(routing.bcc.length ? { bccEmail: routing.bcc } : {}),
-      subject: subjectWithId(`Vendor amount approval - ${input.vendorName}`, requestId),
+      subject: subjectWithId(`Vendor Rate Approval Request - ${input.vendorName}`, requestId),
       requestId,
       requestDate: now.toISOString(),
       source: 'Operations Team',

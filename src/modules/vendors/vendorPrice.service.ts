@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
+import { AuditLog } from '../audit/auditLog.model';
 import { normKey } from '../sites/site.fields';
 import { zohoGet } from '../zoho/zoho.client';
 import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from '../zoho/zoho.mapper';
@@ -167,10 +168,59 @@ export async function decideRateApproval(
 }
 
 /** A person (Operations) changes the status of an amount request: APPROVED applies the typed cost, NOT_APPROVED the company rate. Kept in the request's history. */
-export async function changeRateApprovalStatus(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', actor: Actor) {
+export async function changeRateApprovalStatus(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', actor: Actor, reason?: string) {
   const name = (await User.findById(actor.id).select('name').lean())?.name ?? 'User';
+  // Not approved is only set by a person after a reply was read (the reply may have been read wrongly). Approved comes from the reply only.
+  const current = await VendorRateApproval.findOne({ requestId }).select('reply history').lean();
+  if (!current) throw AppError.notFound('Amount request not found');
+  if (!current.reply && !current.history?.length) throw AppError.conflict('Get the approver\'s reply first. Not approved can be set only after a reply is read.');
   const done = await decideRateApproval(requestId, decision, `${name} (manual)`, undefined, { redo: true });
   if (!done) throw AppError.conflict('This request already has that status, or a newer request replaced it. Reload the page.');
-  await VendorRateApproval.updateOne({ requestId }, { $push: { history: { at: new Date(), from: name, outcome: `Status changed by ${name}: ${done.changedFrom ?? 'PENDING'} to ${decision}` } } });
+  const why = reason?.trim() ? `. Reason: ${reason.trim().slice(0, 200)}` : '';
+  await VendorRateApproval.updateOne({ requestId }, { $push: { history: { at: new Date(), from: name, outcome: `Status changed by ${name}: ${done.changedFrom ?? 'PENDING'} to ${decision}${why}` } } });
   return done;
+}
+
+/* ------------------------------------ cost history ------------------------------------ */
+
+export interface PriceChange { at: Date; by: string; ratePerShop: { from: number | null; to: number | null } | null; farRatePerShop: { from: number | null; to: number | null } | null }
+export interface PriceRequest { requestId: string; at: Date; status: string; requested: { ratePerShop: number | null; farRatePerShop: number | null }; limit: { ratePerShop: number | null; farRatePerShop: number | null }; decidedAt: Date | null }
+
+/**
+ * Every change of a vendor's cost (from the audit log: who, when, old and new value) and every amount request, oldest first.
+ * Nothing new is stored: each cost change was already audited. Used for the cost chart in the amount approval dialog.
+ */
+/** One reply read for any amount request of the vendor, with the request it answered. */
+export interface PriceReply { requestId: string; requestStatus: string; requested: { ratePerShop: number | null; farRatePerShop: number | null }; at?: Date; receivedAt?: Date; from?: string; snippet?: string; outcome?: string }
+
+export async function priceHistoryOfZohoVendor(contactId: string): Promise<{ changes: PriceChange[]; requests: PriceRequest[]; replies: PriceReply[]; approval: Approval | null }> {
+  const [vendor, typed, allRequests] = await Promise.all([
+    Vendor.findOne({ zohoContactId: contactId }).select('_id').lean(),
+    VendorPrice.findOne({ zohoContactId: contactId }).select('_id').lean(),
+    VendorRateApproval.find({ zohoContactId: contactId }).sort({ createdAt: 1 }).lean(),
+  ]);
+  // A request that a newer one replaced is not an amount request any more, but a reply that came for it was still read: replies keep it.
+  const requests = allRequests.filter((r) => r.status !== 'REPLACED');
+  const replies: PriceReply[] = allRequests
+    .flatMap((r) => (r.history ?? []).map((h) => ({ requestId: r.requestId, requestStatus: r.status ?? 'PENDING', requested: { ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null }, ...(h.at ? { at: h.at } : {}), ...(h.receivedAt ? { receivedAt: h.receivedAt } : {}), ...(h.from ? { from: h.from } : {}), ...(h.snippet ? { snippet: h.snippet } : {}), ...(h.outcome ? { outcome: h.outcome } : {}) })))
+    .sort((x, y) => new Date(y.receivedAt ?? y.at ?? 0).getTime() - new Date(x.receivedAt ?? x.at ?? 0).getTime());
+  const ids = [vendor?._id, typed?._id].filter((x) => !!x);
+  const logs = ids.length
+    ? await AuditLog.find({ entity: { $in: ['Vendor', 'VendorPrice'] }, entityId: { $in: ids }, 'changes.field': { $in: ['ratePerShop', 'farRatePerShop'] } }).sort({ at: 1 }).limit(200).populate('user', 'name').lean()
+    : [];
+  const pair = (l: (typeof logs)[number], field: string) => {
+    const c = l.changes?.find((x) => x.field === field);
+    return c ? { from: (c.oldValue as number | null) ?? null, to: (c.newValue as number | null) ?? null } : null;
+  };
+  return {
+    replies,
+    changes: logs.map((l) => ({ at: l.at, by: (l.user as unknown as { name?: string } | null)?.name ?? l.role ?? 'User', ratePerShop: pair(l, 'ratePerShop'), farRatePerShop: pair(l, 'farRatePerShop') })),
+    requests: requests.map((r) => ({
+      requestId: r.requestId, at: (r as { createdAt?: Date }).createdAt ?? new Date(0), status: r.status ?? 'PENDING',
+      requested: { ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null },
+      limit: { ratePerShop: r.limit.ratePerShop ?? null, farRatePerShop: r.limit.farRatePerShop ?? null }, decidedAt: r.decidedAt ?? null,
+    })),
+    // The latest request with every reply read: the dialog shows this live, so a reply just fetched appears without reopening it.
+    approval: (await latestApprovals([contactId])).get(contactId) ?? null,
+  };
 }

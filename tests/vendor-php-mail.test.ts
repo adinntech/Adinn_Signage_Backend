@@ -62,7 +62,7 @@ async function vendor(extra: Record<string, unknown> = {}) {
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.data as { _id: string; code: string; name: string };
 }
-const mailBody = (over: Record<string, unknown> = {}) => ({ to: ['accounts@t.com'], cc: ['ops@t.com'], bcc: ['boss@t.com'], subject: 'Vendor registration request', body: '<p>Hi Team,</p><p>Please register <strong>this vendor</strong>.</p><script>alert(1)</script>', requestKey: `key-php-${++n}-${Date.now()}`, ...over });
+const mailBody = (over: Record<string, unknown> = {}) => ({ to: ['accounts@t.com'], cc: ['ops@t.com'], bcc: ['boss@t.com'], subject: 'Vendor Registration Request', body: '<p>Hi Team,</p><p>Please register <strong>this vendor</strong>.</p><script>alert(1)</script>', requestKey: `key-php-${++n}-${Date.now()}`, ...over });
 const send = (id: string, body: Record<string, unknown>) => api().post(`/api/v1/vendors/${id}/registration-mail`).set(as('OPS')).send(body);
 
 describe('vendor registration mail through the PHP mail service', () => {
@@ -80,8 +80,8 @@ describe('vendor registration mail through the PHP mail service', () => {
       toEmail: ['accounts@t.com'],
       ccEmail: ['ops@t.com'],
       bccEmail: ['boss@t.com'],
-      subject: expect.stringMatching(/^Vendor registration request - ADN-Signage-vnd-\d{8,}$/),
-      requestId: expect.stringMatching(/^ADN-Signage-vnd-\d{8,}$/),
+      subject: expect.stringMatching(/^Vendor Registration Request - Adn-Signage-VenReg-\d{8,}$/),
+      requestId: expect.stringMatching(/^Adn-Signage-VenReg-\d{8,}$/),
       source: 'Operations Team',
       replyTo: 'ops@adinn.co.in', // "Name <address>" becomes the bare address
       vendor: { vendorName: v.name, vendorType: 'One-man / Freelancer', vendorCode: v.code },
@@ -109,8 +109,8 @@ describe('vendor registration mail through the PHP mail service', () => {
     expect(posted.calls).toHaveLength(2);
     const list = (await api().get(`/api/v1/vendors/${v._id}/registration-mail`).set(as('OPS'))).body.data.history;
     const subjects = list.map((h: { subject: string }) => h.subject);
-    expect(subjects[0]).toMatch(/^Second try - ADN-Signage-vnd-/);
-    expect(subjects[1]).toMatch(/^Vendor registration request - ADN-Signage-vnd-/);
+    expect(subjects[0]).toMatch(/^Second try - Adn-Signage-VenReg-/);
+    expect(subjects[1]).toMatch(/^Vendor Registration Request - Adn-Signage-VenReg-/);
     // Each real send takes its own ID; the repeated click did not use one.
     expect(new Set(list.map((h: { requestId: string }) => h.requestId)).size).toBe(2);
   });

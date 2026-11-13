@@ -1,4 +1,4 @@
-import { Schema, model } from 'mongoose';
+﻿import { Schema, model } from 'mongoose';
 import { storedFileSchema } from '../files/storedFile.schema';
 
 export const CODE_KINDS = ['CLIENT_CODE', 'PROJECT_CODE'] as const;
@@ -52,7 +52,7 @@ const codeRequestSchema = new Schema(
     /** What the person changed from what was read out of the reply (or typed first): who, when, field, from, to. */
     editHistory: [{ _id: false, at: Date, by: { type: Schema.Types.ObjectId, ref: 'User' }, byName: String, field: String, from: String, to: String }],
     /** Every reply read for this request, newest last; the latest overwrites `reply`. */
-    replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String] }],
+    replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String], status: String, reason: String }],
     confirmedAt: Date,
     confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     /** Where the code came from (reply mail, reference number...). */
@@ -61,7 +61,7 @@ const codeRequestSchema = new Schema(
     evidence: { type: [storedFileSchema], default: [] },
     /** The reply mail read from the reply mailbox: who answered and the code found in it (verified by a person unless auto-confirm is on). */
     reply: {
-      type: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], autoConfirmError: String }, { _id: false }),
+      type: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], autoConfirmError: String, status: String, reason: String }, { _id: false }),
       default: null,
     },
     rejectedReason: String,

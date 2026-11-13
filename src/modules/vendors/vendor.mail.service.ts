@@ -47,16 +47,16 @@ const row = (k: string, v?: string | null) => (v ? `<li>${escapeHtml(k)}: <stron
 function defaultContent(v: Awaited<ReturnType<typeof getVendor>>) {
   const bank = v.bank?.accountNo ? [v.bank.accountName, v.bank.accountNo, v.bank.ifsc].filter(Boolean).join(' / ') : '';
   const body =
-    `<p>Hi Team,</p>` +
-    `<p>Please register the new vendor below in Zoho Books and reply to this mail with the <strong>Vendor ID</strong>.</p>` +
+    `<p>Dear Accounts Team,</p>` +
+    `<p>Kindly register the vendor below in Zoho Books and reply to this mail with the <strong>Vendor ID</strong> (5 or more digits), for example <em>Vendor ID: 12345</em>.</p>` +
     `<ul>` +
     row('Vendor / firm', v.name) + row('Type', v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer')) + row('Contact person', [v.contactPerson, v.designation].filter(Boolean).join(', ')) +
     row('Mobile', [v.mobile, v.mobileAlt].filter(Boolean).join(' / ')) + row('Email', v.email) + row('Address', [v.address, v.district, v.state, v.pincode].filter(Boolean).join(', ')) +
     row('PAN', v.pan) + row('GST', v.gstin ?? (v.hasGst === false ? 'Not registered for GST' : null)) + row('Aadhaar', maskAadhaar(v.aadhaar)) + row('Bank', bank) + row('Service area', (v.serviceAreas ?? []).join(', ')) +
     `</ul>` +
-    `<p>The KYC documents are attached to this mail.</p>` +
-    `<p>Regards,</p>`;
-  return { subject: `Vendor registration request: ${v.name} (${v.code})`, body };
+    `<p>The KYC documents are attached. Thank you.</p>` +
+    `<p>Regards,<br>Operations Team</p>`;
+  return { subject: `Vendor Registration Request - ${v.name}`, body };
 }
 
 /** The vendor's data for the PHP mail template (data only: the template decides the wording and layout). */

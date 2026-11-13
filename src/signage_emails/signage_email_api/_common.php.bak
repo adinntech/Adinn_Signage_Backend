@@ -1,0 +1,136 @@
+<?php
+/* Shared building blocks for the signage mails. Plain, table-based, inline CSS (safe in Gmail / Outlook / Apple Mail).
+   Design rules: system fonts, normal weight (only the title and section headings are semi-bold), grey labels with dark
+   values, one accent colour, no icons and no banner images. The only image is the Adinn logo. */
+
+function esc($v):string{return htmlspecialchars(is_scalar($v)?(string)$v:'',ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
+
+const MAIL_FONT="-apple-system,'Segoe UI',Roboto,Arial,Helvetica,sans-serif";
+const MAIL_INK='#1f2937';     /* values and body text */
+const MAIL_MUTED='#6b7280';   /* labels and hints */
+const MAIL_LINE='#e5e7eb';    /* hairlines */
+const MAIL_ACCENT='#b91c1c';  /* single accent (Adinn red) */
+
+/* "2026-11-13T04:10:00Z" -> "13 Nov 2026"; anything that is not an ISO date is shown as sent. */
+function mailDate($v):string{
+ $s=trim((string)$v);
+ if($s===''||!preg_match('/^\d{4}-\d{2}-\d{2}/',$s))return $s===''?date('d M Y'):$s;
+ $t=strtotime($s);return $t?date('d M Y',$t):$s;
+}
+
+function fileSizeText(array $a):string{
+ $raw=(string)($a['base64']??'');
+ $at=strpos($raw,'base64,');if($at!==false)$raw=substr($raw,$at+7);
+ $b=isset($a['size'])?(int)$a['size']:(int)(strlen($raw)*3/4);
+ return $b>=1048576?round($b/1048576,1).' MB':max(1,(int)round($b/1024)).' KB';
+}
+
+/* Opens the document: logo + small "system generated" tag, then the title (and an optional one-line subtitle). */
+function pageStart(string $title,string $subtitle,array $config):void{
+ $f=MAIL_FONT;
+ echo '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'.esc($title).'</title></head>';
+ echo '<body style="margin:0;padding:0;background:#f3f4f6;font-family:'.$f.';color:'.MAIL_INK.'">';
+ echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6"><tr><td align="center" style="padding:24px 10px">';
+ echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;background:#ffffff;border:1px solid '.MAIL_LINE.';border-top:3px solid '.MAIL_ACCENT.'">';
+ echo '<tr><td style="padding:20px 28px 14px;border-bottom:1px solid '.MAIL_LINE.'"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>';
+ echo '<td valign="middle"><img src="'.esc($config['logo_url']).'" alt="Adinn" height="30" style="height:30px;width:auto;border:0;display:block"></td>';
+ echo '<td valign="middle" align="right" style="font-size:11px;color:'.MAIL_MUTED.';font-family:'.$f.'">Signage Solutions<br>System generated email</td>';
+ echo '</tr></table></td></tr>';
+ echo '<tr><td style="padding:22px 28px 8px;font-family:'.$f.'">';
+ echo '<div style="font-size:19px;line-height:1.35;font-weight:600;color:#111827;margin:0 0 '.($subtitle!==''?'4':'14').'px">'.esc($title).'</div>';
+ if($subtitle!=='')echo '<div style="font-size:13px;line-height:1.6;color:'.MAIL_MUTED.';margin:0 0 14px">'.esc($subtitle).'</div>';
+}
+
+/* Request reference strip: Request ID, Date, Type, Requested by. One light table, no boxes or icons. */
+function chips(array $data,string $typeLabel):void{
+ $cells=[['Request ID',$data['requestId']??''],['Date',mailDate($data['requestDate']??'')],['Type',$typeLabel],['Requested by',$data['source']??'Operations Team']];
+ echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-top:1px solid '.MAIL_LINE.';border-bottom:1px solid '.MAIL_LINE.'"><tr>';
+ foreach($cells as [$label,$val]){
+  echo '<td valign="top" style="padding:10px 8px 10px 0"><div style="font-size:11px;color:'.MAIL_MUTED.'">'.esc($label).'</div><div style="font-size:13px;color:'.MAIL_INK.';word-break:break-word">'.esc($val).'</div></td>';
+ }
+ echo '</tr></table>';
+}
+
+/* Paragraph of body text. */
+function para(string $html):void{echo '<p style="font-size:13px;line-height:1.7;color:'.MAIL_INK.';margin:0 0 16px">'.$html.'</p>';}
+
+/* [icon, label, value] rows (the icon slot is ignored, kept so older calls still work); empty values are skipped. */
+function rowsHtml(array $rows):string{
+ $o='<table role="presentation" width="100%" cellpadding="0" cellspacing="0">';
+ foreach($rows as $r){
+  $label=$r[1]??'';$val=$r[2]??'';
+  if($val===null||trim((string)$val)==='')continue;
+  $o.='<tr><td valign="top" width="34%" style="padding:7px 10px 7px 0;border-bottom:1px solid #f0f1f3;font-size:12px;color:'.MAIL_MUTED.'">'.esc($label).'</td><td valign="top" style="padding:7px 0;border-bottom:1px solid #f0f1f3;font-size:13px;color:'.MAIL_INK.';word-break:break-word">'.nl2br(esc($val)).'</td></tr>';
+ }
+ return $o.'</table>';
+}
+
+/* A titled section: small semi-bold heading, thin rule, then the body. The colour arguments are accepted for older calls and ignored. */
+function card(string $title,string $bodyHtml,string $headBg='',string $accent='',string $border='',?string $num=null):string{
+ return '<div style="margin:0 0 22px"><div style="font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:#374151;padding:0 0 6px;border-bottom:1px solid #d1d5db">'.esc($title).'</div>'.$bodyHtml.'</div>';
+}
+
+function fileBadge(string $name):string{
+ $e=strtoupper(pathinfo($name,PATHINFO_EXTENSION));return $e!==''?$e:'FILE';
+}
+
+/* Attached files as a plain list: name, type, size (and the label the CRM gave it). */
+function attachmentsCard(array $data,string $title,string $headBg='',string $accent='',string $hint=''):void{
+ $items=is_array($data['attachments']??null)?$data['attachments']:[];
+ if(!$items)return;
+ $b='';
+ if($hint!=='')$b.='<div style="font-size:12px;color:'.MAIL_MUTED.';padding:6px 0 2px">'.esc($hint).'</div>';
+ $b.='<table role="presentation" width="100%" cellpadding="0" cellspacing="0">';
+ foreach($items as $a){
+  $name=basename(str_replace('\\','/',(string)($a['filename']??'Document')));
+  $meta=fileBadge($name).' · '.fileSizeText($a).(!empty($a['label'])?' · '.$a['label']:'');
+  $b.='<tr><td style="padding:7px 0;border-bottom:1px solid #f0f1f3;font-size:13px;color:'.MAIL_INK.';word-break:break-word">'.esc($name).'</td><td align="right" style="padding:7px 0 7px 10px;border-bottom:1px solid #f0f1f3;font-size:11px;color:'.MAIL_MUTED.';white-space:nowrap">'.esc($meta).'</td></tr>';
+ }
+ echo card($title,$b.'</table>');
+}
+
+/* The one instruction block of a mail (how to reply). Plain text with a thin accent rule on the left. */
+function noteBar(string $text):void{
+ echo '<div style="margin:4px 0 22px;padding:2px 0 2px 12px;border-left:3px solid '.MAIL_ACCENT.';font-size:13px;line-height:1.7;color:'.MAIL_INK.'">'.esc($text).'</div>';
+}
+
+function messageBlock(array $data):void{
+ /* bodyHtml is cleaned by index_signage.php (simple formatting tags only); the plain message is the fallback. */
+ if(!empty($data['bodyHtml']))echo card('Additional Notes','<div style="font-size:13px;line-height:1.7;color:'.MAIL_INK.';padding-top:8px">'.$data['bodyHtml'].'</div>');
+ elseif(!empty($data['message']))echo card('Additional Notes','<div style="font-size:13px;line-height:1.7;color:'.MAIL_INK.';padding-top:8px">'.nl2br(esc($data['message'])).'</div>');
+}
+
+/* Data-only details sent by the CRM: details.sections = [{title, rows:[{label,value}], table:{columns:[..], rows:[[..]]}}]. One section each. */
+function detailsCards(array $data):void{
+ $d=is_array($data['details']??null)?$data['details']:[];
+ $sections=is_array($d['sections']??null)?$d['sections']:[];
+ foreach($sections as $s){
+  if(!is_array($s))continue;
+  $title=trim((string)($s['title']??''));$rows=is_array($s['rows']??null)?$s['rows']:[];$t=is_array($s['table']??null)?$s['table']:null;
+  $body='';
+  if($rows){$list=[];foreach($rows as $r){if(is_array($r))$list[]=['',(string)($r['label']??''),(string)($r['value']??'')];}$body.=rowsHtml($list);}
+  if($t&&is_array($t['columns']??null)&&is_array($t['rows']??null)){
+   $body.='<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>';
+   foreach($t['columns'] as $c)$body.='<td style="padding:7px 8px 7px 0;border-bottom:1px solid #d1d5db;font-size:11px;color:'.MAIL_MUTED.';text-transform:uppercase;letter-spacing:.3px">'.esc($c).'</td>';
+   $body.='</tr>';
+   foreach($t['rows'] as $r){if(!is_array($r))continue;$body.='<tr>';foreach($r as $cell)$body.='<td valign="top" style="padding:7px 8px 7px 0;border-bottom:1px solid #f0f1f3;font-size:13px;color:'.MAIL_INK.';word-break:break-word">'.esc($cell).'</td>';$body.='</tr>';}
+   $body.='</table>';
+  }
+  if($body===''||$title==='')continue;
+  echo card($title,$body);
+ }
+}
+
+/* Optional note written on the CRM mail screen (cleaned to simple tags by index_signage.php); only sent when the person changed the default text. */
+function noteBlock(array $data,string $title):void{
+ if(empty($data['bodyHtml']))return;
+ echo card($title,'<div style="font-size:13px;line-height:1.7;color:'.MAIL_INK.';padding-top:8px">'.$data['bodyHtml'].'</div>');
+}
+
+/* Sign-off and a quiet footer; closes the document. */
+function pageEnd(string $greeting,string $team,array $config):void{
+ echo '<p style="font-size:13px;line-height:1.7;color:'.MAIL_INK.';margin:0 0 20px">'.esc($greeting).'<br>'.esc($team).'<br><span style="color:'.MAIL_MUTED.'">Adinn Advertising Services Ltd.</span></p>';
+ echo '</td></tr>';
+ echo '<tr><td style="padding:12px 28px;border-top:1px solid '.MAIL_LINE.';font-size:11px;line-height:1.6;color:#9ca3af;font-family:'.MAIL_FONT.'">This is a system generated email from the Adinn Signage CRM. Please reply to this email only as described above.</td></tr>';
+ echo '</table></td></tr></table></body></html>';
+}

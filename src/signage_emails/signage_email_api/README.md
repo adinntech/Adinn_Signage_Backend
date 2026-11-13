@@ -25,19 +25,9 @@ When the key is rotated, update `config.local.php` on the server, `.env.developm
 
 Call the API only from the backend or a test client, never from browser or mobile code (the key must stay secret). Use HTTPS.
 
-## Header / footer images
+## Design
 
-Upload banner images to `templates/images/` (public URL `.../templates/images/<file>`; override the base with `SIGNAGE_ASSET_URL` in `config.local.php`):
-
-The folder is `templates/Images/` (capital I; Linux is case-sensitive).
-
-| File | Used by |
-|---|---|
-| `Signage_Email_Header.png` | header banner of all three mails (the title is rendered as HTML text below it) |
-| `footer.png` | optional footer strip |
-| `icons/*.png` | Font Awesome glyphs pre-rendered to PNG (`chip-*.png` for the four summary cards, the rest for detail rows). Icon fonts and web fonts do not work in Gmail/Outlook, so images are used. Upload the whole `icons/` folder. |
-
-Font: Montserrat via Google Fonts link (Apple Mail, iOS Mail, some Outlook); Gmail and others fall back to Segoe UI/Arial. If the header image is missing the mail falls back to an HTML banner. Logo in the sign-off: `https://adinnroadshows.com/images/logo/AdinnLogo.png` (white theme); dark theme logo is `https://adinnoutdoors.com/images/adinnHeaderlogo.svg`.
+Plain, table-based mail with system fonts, normal font weight, one accent colour and no icons or banner images (only the Adinn logo). All shared blocks are in `templates/_common.php`; the header/footer images and `icons/` folder are no longer used. Logo: `https://adinnroadshows.com/images/logo/AdinnLogo.png`.
 
 ## Request
 
@@ -51,7 +41,7 @@ In Bruno: Headers tab -> `Content-Type` and `X-API-Key` (the header name is `X-A
 
 Common fields: `mailtype`, `toEmail` (array or comma-separated), `ccEmail`, `bccEmail`, `subject` (optional, max 200 chars, no line breaks), `requestId` (max 100 chars), `requestDate`, `source`, `message`, `replyTo`, `attachments`.
 
-`bodyHtml` (code requests and vendor): rich text typed on the CRM screen, cleaned to simple tags and shown as "Additional Notes"; `message` (plain text) is the fallback. `requestId` is `ADN-Signage-<prj|cli|cp|vnd>-ddmmyy<serial>`.
+`bodyHtml` (code requests and vendor): rich text typed on the CRM screen, cleaned to simple tags and shown as "Additional Notes"; `message` (plain text) is the fallback. `requestId` is `Adn-Signage-<ProCode|CliCode|CliProCode|VenReg|VenRate>-ddmmyy<serial>`, for example `Adn-Signage-VenReg-13112601` (the serial keeps counting across years: ...2601 then ...2702). Older IDs such as `ADN-Signage-vnd-06122601` are still recognised in replies.
 
 ### 1. Combined (`mailtype: "combined"`)
 
@@ -170,6 +160,9 @@ Limits: max 8 files, 8 MB each, request max 18 MB. Allowed: PDF, XLS, XLSX, DOCX
 
 ## Preview templates without sending
 
+Static samples (no PHP needed): open `preview/vendor-registration.html`, `vendor-rate-approval.html`, `project-code.html`, `project-code-existing.html`, `client-code.html`, `client-project-code.html`, `forgot.html` in a browser. Regenerate after a design change with `node src/signage_emails/signage_email_api/preview/build-previews.mjs` (a JS mirror of `_common.php`; keep both in step).
+
+
 Use a private server-side PHP script with `ob_start()` and `include` with sample `$data` and `$config`. Never expose a public unauthenticated mail preview endpoint.
 
 ### 4. Vendor registration request (`mailtype: "vendor"`)
@@ -196,4 +189,4 @@ Template: `templates/signage_vendor_registration_request.php`. Node client: `src
 
 ### 5. Vendor amount approval request (`mailtype: "rateapproval"`)
 
-Sent by the CRM when a vendor cost is typed above the company rate (Admin > Cost Rates). `requestId` is `ADN-Signage-vap-ddmmyy<serial>`; the approver replies APPROVED or NOT APPROVED and the CRM reads the reply from the reply mailbox. Template: `templates/signage_vendor_rate_approval.php`. Payload: `vendor { vendorName, vendorNo }`, `amounts { requestedRate, requestedFar, limitRate, limitFar, currentRate, currentFar, requestedBy }` (already formatted, for example "₹500"), `replyTo`. No attachments. Upload `index_signage.php` and the new template together.
+Sent by the CRM when a vendor cost is typed above the company rate (Admin > Cost Rates). `requestId` is `Adn-Signage-VenRate-ddmmyy<serial>`; the approver replies APPROVED or NOT APPROVED and the CRM reads the reply from the reply mailbox. Template: `templates/signage_vendor_rate_approval.php`. Payload: `vendor { vendorName, vendorNo }`, `amounts { requestedRate, requestedFar, limitRate, limitFar, currentRate, currentFar, requestedBy }` (already formatted, for example "₹500"), `replyTo`. No attachments. Upload `index_signage.php` and the new template together.

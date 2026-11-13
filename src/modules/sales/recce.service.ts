@@ -125,7 +125,7 @@ async function includedRateCard(orderId: Types.ObjectId, r: RateCardFlow) {
 }
 
 /** What the request email opens with when the signage API prints the details: a short note (the details are not typed, the template prints them). */
-export const DEFAULT_NOTE = '<p>Kindly create the codes for this order and share them to proceed with the Recce/Operations assignment.</p>';
+export const DEFAULT_NOTE = '<p>Kindly create the project code and estimate numbers for this order and reply to this mail with them, for example <strong>Project Code: 12345678</strong> and <strong>EST-123456</strong>.</p>';
 /** Same words, whatever the markup (the editor rewrites tags and spacing). */
 const sameText = (a: string, b: string) => htmlToText(a).replace(/\s+/g, ' ').trim() === htmlToText(b).replace(/\s+/g, ' ').trim();
 
@@ -345,7 +345,7 @@ export async function getRecce(id: string, actor: Actor) {
         section('Contact Persons', grid(contacts, contactCols)) +
         (o.handoverType === 'ASO' ? section('SO Contacts', grid(soList, soCols)) : '') +
         section('Attachments', files.length ? `<ul>${files.map((x, i) => `<li>${esc(fileNames[i]!)}${x.note ? ` (${esc(x.note)})` : ''}</li>`).join('')}</ul>` : '') +
-        `<p>Kindly share the generated codes to proceed with the Recce/Operations assignment.</p>` +
+        `<p>Please reply to this mail with the <strong>Project Code</strong> (8 or more digits) and the estimate numbers (EST-123456) so the Recce assignment can proceed.</p>` +
         `<p>Regards,<br><strong>${esc(bd?.name ?? team)}</strong><br>${team}<br>${esc(COMPANY.name)}</p>`,
     },
   };

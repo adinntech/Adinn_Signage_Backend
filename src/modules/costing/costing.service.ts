@@ -402,7 +402,7 @@ export async function legLogins(projectId: string) {
     const byIds = holders.map((h) => h.by).filter((x): x is Types.ObjectId => !!x);
     const names = new Map((byIds.length ? await User.find({ _id: { $in: byIds } }).select('name').lean() : []).map((u) => [String(u._id), u.name]));
     out.push({
-      key: leg.key, name: leg.name, channel: leg.channel, vendorName: leg.vendorName ?? null, shops: holders.reduce((n, h) => n + h.shops, 0), logins,
+      key: leg.key, name: leg.name, channel: leg.channel, vendorName: leg.vendorName ?? null, vendorId: leg.vendor ? String(leg.vendor) : null, shops: holders.reduce((n, h) => n + h.shops, 0), logins,
       holders: holders.filter((h) => h._id).map((h) => ({ userId: String(h._id), shops: h.shops, assignedAt: h.at, assignedBy: h.by ? (names.get(String(h.by)) ?? null) : null })),
       unassigned: holders.find((h) => !h._id)?.shops ?? 0,
     });

@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+﻿import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -45,10 +45,10 @@ describe('reply parser', () => {
   });
 
   it('vendor id: labelled number or a reply that is just the number', () => {
-    expect(findVendorNo('Vendor ID: 4521').code).toBe('4521');
-    expect(findVendorNo('vendor no 88').code).toBe('88');
-    expect(findVendorNo('4521\n\nRegards').code).toBe('4521');
-    expect(findVendorNo('Registered, number 4521 for you').code).toBe('4521'); // the only number in the reply
+    expect(findVendorNo('Vendor ID: 45211').code).toBe('45211');
+    expect(findVendorNo('vendor no 88').code).toBeNull();
+    expect(findVendorNo('45211\n\nRegards').code).toBe('45211');
+    expect(findVendorNo('Registered, number 45211 for you').code).toBe('45211'); // the only number in the reply
   });
 
   it('only the people the mail went to (or their domain) may answer', () => {
@@ -125,7 +125,7 @@ describe('replies to a code request', () => {
     const order = await makeOrder();
     const res = await sendProject(order, 'reply-key-0001');
     const row = res.body.data.requests[0];
-    expect(row.requestId).toMatch(/^ADN-Signage-prj-\d{8,}$/);
+    expect(row.requestId).toMatch(/^Adn-Signage-ProCode-\d{8,}$/);
     expect(row.mail.subject).toContain(row.requestId);
   });
 
@@ -209,21 +209,21 @@ describe('replies to a code request', () => {
     const { Vendor } = await import('../src/modules/vendors/vendor.model');
     const id = 'ADN-Signage-vnd-07112601';
     const v = await Vendor.create({ code: 'VND-9001', name: 'Reply Vendor', nameKey: 'reply vendor', type: 'ONE_MAN', mobile: '9876512345', mails: [{ to: ['accounts@adinn.test'], cc: [], subject: `Vendor registration request - ${id}`, status: 'SENT', requestId: id }] });
-    const mail = { messageId: '<v1@adinn.test>', from: ['accounts@adinn.test'], subject: `Re: Vendor registration request - ${id}`, text: `Vendor ID: 4521\n\n> ${id}` };
+    const mail = { messageId: '<v1@adinn.test>', from: ['accounts@adinn.test'], subject: `Re: Vendor registration request - ${id}`, text: `Vendor ID: 45211\n\n> ${id}` };
     expect(await processReply({ ...mail, from: ['x@evil.com'] })).toBe('rejected');
     expect(await processReply(mail)).toBe('saved');
     expect(await processReply(mail)).toBe('duplicate');
     const got = (await Vendor.findById(v._id).lean())!;
-    expect(got.registration?.reply).toMatchObject({ from: 'accounts@adinn.test', detectedVendorNo: '4521' });
+    expect(got.registration?.reply).toMatchObject({ from: 'accounts@adinn.test', detectedVendorNo: '45211' });
     expect(got.zohoVendorNo).toBeUndefined(); // a person still saves the ID, which activates the vendor
     await Vendor.updateOne({ _id: v._id }, { $set: { 'registration.vendorIdAt': new Date() } });
     // a correction in the same thread overwrites what is shown, never the ID a person saved; both stay in the history with their time
-    expect(await processReply({ ...mail, messageId: '<v2@adinn.test>', text: 'Sorry, wrong. Vendor ID: 9999', receivedAt: new Date(Date.now() + 60_000) })).toBe('saved');
+    expect(await processReply({ ...mail, messageId: '<v2@adinn.test>', text: 'Sorry, wrong. Vendor ID: 99999', receivedAt: new Date(Date.now() + 60_000) })).toBe('saved');
     // an older mail read late does not replace the newer one
-    expect(await processReply({ ...mail, messageId: '<v0@adinn.test>', text: 'Vendor ID: 1111', receivedAt: new Date(Date.now() - 3_600_000) })).toBe('saved');
+    expect(await processReply({ ...mail, messageId: '<v0@adinn.test>', text: 'Vendor ID: 11111', receivedAt: new Date(Date.now() - 3_600_000) })).toBe('saved');
     const after = (await Vendor.findById(v._id).lean())!;
-    expect(after.registration?.reply?.detectedVendorNo).toBe('9999');
-    expect(after.registration?.replyHistory?.map((h) => h.detectedVendorNo)).toEqual(['4521', '9999', '1111']);
+    expect(after.registration?.reply?.detectedVendorNo).toBe('99999');
+    expect(after.registration?.replyHistory?.map((h) => h.detectedVendorNo)).toEqual(['45211', '99999', '11111']);
     expect(after.registration?.replyHistory?.every((h) => h.at instanceof Date)).toBe(true);
     expect(after.zohoVendorNo).toBeUndefined();
   });

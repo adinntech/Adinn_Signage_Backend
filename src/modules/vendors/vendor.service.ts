@@ -135,7 +135,7 @@ export function onboardingIssues(v: { hasGst?: boolean | undefined; fullDetails?
   need('contactPerson', v.contactPerson, 'Enter the contact person name');
   need('designation', v.designation, 'Enter the designation');
   need('email', v.email, 'Enter the email');
-  need('address', v.address, 'Enter the address');
+  // The address is optional (asked together with the service areas).
   need('pincode', v.pincode, 'Enter the pincode');
   need('state', v.state, 'Choose the state');
   need('district', v.district, 'Enter the city / district');

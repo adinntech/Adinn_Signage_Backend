@@ -12,7 +12,7 @@ import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
 import { lookupPincode, pincodeParam } from './pincode.service';
-import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
+import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, priceHistoryOfZohoVendor, setZohoVendorPrice } from './vendorPrice.service';
 import { companyRates } from './vendorRateApproval.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
@@ -42,8 +42,9 @@ vendorRouter.post('/types', ...write, asyncHandler(async (req, res) => ok(res, a
 vendorRouter.get('/skills', ...read, asyncHandler(async (_req, res) => ok(res, await listVendorSkills())));
 vendorRouter.post('/skills', ...write, asyncHandler(async (req, res) => ok(res, await addVendorSkill(svc.skillBody.parse(req.body), actorOf(req)), undefined, 201)));
 // The company rates the Super Admin set (Admin > Cost Rates): shown in the Add cost box; a cost above them needs approval.
-const decisionBody = z.object({ decision: z.enum(['APPROVED', 'NOT_APPROVED']) });
-vendorRouter.put('/rate-approvals/:requestId/decision', ...write, asyncHandler(async (req, res) => ok(res, await changeRateApprovalStatus(z.string().regex(/^ADN-Signage-vap-\d{7,}$/).parse(req.params.requestId), decisionBody.parse(req.body).decision, actorOf(req)))));
+// A person can only reject (after a reply was read); approval comes from the approver's reply.
+const decisionBody = z.object({ decision: z.literal('NOT_APPROVED'), reason: z.string().trim().max(200).optional() });
+vendorRouter.put('/rate-approvals/:requestId/decision', ...write, asyncHandler(async (req, res) => ok(res, await changeRateApprovalStatus(z.string().regex(/^(ADN-Signage-vap|Adn-Signage-VenRate)-\d{7,}$/).parse(req.params.requestId), decisionBody.parse(req.body).decision, actorOf(req), decisionBody.parse(req.body).reason))));
 vendorRouter.get('/company-rates', ...read, asyncHandler(async (_req, res) => ok(res, await companyRates())));
 vendorRouter.get('/active', ...read, asyncHandler(async (_req, res) => ok(res, await svc.activeVendors())));
 vendorRouter.get('/template', ...read, asyncHandler(async (_req, res) => sheet(res, await vendorTemplate(), 'vendor-template.xlsx')));
@@ -69,6 +70,7 @@ vendorRouter.get('/zoho-directory/status', ...read, asyncHandler(async (req, res
 // Vendor price management: price per shop of one Zoho vendor (typed in the list).
 const zohoContactParam = z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') });
 vendorRouter.put('/zoho-directory/:contactId/price', ...write, asyncHandler(async (req, res) => ok(res, await setZohoVendorPrice(zohoContactParam.parse(req.params).contactId, svc.priceBody.parse(req.body), actorOf(req)))));
+vendorRouter.get('/zoho-directory/:contactId/price-history', ...read, asyncHandler(async (req, res) => ok(res, await priceHistoryOfZohoVendor(zohoContactParam.parse(req.params).contactId))));
 vendorRouter.get('/zoho-directory/:contactId/details', ...write, asyncHandler(async (req, res) => ok(res, await zohoVendorDetails(z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') }).parse(req.params).contactId))));
 // Fill the registration form from a Zoho Books vendor number (e.g. 12543). Must stay above '/:id'.
 vendorRouter.get('/zoho/:vendorNo', ...write, asyncHandler(async (req, res) => ok(res, await lookupZohoVendor(svc.zohoVendorNoParam.parse(req.params).vendorNo))));

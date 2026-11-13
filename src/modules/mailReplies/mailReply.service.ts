@@ -9,7 +9,11 @@ import { User } from '../users/user.model';
 import { Vendor } from '../vendors/vendor.model';
 import { VendorRateApproval } from '../vendors/vendorRateApproval.model';
 import { decideRateApproval } from '../vendors/vendorPrice.service';
-import { findClientCode, findDecision, findEstimates, findProjectCode, findVendorNo, freshText, requestIdsIn, senderAllowed, snippetOf } from './replyParser';
+import { requestKindOf } from '../mailSettings/requestIdTags';
+import { extractAmounts, extractProjectCode, extractVendorId, findClientCode, findDecision, readDecision, findEstimates, freshText, requestIdsIn, rulesFromEnv, senderAllowed, snippetOf } from './replyParser';
+
+/** The saved project code of a read: only a clear one (EXTRACTED) is offered, everything else is left for a person with the reason shown. */
+const projectRead = (text: string) => { const r = extractProjectCode(text, rulesFromEnv()); return { code: r.status === 'EXTRACTED' ? r.normalized : null, status: r.status, reason: r.reason }; };
 
 /** One mail read from the reply mailbox (the mailbox reader hands over plain data, so this is testable without IMAP). */
 export interface IncomingReply {
@@ -40,7 +44,8 @@ export async function processReply(msg: IncomingReply): Promise<ReplyOutcome> {
   const keep = (o: ReplyOutcome) => { if (rank.indexOf(o) > rank.indexOf(best)) best = o; };
 
   for (const id of ids) {
-    keep(id.startsWith('ADN-Signage-vnd-') ? await vendorReply(id, msg, fresh, from, receivedAt) : id.startsWith('ADN-Signage-vap-') ? await rateApprovalReply(id, msg, fresh, from, receivedAt) : await codeReply(id, msg, fresh, from, receivedAt));
+    const kind = requestKindOf(id);
+    keep(kind === 'vendor' ? await vendorReply(id, msg, fresh, from, receivedAt) : kind === 'rate' ? await rateApprovalReply(id, msg, fresh, from, receivedAt) : await codeReply(id, msg, fresh, from, receivedAt));
     if (best !== 'unknown') break; // the first request ID that belongs to us is the one answered
   }
   return best;
@@ -58,10 +63,11 @@ async function codeReply(requestId: string, msg: IncomingReply, fresh: string, f
   for (const row of rows) {
     if (!row.active || row.status !== 'PENDING_CONFIRMATION') continue; // already answered, rejected or failed
     const kind = row.kind as CodeKind;
-    const found = kind === 'PROJECT_CODE' ? findProjectCode(fresh) : findClientCode(fresh);
+    const pr = kind === 'PROJECT_CODE' ? projectRead(fresh) : null;
+    const found = pr ?? findClientCode(fresh);
     let autoConfirmError: string | undefined;
     const estimates = kind === 'PROJECT_CODE' ? findEstimates(fresh) : [];
-    const base = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}) };
+    const base = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), ...(pr ? { status: pr.status, reason: pr.reason } : {}) };
     // A later reply on the same thread overwrites the one shown (a corrected code); every reply stays in the history with its time.
     const newest = row.reply?.receivedAt;
     const isNewest = !newest || receivedAt >= newest;
@@ -93,9 +99,9 @@ async function salesProjectReply(requestId: string, msg: IncomingReply, fresh: s
   if (!recipients.length || !senderAllowed(from, recipients)) return 'rejected';
   const seen = o.recce?.codeReply?.messageId === msg.messageId || o.recce?.codeReplyHistory?.some((h) => h.messageId === msg.messageId);
   if (seen) return 'duplicate';
-  const found = findProjectCode(fresh);
+  const found = projectRead(fresh);
   const estimates = findEstimates(fresh);
-  const entry = { requestId, messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}) };
+  const entry = { requestId, messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), status: found.status, reason: found.reason };
   const newest = o.recce?.codeReply?.receivedAt;
   const isNewest = !newest || receivedAt >= newest;
   const logged = { ...entry, at: new Date() };
@@ -120,13 +126,14 @@ async function vendorReply(requestId: string, msg: IncomingReply, fresh: string,
   const recipients = [...(mail?.to ?? []), ...(mail?.cc ?? []), ...(mail?.bcc ?? [])];
   if (!recipients.length || !senderAllowed(from, recipients)) return 'rejected';
   if (v.registration?.reply?.messageId === msg.messageId || v.registration?.replyHistory?.some((h) => h.messageId === msg.messageId)) return 'duplicate';
-  const found = findVendorNo(fresh);
-  const entry = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedVendorNo: found.code } : {}) };
+  const read = extractVendorId(fresh, rulesFromEnv());
+  const found = { code: read.status === 'EXTRACTED' ? read.normalized : null };
+  const entry = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedVendorNo: found.code } : {}), status: read.status, reason: read.reason };
   // A later reply on the same thread overwrites the one shown (a corrected ID), but every reply stays in the history with its time.
   // An older mail read late never replaces a newer one. A saved vendor ID is only changed by a person (the screen shows the correction).
   const newest = v.registration?.reply?.receivedAt;
   const isNewest = !newest || receivedAt >= newest;
-  const note = found.code ? (v.registration?.vendorIdAt ? 'Read after the ID was saved' : undefined) : found.ambiguous.length ? 'More than one number, check the mail' : 'No vendor ID found';
+  const note = found.code ? (v.registration?.vendorIdAt ? 'Read after the ID was saved' : undefined) : read.reason;
   await Vendor.updateOne({ _id: v._id }, {
     ...(isNewest ? { $set: { 'registration.reply': entry } } : {}),
     $push: { 'registration.replyHistory': { ...entry, at: new Date(), ...(note ? { note } : {}) } },
@@ -146,14 +153,19 @@ async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: s
   const log = async (outcome: string) => {
     await VendorRateApproval.updateOne({ _id: a._id }, { $push: { history: { ...reply, at: new Date(), outcome } } });
     // The login that asked for the approval is told what the reply did.
-    await notifyReply(a.requestedBy, 'COST_APPROVAL', 'Vendor amount approval reply', `${reply.from}: ${outcome}`, `vendor-rate-reply:${msg.messageId}`);
+    await notifyReply(a.requestedBy, 'COST_APPROVAL', 'Vendor amount approval reply', `${reply.from}: ${outcome}`, `vendor-rate-reply:${msg.messageId}`, `/vendors/master?rateFor=${encodeURIComponent(a.zohoContactId)}&n=${encodeURIComponent(a.vendorName ?? '')}`);
   };
+  // An approval that names a different amount than the one asked is not applied by itself: a person checks the mail.
+  const asked = [a.requested?.ratePerShop, a.requested?.farRatePerShop].filter((x): x is number => typeof x === 'number');
+  const mentioned = extractAmounts(fresh);
+  const amountDiffers = asked.length > 0 && mentioned.some((m) => !asked.includes(m));
   // Already answered: the first clear answer stands. A later mail is only logged, so nobody is surprised by a changed cost.
   // Already answered: a clear answer in a NEWER mail than the one that decided (a corrected reply: "sorry, not approved") changes it; the history keeps both.
   if (a.status !== 'PENDING') {
     const found = findDecision(fresh);
     if (found === 'HOLD') { await log(`On hold (mail said wait), kept as ${a.status}`); return 'saved'; }
     const decided = found;
+    if (decided === 'APPROVED' && amountDiffers) { await log(`Approved, but the amount in the reply (${mentioned.join(', ')}) differs from the one asked (${asked.join(', ')}): check the mail, kept as ${a.status}`); return 'saved'; }
     const base = a.decidedBy?.includes('(manual)') ? a.decidedAt : (a.reply?.receivedAt ?? a.decidedAt);
     if (!decided) { await log(`Not clear, kept as ${a.status}`); return 'saved'; }
     if (decided === a.status) { await log(`Same answer again (${a.status})`); return 'duplicate'; }
@@ -172,7 +184,12 @@ async function rateApprovalReply(requestId: string, msg: IncomingReply, fresh: s
   if (!decision) {
     // Neither a clear yes nor a clear no: kept for a person, still waiting; a later clear reply decides.
     await VendorRateApproval.updateOne({ _id: a._id }, { $set: { reply } });
-    await log('Not clear, still waiting');
+    await log(readDecision(fresh).flags.includes('QUESTION') ? 'Question, not an answer: on hold, waiting for the final answer' : 'Not clear, still waiting');
+    return 'saved';
+  }
+  if (decision === 'APPROVED' && amountDiffers) {
+    await VendorRateApproval.updateOne({ _id: a._id }, { $set: { reply } });
+    await log(`Approved, but the amount in the reply (${mentioned.join(', ')}) differs from the one asked (${asked.join(', ')}): a person checks the mail, still waiting`);
     return 'saved';
   }
   const done = await decideRateApproval(requestId, decision, reply.from, reply);

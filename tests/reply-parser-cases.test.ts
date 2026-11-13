@@ -9,8 +9,11 @@ describe('vendor ID in the way Accounts really writes it', () => {
     ['Hi,\nDone. Vendor ID : 12589', '12589'],
     ['Hi\n12589\nThanks', '12589'],
     ['Created. ID 12589 ok', '12589'],
-    ['Dear Sir, created on 12/11/2026, call 98765 43210, vendor id 7788', '7788'],
-    ['Dear Sir, created on 12/11/2026 by 98765 43210. Number 5566', '5566'],
+    // The vendor ID has 5 or more digits (business rule), so a 4-digit number is never taken.
+    ['Dear Sir, created on 12/11/2026, call 98765 43210, vendor id 77881', '77881'],
+    ['Dear Sir, created on 12/11/2026 by 98765 43210. Number 55661', '55661'],
+    ['Vendor ID - AB12345', '12345'],
+    ['Dear Sir, vendor id 7788', null],
   ])('%j -> %s', (text, code) => expect(findVendorNo(text).code).toBe(code));
 
   it('two different numbers are left for a person', () => {
@@ -47,7 +50,7 @@ describe('the approver\'s answer, in many ways', () => {
     ['Sorry sorry Not Granted. On Wed, Nov 11, 2026 at 6:32 PM Karthiyayini T G wrote:', 'NOT_APPROVED'], ['Not granted', 'NOT_APPROVED'], ['Not yet granted', 'NOT_APPROVED'],
     ['Cannot be permitted', 'NOT_APPROVED'], ['Not possible', 'NOT_APPROVED'], ['Unable to approve this rate', 'NOT_APPROVED'], ['Not sanctioned', 'NOT_APPROVED'],
     ['Not done', 'NOT_APPROVED'], ['Not Done.', 'NOT_APPROVED'], ['Not yet finalised', 'NOT_APPROVED'], ['Done', 'APPROVED'], ['Moved.', 'APPROVED'], ['Moved', 'APPROVED'], ['Not moved', 'NOT_APPROVED'], ['Not yet moved.', 'NOT_APPROVED'], ['Updated', 'APPROVED'], ['Not updated', 'NOT_APPROVED'],
-    ['Hold', 'HOLD'], ['Please wait', 'HOLD'], ['Stop', 'HOLD'], ['On hold for now', 'HOLD'], ['Not now', 'HOLD'], ['Not yet', 'HOLD'], ['Pending, will update later', 'HOLD'],
+    ['Kindly approve the same.', 'APPROVED'], ['Kindly approved', 'APPROVED'], ['Kindly approve', 'APPROVED'], ['Please approve', 'APPROVED'], ['Approve pannunga', 'APPROVED'], ['Awaiting approval from management', 'HOLD'], ['Hold', 'HOLD'], ['Please wait', 'HOLD'], ['Stop', 'HOLD'], ['On hold for now', 'HOLD'], ['Not now', 'HOLD'], ['Not yet', 'HOLD'], ['Pending, will update later', 'HOLD'], ['Kindly give some time', 'HOLD'], ['Need more time', 'HOLD'], ['Please give us a few days', 'HOLD'],
     ['No', 'NOT_APPROVED'], ['No. Use the company rate', 'NOT_APPROVED'], ['Granted', 'APPROVED'], ['Approved. Nobody objects', 'APPROVED'],
   ])('%j -> %s', (text, d) => expect(findDecision(text)).toBe(d));
 

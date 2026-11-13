@@ -3,8 +3,13 @@ import { simpleParser } from 'mailparser';
 import { AppError } from '../../common/errors';
 import { env } from '../../config/env';
 import { processReply, type ReplyOutcome } from './mailReply.service';
+import { htmlToText } from './replyParser';
 
-let running = false;
+/** The check that is running now: a second request (Get reply while the timer is reading) waits for it and gets the same result. */
+let inflight: Promise<CheckResult> | null = null;
+let lastCheckedAt: Date | null = null;
+/** When the mailbox was last read to the end, and whether a read is running now. */
+export const replyCheckState = () => ({ lastCheckedAt, running: inflight !== null });
 const LOOKBACK_DAYS = 14;
 
 export interface CheckResult {
@@ -30,13 +35,16 @@ const automatic = (headers: Map<string, unknown>, subject: string) => {
  * processReply (which ignores one it has already read). Other mail in the mailbox is never touched.
  */
 export async function checkReplies(): Promise<CheckResult> {
+  if (inflight) return inflight;
+  inflight = readMailbox().finally(() => { inflight = null; });
+  return inflight;
+}
+
+async function readMailbox(): Promise<CheckResult> {
   if (!env.imapEnabled)
     throw AppError.conflict(
       'The reply mailbox is not configured on the server (IMAP_HOST, IMAP_USER, IMAP_PASS).',
     );
-  if (running)
-    throw AppError.conflict('The reply mailbox is already being checked. Try again in a moment.');
-  running = true;
   const client = new ImapFlow({
     host: env.IMAP_HOST!,
     port: env.IMAP_PORT,
@@ -58,7 +66,7 @@ export async function checkReplies(): Promise<CheckResult> {
       try {
         // Not only unread: a person may open the reply in Gmail first. Repeats are safe, processReply skips a mail it already read.
         const since = new Date(Date.now() - LOOKBACK_DAYS * 86_400_000);
-        const uids = (await client.search({ since, subject: 'ADN-Signage-' }, { uid: true })) || [];
+        const uids = (await client.search({ since, subject: '-Signage-' }, { uid: true })) || [];
         for (const uid of uids) {
           const raw = await client.fetchOne(String(uid), { source: true }, { uid: true });
           if (!raw || !raw.source) continue;
@@ -71,7 +79,8 @@ export async function checkReplies(): Promise<CheckResult> {
             messageId: mail.messageId ?? `uid-${uid}`,
             from: (mail.from?.value ?? []).map((a) => a.address ?? '').filter(Boolean),
             subject,
-            text: mail.text ?? '',
+            // An HTML-only reply is turned into text with its quoted history already removed.
+            text: mail.text?.trim() ? mail.text : typeof mail.html === 'string' ? htmlToText(mail.html) : '',
             ...(mail.date ? { receivedAt: mail.date } : {}),
           });
           result.outcomes[outcome] = (result.outcomes[outcome] ?? 0) + 1;
@@ -89,9 +98,8 @@ export async function checkReplies(): Promise<CheckResult> {
       'MAILBOX_ERROR',
       `The reply mailbox could not be read: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown error'}`,
     );
-  } finally {
-    running = false;
   }
+  lastCheckedAt = new Date();
   return result;
 }
 
