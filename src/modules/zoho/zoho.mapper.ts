@@ -3,6 +3,8 @@ import { normalizeMobile } from '../../common/validators/contact';
 /** Shape of the Zoho Books contact fields we read (everything else is ignored). */
 export interface ZohoContact {
   contact_id: string;
+  /** "customer" or "vendor". */
+  contact_type?: string;
   contact_name?: string;
   company_name?: string;
   email?: string;
