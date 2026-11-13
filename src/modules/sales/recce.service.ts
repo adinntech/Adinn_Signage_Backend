@@ -260,6 +260,8 @@ export async function getRecce(id: string, actor: Actor) {
           doneAt: r?.rateCardDoneAt ?? null,
           choice: rateCardChoice,
           includedLabel: inc ? revisionLabel(inc.revision) : null,
+          /** Kind Attn of the included version (the email step warns when it is not the current point of contact). */
+          includedContact: inc ? ((inc as { contact?: { name?: string | null } | null }).contact?.name ?? null) : null,
           label: rc ? revisionLabel(rc.revision) : null,
           updatedAt: rc?.createdAt ?? null,
           items: rc?.items?.length ?? 0,

@@ -182,11 +182,28 @@ export async function getQuotation(orderId: string, actor: Actor) {
         terms: DEFAULT_TERMS,
         regards: { name: me?.name ?? '', designation: 'Business Development Manager', mobile: me?.phone ?? '', email: me?.email ?? '' },
       };
+  // Rate Card step with a saved version: the point of contact changed in Assign Type & Details after it was saved. The
+  // saved version is never changed; the editor offers the new contact as an unsaved change (saving makes the next
+  // version). Only when the saved contact came from the order's contacts (a name typed by hand is left alone).
+  const norm = (s?: string | null) => (s ?? '').trim().toLowerCase();
+  const digits = (s?: string | null) => (s ?? '').replace(/\D/g, '').slice(-10);
+  const known = new Set(
+    [...((order.soContacts ?? []) as { name?: string | null }[]), ...((client.contacts ?? []) as { name?: string | null }[]), ...((order.orderContacts ?? []) as { name?: string | null }[])]
+      .map((k) => norm(k.name))
+      .filter(Boolean),
+  );
+  const saved = latest?.contact;
+  const pocUpdate =
+    step && latest && primary?.name && (norm(saved?.name) !== norm(primary.name) || (!!digits(primary.phone) && digits(saved?.phone) !== digits(primary.phone))) && (!norm(saved?.name) || known.has(norm(saved?.name)))
+      ? { name: primary.name, phone: digits(primary.phone), previousName: saved?.name ?? '', previousPhone: digits(saved?.phone) }
+      : null;
   return {
     orderId: String(order._id),
     orderNo: order.orderNo,
     stage: order.stage,
     editable: isEditable(order),
+    /** Rate Card step: the order's point of contact differs from the saved version's contact (see above), else null. */
+    pocUpdate,
     lockedReason: lockedReason(order),
     /** Lead stage (RATE_CARD / NEGOTIATION / ...) or null for an order outside Lead Management. */
     leadStage: order.lead?.stage ?? null,
