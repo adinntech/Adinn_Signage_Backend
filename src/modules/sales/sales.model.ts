@@ -298,6 +298,8 @@ const orderSchema = new Schema(
      * Type & Details). Never written to Zoho or the client record; used only while the Zoho client has no contacts.
      */
     orderContacts: { type: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
+    /** The contact persons / POC contacts above started as a copy of the client's saved contacts (clientcontactbooks). */
+    contactsFrom: { type: new Schema({ orderNo: String, at: Date }, { _id: false }), default: undefined },
     /**
      * Project Assign route, taken by the first save on it: HANDOVER (Client Servicing: handover details) or RECCE
      * (Recce team: project code request email). The other route is then disabled.

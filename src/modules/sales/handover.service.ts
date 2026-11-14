@@ -5,6 +5,7 @@ import { AppError } from '../../common/errors';
 import { type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
+import { saveContactBook } from '../clients/clientContactBook';
 import { clientNameOf, clientOf, CONTACT_PERSON_GAP, contactPersonGaps, contactPersonsOf, pointOfContact } from '../clients/clientDetails';
 import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
@@ -97,7 +98,7 @@ export function handoverGaps(o: GapInput): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientDetails clientType csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client clientDetails clientType csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts contactsFrom shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
@@ -129,6 +130,8 @@ export async function getHandover(id: string) {
     primaryContact: pointOfContact(await clientOf(o), o),
     /** Contact persons saved for this order only (used while the Zoho client has none). */
     orderContacts: (o.orderContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** The contacts above started as a copy of this client's saved contacts (from its earlier orders). */
+    contactsFrom: o.contactsFrom?.at ? { orderNo: o.contactsFrom.orderNo ?? null, at: o.contactsFrom.at } : null,
     /** SO: Additional Documents (kept apart from chat files; kept when the type changes, shown for SO only), oldest first. */
     soDocuments: o.handoverType === 'ASO' ? soDocumentsOf(o) : [],
     updatedAt: o.handoverUpdatedAt ?? null,
@@ -285,6 +288,8 @@ export async function setSoContacts(id: string, contacts: SoContact[], actor: Ac
   if (before.join('\n') !== after.join('\n')) {
     await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `POC contacts saved (${contacts.length})` });
   }
+  // The client's saved contacts (the next order of this client starts with them).
+  await saveContactBook(o, { pocContacts: contacts }, actor.id);
   return getHandover(id);
 }
 
@@ -315,6 +320,8 @@ export async function setOrderContacts(id: string, contacts: OrderContact[], act
   if (before.join('\n') !== after.join('\n')) {
     await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'orderContacts', oldValue: before, newValue: after }], reason: `Order contact persons saved (${contacts.length})` });
   }
+  // The client's saved contacts (the next order of this client starts with them).
+  await saveContactBook(o, { contactPersons: contacts }, actor.id);
   return getHandover(id);
 }
 
