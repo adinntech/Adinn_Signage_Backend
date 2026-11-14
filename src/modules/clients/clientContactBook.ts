@@ -11,10 +11,9 @@ const contactSchema = new Schema({ name: String, designation: String, phone: Str
 
 const clientContactBookSchema = new Schema(
   {
-    /** "zoho:<Zoho contact id>" for a Zoho customer kept on the order, else "client:<Client _id>". */
+    /** "zoho:<Zoho contact id>": Client Servicing Create Project orders (the Zoho customer kept on the order). */
     key: { type: String, required: true, unique: true },
     zohoId: String,
-    client: { type: Schema.Types.ObjectId, ref: 'Client' },
     clientName: String,
     zohoCustomerNo: String,
     /** Contact persons (only used while the client itself has none in Zoho / Client Management). */
@@ -36,10 +35,12 @@ type OrderLike = { _id: Types.ObjectId | string; orderNo?: string | null; client
 
 const idOf = (c: unknown) => (c && typeof c === 'object' && '_id' in c ? (c as { _id: unknown })._id : c);
 
-/** The book key of an order's client (null when the order has no client). */
+/**
+ * The book key of an order's client: Create Project (Client Servicing) orders only, which keep the Zoho customer on
+ * the order. An order linked to a clients-collection record (BD flow) has no book (null).
+ */
 export function contactBookKey(o: { client?: unknown; clientDetails?: unknown }) {
-  const id = idOf(o.client);
-  if (id) return `client:${String(id)}`;
+  if (idOf(o.client)) return null;
   const d = latestClient(o.clientDetails as ClientDetails[] | null | undefined);
   return d?.zohoId ? `zoho:${d.zohoId}` : null;
 }
@@ -85,7 +86,6 @@ export async function saveContactBook(o: OrderLike, lists: { contactPersons?: Co
   const key = contactBookKey(o);
   if (!key) return;
   const d = latestClient(o.clientDetails as ClientDetails[] | null | undefined);
-  const clientId = idOf(o.client);
   const stored = await ClientContactBook.findOne({ key }).select('contactPersons pocContacts').lean().catch(() => null);
   await ClientContactBook.updateOne(
     { key },
@@ -94,7 +94,6 @@ export async function saveContactBook(o: OrderLike, lists: { contactPersons?: Co
         ...(lists.contactPersons ? { contactPersons: merge(stored?.contactPersons ?? [], lists.contactPersons) } : {}),
         ...(lists.pocContacts ? { pocContacts: merge(stored?.pocContacts ?? [], lists.pocContacts) } : {}),
         ...(d ? { zohoId: d.zohoId, clientName: d.name, zohoCustomerNo: d.zohoCustomerNo ?? null } : {}),
-        ...(clientId ? { client: new Types.ObjectId(String(clientId)) } : {}),
         lastOrder: new Types.ObjectId(String(o._id)),
         lastOrderNo: o.orderNo ?? null,
         updatedBy: new Types.ObjectId(actorId),

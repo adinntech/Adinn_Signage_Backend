@@ -70,6 +70,8 @@ export const createOrder = asyncHandler(async (req, res) => {
 export const zohoClients = asyncHandler(async (req, res) => {
   const { q } = zohoClientQuery.parse(req.query);
   const items = await searchZohoClients(q);
+  // Client Servicing (Create Project): Zoho only; the clients collection is not used (no CRM link shown).
+  if (actorOf(req).role === 'CLIENT_SERVICING') return ok(res, items.map((z) => ({ ...z, clientId: null, clientNo: null, code: null })), { mode: zohoMode() });
   // Zoho's search does not cover GSTIN: a GSTIN already known on a linked local client finds its Zoho customer.
   const gst = q.toUpperCase();
   if (GSTIN_RE.test(gst) && !items.some((z) => z.gstin === gst)) {
@@ -85,6 +87,8 @@ export const zohoClient = asyncHandler(async (req, res) => {
   const zohoId = z.string().trim().min(1).max(40).regex(/^[\w-]+$/).parse(req.params.zohoId);
   const c = await getZohoClient(zohoId);
   if (!c) throw AppError.notFound('This customer is no longer in Zoho.');
+  // Client Servicing (Create Project): Zoho only; the clients collection is not used (no CRM link shown).
+  if (actorOf(req).role === 'CLIENT_SERVICING') return ok(res, { ...c, clientId: null, clientNo: null, code: null }, { mode: zohoMode() });
   const linked = (await linkedZohoClients([c.zohoId])).get(c.zohoId);
   // clientNo / code: the local client's (null until it is added); zohoId = Zoho contact id; zohoCustomerNo = Zoho's customer number.
   ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null, code: linked?.code ?? null }, { mode: zohoMode() });
