@@ -318,6 +318,8 @@ const orderSchema = new Schema(
           estimationCode: String,
           /** Zoho Books estimate the codes were chosen from. */
           zohoEstimateId: String,
+          /** The Zoho estimate as it was when the codes were saved (shown with the saved codes). */
+          zohoEstimate: { type: new Schema({ date: String, total: Number, status: String, salesperson: String, location: String }, { _id: false }), default: undefined },
           codesSavedAt: Date,
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */

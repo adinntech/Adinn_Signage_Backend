@@ -144,7 +144,7 @@ export async function getRecce(id: string, actor: Actor) {
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
-    .populate('recce.project', 'code status')
+    .populate('recce.project', 'code status startDate targetDate priority')
     .lean();
   if (!o) throw AppError.notFound('Order not found');
   // The Client record, or the client kept on the order (Client Servicing).
@@ -152,7 +152,7 @@ export async function getRecce(id: string, actor: Actor) {
   const r = o.recce ?? null;
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const codes = r?.projectCode
-    ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', clientId: r.clientId ?? null, savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null }
+    ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', clientId: r.clientId ?? null, savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null, estimate: r.zohoEstimate ?? null }
     : null;
   const existing = o.clientType === 'EXISTING';
   const zohoNo = existing ? await zohoClientIdOf(client) : (client?.zohoCustomerNo ?? null);
@@ -651,7 +651,7 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
     const r = await SalesOrder.updateOne(
       branchFilter(o, actor),
       {
-        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, zohoEstimateId: input.zohoEstimateId, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
+        $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, zohoEstimateId: input.zohoEstimateId, zohoEstimate: { date: est.date ?? null, total: est.total ?? null, status: est.status_formatted || est.status || null, salesperson: est.salesperson_name ?? null, location: est.location_name ?? null }, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
         $push: {
           leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode} / ${input.estimationCode}${clientId ? ` · Client ID ${clientId}` : ''}`, {
             step: 'codes',

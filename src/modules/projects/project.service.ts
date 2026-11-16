@@ -291,12 +291,13 @@ export async function listAssignees() {
 }
 
 /** What a project needs before Operations can act on it. Drafts may be incomplete; assigned projects may not. */
-function missingForAssignment(p: { startDate?: Date | null; targetDate?: Date | null; district?: string | null; requirementType?: string | null; expectedShops?: number | null; contacts?: unknown[] }) {
+function missingForAssignment(p: { startDate?: Date | null; targetDate?: Date | null; district?: string | null; requirementType?: string | null; expectedShops?: number | null; contacts?: unknown[]; salesOrder?: unknown }) {
   const m: string[] = [];
   if (!p.requirementType) m.push('requirement type');
   if (!p.startDate) m.push('start date');
   if (!p.targetDate) m.push('expected end date');
-  if (!p.district) m.push('district / location');
+  // Lead Management / Client Servicing projects (from an order): the Recce assign form has no district, so it is optional.
+  if (!p.district && !p.salesOrder) m.push('district / location');
   // Client contacts are optional (Lead Management, BD and Client Servicing routes): none blocks the assignment.
   if (p.requirementType && p.requirementType !== 'ASO' && !p.expectedShops) m.push('number of shops');
   return m;
