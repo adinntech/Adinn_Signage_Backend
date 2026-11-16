@@ -1,4 +1,4 @@
-import { Schema, model } from 'mongoose';
+﻿import { Schema, model } from 'mongoose';
 import { storedFileSchema } from '../files/storedFile.schema';
 
 export const CODE_KINDS = ['CLIENT_CODE', 'PROJECT_CODE'] as const;
@@ -28,6 +28,8 @@ const codeRequestSchema = new Schema(
     active: { type: Boolean, default: false },
     /** Rows that went out in the same email share this id. */
     mailBatchId: String,
+    /** ADN-Signage-prj-06122601: the ID in the email subject, used to match the reply. Same on every row of a combined email and on a retry. */
+    requestId: { type: String, index: true },
     /** The email entry in the order's `salesprofile` (what was sent, to whom, attachments, status). */
     mailRef: Schema.Types.ObjectId,
     mailStatus: { type: String, enum: ['SENT', 'SKIPPED', 'FAILED'] },
@@ -45,12 +47,23 @@ const codeRequestSchema = new Schema(
     sentAt: Date,
     sentBy: { type: Schema.Types.ObjectId, ref: 'User' },
     confirmedCode: String,
+    /** Estimate numbers confirmed with a project code. */
+    estimates: [String],
+    /** What the person changed from what was read out of the reply (or typed first): who, when, field, from, to. */
+    editHistory: [{ _id: false, at: Date, by: { type: Schema.Types.ObjectId, ref: 'User' }, byName: String, field: String, from: String, to: String }],
+    /** Every reply read for this request, newest last; the latest overwrites `reply`. */
+    replyHistory: [{ _id: false, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String], status: String, reason: String }],
     confirmedAt: Date,
     confirmedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     /** Where the code came from (reply mail, reference number...). */
     evidenceNote: String,
     /** Proof files uploaded at confirmation (reply mail, screenshot). Erased with the order's client. */
     evidence: { type: [storedFileSchema], default: [] },
+    /** The reply mail read from the reply mailbox: who answered and the code found in it (verified by a person unless auto-confirm is on). */
+    reply: {
+      type: new Schema({ messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], autoConfirmError: String, status: String, reason: String }, { _id: false }),
+      default: null,
+    },
     rejectedReason: String,
     rejectedAt: Date,
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },

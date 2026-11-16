@@ -56,7 +56,7 @@ describe('new registration: details and GST / Aadhaar rule', () => {
   it('the full form needs every detail, and the GST number or the Aadhaar number', async () => {
     const empty = await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', fullDetails: true, hasGst: true, name: 'Sri Flex', mobile: '9876543210' });
     expect(empty.status).toBe(422);
-    expect(paths(empty)).toEqual(['address', 'contactPerson', 'designation', 'district', 'email', 'gstin', 'pan', 'pincode', 'state']);
+    expect(paths(empty)).toEqual(['contactPerson', 'designation', 'district', 'email', 'gstin', 'pan', 'pincode', 'state']);
     const noGst = await create({ type: 'ONE_MAN', typeName: 'One-man / Freelancer', fullDetails: true, hasGst: false, name: 'Sri Flex', mobile: '9876543210' });
     expect(paths(noGst)).toContain('aadhaar');
     expect(paths(noGst)).not.toContain('gstin');
@@ -144,10 +144,23 @@ describe('pincode lookup', () => {
     answer([{ Status: 'Error', PostOffice: null }]);
     expect((await get('999999')).status).toBe(404);
     answer({}, false);
-    const down = await get('600001');
+    const down = await get('999998'); // every list is down and no state is known from the first digits
     expect(down.status).toBe(502);
     expect(down.body.error.message).toMatch(/choose the state/i);
     expect((await get('12')).status).toBe(422);
     expect((await get('600001', 'BD')).status).toBe(403);
+  });
+
+  it('when the lists are down, the state still comes from the first digits (625010 = Tamil Nadu) and the person types the city', async () => {
+    answer({}, false);
+    const r = await get('625010');
+    expect(r.status).toBe(200);
+    expect(r.body.data).toEqual({ pincode: '625010', state: 'Tamil Nadu', district: '', areas: [], partial: true });
+  });
+
+  it('uses the second list when India Post does not answer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).includes('postalpincode') ? { ok: false, status: 500, json: async () => ({}) } : { ok: true, status: 200, json: async () => ({ places: [{ 'place name': 'Madurai', state: 'Tamil Nadu' }] }) })));
+    const r = await get('625011');
+    expect(r.body.data).toMatchObject({ state: 'Tamil Nadu', district: 'Madurai', partial: true });
   });
 });

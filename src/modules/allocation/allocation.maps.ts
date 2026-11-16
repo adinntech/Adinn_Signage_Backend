@@ -49,6 +49,8 @@ export async function geocode(q: GeocodeQuery, pause: () => Promise<void> = asyn
   if (clean(q.address)) tries.push({ text: [clean(q.address), clean(q.area), district, clean(q.pincode), 'India'].filter(Boolean).join(', '), quality: 'ADDRESS' });
   if (clean(q.area)) tries.push({ text: [clean(q.area), district, 'Tamil Nadu', 'India'].filter(Boolean).join(', '), quality: 'AREA' });
   if (/^\d{6}$/.test(clean(q.pincode))) tries.push({ text: `${clean(q.pincode)}, India`, quality: 'PINCODE' });
+  // Last resort so a shop never stays off the map: the district itself (travel is then counted to the district town).
+  if (district) tries.push({ text: `${district}, Tamil Nadu, India`, quality: 'AREA' });
   for (const t of tries) {
     if (googleOn()) {
       const g = await googleSearch(t.text);

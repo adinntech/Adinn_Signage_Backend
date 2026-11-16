@@ -19,7 +19,7 @@ export async function projectScope(actor: Actor): Promise<Record<string, unknown
   if (!isScoped(actor.role)) return {};
   const me = new Types.ObjectId(actor.id);
   if (actor.role !== 'RECCE_EXECUTIVE') return { assignedTo: me };
-  const inHouse = await Site.distinct('project', { channel: 'IN_HOUSE', deletedAt: null });
+  const inHouse = await Site.distinct('project', { channel: 'IN_HOUSE', assignedTo: me, deletedAt: null });
   return { $or: [{ assignedTo: me }, { _id: { $in: inHouse } }] };
 }
 

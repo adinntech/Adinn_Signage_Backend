@@ -19,16 +19,10 @@ import { sendSignageCodeMail, signageMailAvailable, type SignageCodeMailInput } 
 import { phpMailAvailable, sendViaPhpMail } from './phpMail';
 import type { sendEmailBody } from './sales.validators';
 import { sendViaSignageMail, signagePayload } from './signageMail';
-import { nextSeq } from '../../common/counter.model';
+import { newRequestId, subjectWithId } from '../mailSettings/requestId';
 
 /** Sends in progress (order + request key): a second click while the first is still sending is refused, not sent twice. */
 const inFlight = new Set<string>();
-
-/** Project code request reference, e.g. PCR-2026-0105 (numbered per year in India). */
-const nextRequestId = async () => {
-  const year = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric' }).format(new Date());
-  return `PCR-${year}-${String(await nextSeq(`projectCodeRequest:${year}`)).padStart(4, '0')}`;
-};
 
 /** The full file record is copied into the sent email, so history and Resend never depend on the template or rate card. */
 type Attachment = StoredFile;
@@ -38,7 +32,8 @@ const KIND_LABEL: Record<Kind, string> = { COMPANY_PROFILE: 'Company profile', R
 const reached = (stage: string, min: OrderStage) => ORDER_STAGES.indexOf(stage as OrderStage) >= ORDER_STAGES.indexOf(min);
 const fill = (s: string, vars: Record<string, string>) => s.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k: string) => (k in vars ? vars[k]! : m));
 
-type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string> };
+/** `facts`: the details the PHP template prints; `noteHtml`: the rich note, only when the person changed the default text. */
+type ProjectRequestSignage = { source: string; client: { clientName: string; clientCode: string }; docTypes?: Record<string, string>; facts?: unknown; noteHtml?: string | undefined; replyTo?: string | undefined };
 
 type DeliverInput = {
   order: Types.ObjectId;
@@ -106,14 +101,16 @@ async function deliverOnce(rec: DeliverInput) {
   let apiPayload: ReturnType<typeof signagePayload> | undefined;
   let apiResponse: string | undefined;
   if (projectRequest) {
-    requestId = await nextRequestId();
+    requestId = await newRequestId('PROJECT_CODE');
     apiPayload = signagePayload({
       to: rec.to,
       cc: rec.cc,
-      subject: rec.subject,
+      subject: subjectWithId(rec.subject, requestId),
       requestId,
-      text: htmlToText(rec.body),
-      html: rec.body,
+      text: htmlToText(projectRequest.noteHtml ?? rec.body),
+      html: projectRequest.noteHtml ?? rec.body,
+      ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
+      ...(projectRequest.replyTo ? { replyTo: projectRequest.replyTo } : {}),
       source: projectRequest.source ?? 'Client Servicing Team',
       client: projectRequest.client ?? { clientName: '', clientCode: '' },
       attachments: rec.attachments,
@@ -134,10 +131,13 @@ async function deliverOnce(rec: DeliverInput) {
           to: rec.to,
           cc: rec.cc,
           bcc: rec.bcc ?? [],
-          subject: rec.subject,
+          subject: subjectWithId(rec.subject, requestId!),
+               // subject: rec.subject,
           requestId: requestId!,
-          text: htmlToText(rec.body),
-          html,
+          text: htmlToText(projectRequest.noteHtml ?? rec.body),
+          html: projectRequest.noteHtml ? styledEmailHtml(projectRequest.noteHtml) : html,
+          ...(projectRequest.facts ? { details: projectRequest.facts, noteHtml: projectRequest.noteHtml } : {}),
+          ...(projectRequest.replyTo ? { replyTo: projectRequest.replyTo } : {}),
           source: apiPayload!.source,
           client: apiPayload!.client,
           attachments: rec.attachments,

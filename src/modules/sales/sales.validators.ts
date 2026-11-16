@@ -14,6 +14,7 @@ export const recceEstimatesQuery = z.object({
 /** Assign to Recce Team: the codes the BD received for the project. */
 export const recceCodesBody = z.object({
   projectCode: z.string().trim().regex(/^\d{8}$/, 'Project code must be exactly 8 digits'),
+  /** Optional: the project can be assigned with the project code alone; the estimation code can be added later. */
   estimationCode: z
     .string()
     .trim()

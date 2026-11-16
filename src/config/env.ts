@@ -41,6 +41,10 @@ const schema = z
     MAX_IMAGE_SIZE: z.coerce.number().int().positive(),
     MAX_VIDEO_SIZE: z.coerce.number().int().positive(),
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+    /** Where the in-house recce team starts from when a project has no start point of its own (used by the smart planner). */
+    DEFAULT_BASE_NAME: z.string().trim().min(1).default('Adinn Head Office'),
+    DEFAULT_BASE_LAT: z.coerce.number().min(-90).max(90).default(9.9252),
+    DEFAULT_BASE_LNG: z.coerce.number().min(-180).max(180).default(78.1198),
     /** Public URL of the web CRM, used for links inside notification emails. */
     WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
     /** Map services for shop allocation. Both are open services that need no key; point them at your own server if you host one. Empty disables the lookup. */
@@ -80,6 +84,17 @@ const schema = z
     VENDOR_REGISTRATION_RECIPIENTS: optional,
     CODE_REQUEST_CLIENT_RECIPIENTS: optional,
     CODE_REQUEST_PROJECT_RECIPIENTS: optional,
+    /** Reply mailbox (IMAP) the CRM reads to pick up the code from a reply. Empty IMAP_HOST / IMAP_USER / IMAP_PASS = replies are not read. */
+    IMAP_HOST: optional,
+    IMAP_PORT: z.coerce.number().int().default(993),
+    IMAP_SECURE: z.enum(['true', 'false']).default('true'),
+    IMAP_USER: optional,
+    IMAP_PASS: optional,
+    IMAP_MAILBOX: z.string().trim().default('INBOX'),
+    /** Also read here, so a reply sent from the reply mailbox's own account (it never reaches its Inbox) is picked up. Empty = off. Gmail: [Gmail]/Sent Mail. */
+    IMAP_SENT_MAILBOX: z.string().trim().default('[Gmail]/Sent Mail'),
+    /** How often the reply mailbox is checked, in seconds. 0 = never (only the Check now button). */
+    MAIL_REPLY_POLL_SECONDS: z.coerce.number().int().min(0).default(120),
     /** Public URL of the Adinn logo shown in the footer of code request emails. */
     MAIL_LOGO_URL: optional,
     /** PHP mail service for client emails (Customer Onboarding Form). JSON is POSTed here; the PDF goes as a link. Empty = not sent. */
@@ -131,8 +146,10 @@ const schema = z
     /** Data-centre domains: .com (books.zoho.com), .in (books.zoho.in), .eu ... */
     ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
     ZOHO_API_URL: z.string().url().default('https://www.zohoapis.com/books/v3'),
-    /** Which Zoho vendors the Zoho vendors list keeps: those whose custom field "Contact Code" (cf_contact_code) equals this. */
+    /** The Zoho custom field "Contact Code" (cf_contact_code) value of the Signage creditors. Used only when ZOHO_SIGNAGE_CREDITORS_ONLY is true. */
     ZOHO_VENDOR_CONTACT_CODE: z.string().trim().min(1).default('Creditors - Signage'),
+    /** true: the Zoho vendors list keeps only the Signage creditors (Contact Code above, about 577). false: every vendor in Zoho (about 8,111). */
+    ZOHO_SIGNAGE_CREDITORS_ONLY: z.enum(['true', 'false']).default('true'),
     DO_SPACES_BUCKET: optional,
     DO_SPACES_ENDPOINT: optional,
     DO_SPACES_REGION: optional,
@@ -183,6 +200,8 @@ export const env = {
   /** Email is sent only when an SMTP server and a From address are configured. */
   mailEnabled: !!(parsed.data.SMTP_HOST && parsed.data.MAIL_FROM),
   phpMailEnabled: !!parsed.data.PHP_MAIL_URL,
+  /** Replies are read only when the reply mailbox login is configured. */
+  imapEnabled: !!(parsed.data.IMAP_HOST && parsed.data.IMAP_USER && parsed.data.IMAP_PASS),
   /** Code Requests / vendor / auth mails: the signage PHP mail API (SIGNAGE_MAIL_URL + SIGNAGE_MAIL_KEY). */
   signageMailEnabled: !!(parsed.data.SIGNAGE_MAIL_URL && parsed.data.SIGNAGE_MAIL_KEY),
   /** Project code request email (Recce Assign): the signage email API (SIGNAGE_MAIL_API_URL + SIGNAGE_MAIL_API_KEY). */

@@ -67,6 +67,8 @@ const projectSchema = new Schema(
     files: { type: [projectFileSchema], select: false, default: undefined },
     assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     assignedAt: Date,
+    /** Who handed the project to Operations (Client Servicing, or the BD). Older projects fall back to createdBy. */
+    assignedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     name: { type: String, required: true, trim: true },
     /** Client Management record (older projects). Projects from a Client Servicing order carry clientDetails instead. */
     client: { type: Schema.Types.ObjectId, ref: 'Client', index: true },

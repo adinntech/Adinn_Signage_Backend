@@ -207,7 +207,7 @@ export async function geocodeSites(projectId: string, body: z.infer<typeof geoco
   for (const s of batch) {
     let hit = null;
     try {
-      hit = await geocode({ address: [s.address1, s.address2].filter(Boolean).join(', '), area: s.location ?? s.address3, district: s.district, pincode: s.pincode }, pause);
+      hit = await geocode({ address: [s.address1, s.address2].filter(Boolean).join(', '), area: s.location || s.address3 || s.address2 || undefined, district: s.district, pincode: s.pincode }, pause);
     } catch {
       unavailable = true;
       break;

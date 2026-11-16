@@ -3,7 +3,7 @@ import type { z } from 'zod';
 import { COMPANY } from '../../config/company';
 import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
-import { escapeHtml, sanitizeHtml } from '../../common/html';
+import { escapeHtml, htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
@@ -26,6 +26,7 @@ import { SalesOrder, type HandoverType } from './sales.model';
 import { deliver, listEmails } from './salesMail.service';
 import type { recceAssignBody, recceCodesBody, sendEmailBody } from './sales.validators';
 import { safeNames, signageMailAvailable } from './signageMail';
+import { routingOf } from '../mailSettings/mailRouting.service';
 
 /** Recce / Operations people a project can be assigned to (same rule as the projects module). */
 export const recceUsers = () =>
@@ -136,6 +137,10 @@ async function stepGaps(o: StepGapInput, client?: Awaited<ReturnType<typeof clie
   const pocMissing = !!o.handoverType && o.handoverType !== 'ASO' && !(o.soContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim());
   return [...contactPersonGaps(c, o), ...gaps, ...(pocMissing ? [SO_CONTACT_GAP] : [])];
 }
+/** What the request email opens with when the signage API prints the details: a short note (the details are not typed, the template prints them). */
+export const DEFAULT_NOTE = '<p>Kindly create the project code and estimate numbers for this order and reply to this mail with them, for example <strong>Project Code: 12345678</strong> and <strong>EST-123456</strong>.</p>';
+/** Same words, whatever the markup (the editor rewrites tags and spacing). */
+const sameText = (a: string, b: string) => htmlToText(a).replace(/\s+/g, ' ').trim() === htmlToText(b).replace(/\s+/g, ' ').trim();
 
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
@@ -150,6 +155,7 @@ export async function getRecce(id: string, actor: Actor) {
   // The Client record, or the client kept on the order (Client Servicing).
   const client = await clientOf(o);
   const r = o.recce ?? null;
+  const routing = await routingOf('PROJECT_CODE');
   const requests = (o.salesprofile ?? []).filter((e) => e.kind === 'PROJECT_CODE_REQUEST').sort((a, b) => (b.sentAt?.getTime() ?? 0) - (a.sentAt?.getTime() ?? 0));
   const codes = r?.projectCode
     ? { projectCode: r.projectCode, estimationCode: r.estimationCode ?? '', clientId: r.clientId ?? null, savedAt: r.codesSavedAt ?? null, savedBy: (r.codesSavedBy as unknown as { name?: string } | null)?.name ?? null, estimate: r.zohoEstimate ?? null }
@@ -215,6 +221,12 @@ export async function getRecce(id: string, actor: Actor) {
   };
   const section = (title: string, inner: string) => (inner ? `<h3>${esc(title)}</h3>${inner}` : '');
   const mobile = (p?: string | null) => (p ? `+91 ${p}` : null);
+  /** The same lists feed the editor text above and the data the mail template prints (`facts`). */
+  const pairsOf = (list: [string, string | null | undefined][]) => list.filter((x): x is [string, string] => filled(x[1])).map(([label, value]) => ({ label, value }));
+  const tableOf = <T,>(list: T[], cols: [string, (x: T) => string | null | undefined][]) => {
+    const used = cols.filter(([, f]) => list.some((x) => filled(f(x))));
+    return list.length && used.length ? { columns: used.map(([h]) => h), rows: list.map((x) => used.map(([, f]) => (filled(f(x)) ? f(x)! : '—'))) } : null;
+  };
   // Full address: the street, then city / state / PIN when the street does not already contain them.
   const street = client?.address?.trim() ?? '';
   const address = [street, ...[client?.city, client?.state, client?.pincode].map((p) => p?.trim()).filter((p): p is string => !!p && !street.toLowerCase().includes(p.toLowerCase()))]
@@ -229,6 +241,42 @@ export async function getRecce(id: string, actor: Actor) {
     ...certs.map((f) => ({ file: f, note: 'GST certificate' })),
   ];
   const fileNames = safeNames(files.map((x) => x.file));
+  const clientRows: [string, string | null | undefined][] = [
+    ['Company Name', client?.name],
+    // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
+    ...(existing ? ([['Client ID', zohoNo]] as [string, string | null | undefined][]) : ([['Client ID', 'To be created in Zoho'], ['CRM Reference (temporary)', client?.clientNo]] as [string, string | null | undefined][])),
+    ...(csWording ? [] : ([['Client Flag', existing ? 'Existing Client' : 'New Client']] as [string, string][])),
+    ['Email', client?.email],
+    ['Phone', client?.phone],
+    ['GST Number', client?.gstin],
+    ['Address', address],
+    ...custom.map((f) => [f.label!, f.value!] as [string, string]),
+  ];
+  const projectRows: [string, string | null | undefined][] = [['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]];
+  const contactCols: [string, (k: (typeof contacts)[number]) => string | null | undefined][] = [
+    ['Name', (k) => k.name],
+    ['Designation', (k) => k.designation],
+    ['Mobile', (k) => mobile(k.phone)],
+    ['Email', (k) => k.email],
+    ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+  ];
+  const soList = o.soContacts ?? [];
+  const soCols: [string, (k: (typeof soList)[number]) => string | null | undefined][] = [
+    ['Name', (k) => k.name],
+    ['Mobile', (k) => mobile(k.phone)],
+    ['Email', (k) => k.email],
+    ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
+  ];
+  const facts = {
+    existing,
+    clientId: zohoNo ?? '',
+    sections: [
+      { title: 'Client Details', rows: pairsOf(clientRows), table: null },
+      { title: 'Project Details', rows: pairsOf(projectRows), table: null },
+      { title: 'Contact Persons', rows: [] as { label: string; value: string }[], table: tableOf(contacts, contactCols) },
+      ...(o.handoverType === 'ASO' ? [{ title: 'SO Contacts', rows: [] as { label: string; value: string }[], table: tableOf(soList, soCols) }] : []),
+    ].filter((x) => x.rows.length || x.table),
+  };
   const team = isCs(actor) ? 'Client Servicing Team' : 'Business Development Team';
   return {
     orderId: String(o._id),
@@ -244,6 +292,9 @@ export async function getRecce(id: string, actor: Actor) {
     /** Operational point of contact (primary POC contact, else the primary client contact). */
     primaryContact: poc,
     codes,
+    /** The latest reply read for the project code request mail: the project code and estimate numbers found in it (a person still saves them). */
+    codeReply: r?.codeReply ?? null,
+    codeReplyHistory: r?.codeReplyHistory ?? [],
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
     /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
     emailDone: sentOk,
@@ -292,65 +343,28 @@ export async function getRecce(id: string, actor: Actor) {
     // Sent through the signage email API (its URL and key on the server), not SMTP.
     mail: { enabled: signageMailAvailable(), from: env.MAIL_FROM ?? null },
     draft: {
-      to: [] as string[],
-      cc: [] as string[],
+      // The recipients Admin set in Mail contacts for project code requests.
+      to: routing.to,
+      cc: routing.cc,
+      /** The details the mail template prints on its own (client, project, contacts); the editor text only goes out when it was changed. */
+      facts,
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
       subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
       // Heading, greeting and request, client details, project details, contacts (SO contacts for SO), attachments,
       // closing and sign-off. Empty sections and fields are left out.
-      body:
-        `<h2>${existing ? 'Project &amp; Estimation Code Request' : 'Client ID, Project &amp; Estimation Code Request'}</h2>` +
+      body: signageMailAvailable()
+        ? DEFAULT_NOTE
+        : `<h2>${existing ? 'Project &amp; Estimation Code Request' : 'Client ID, Project &amp; Estimation Code Request'}</h2>` +
         `<p>Dear Team,</p>` +
         (existing
           ? `<p>Kindly create the project code and estimation code for the following order under ${csWording ? '' : 'the existing '}Client ID <strong>${escapeHtml(zohoNo ?? '-')}</strong>.</p>`
           : `<p>This is a new client. Kindly create the <strong>client ID in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below. The GST certificate and the client's details are included for the client ID.</p>`) +
-        section(
-          'Client Details',
-          rows([
-            ['Company Name', client?.name],
-            // Existing: the Client ID is Zoho's customer number. New: requested here; the CRM number is only a temporary reference.
-            ...(existing ? [['Client ID', zohoNo] as [string, string | null | undefined]] : [['Client ID', 'To be created in Zoho'] as [string, string], ['CRM Reference (temporary)', client?.clientNo] as [string, string | null | undefined]]),
-            ...(csWording ? [] : [['Client Flag', existing ? 'Existing Client' : 'New Client'] as [string, string]]),
-            ['Email', client?.email],
-            ['Phone', client?.phone],
-            ['GST Number', client?.gstin],
-            ['Address', address],
-            ...custom.map((f) => [f.label!, f.value!] as [string, string]),
-          ]),
-        ) +
-        section(
-          'Project Details',
-          rows([
-            ['Order Number', o.orderNo],
-            ['Assign Type', typeLabel],
-            ['Shops', shops],
-            ['Point of Contact', poc ? [poc.name, poc.designation, mobile(poc.phone), poc.email].filter(Boolean).join(' · ') : null],
-          ]),
-        ) +
-        section(
-          'Contact Persons',
-          grid(contacts, [
-            ['Name', (k) => k.name],
-            ['Designation', (k) => k.designation],
-            ['Mobile', (k) => mobile(k.phone)],
-            ['Email', (k) => k.email],
-            ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
-          ]),
-        ) +
-        (o.handoverType
-          ? section(
-              'POC Contacts',
-              grid(o.soContacts ?? [], [
-                ['Name', (k) => k.name],
-                ['Designation', (k) => k.designation],
-                ['Phone', (k) => mobile(k.phone)],
-                ['Email', (k) => k.email],
-                ['Primary', (k) => (k.isPrimary ? 'Primary' : null)],
-              ]),
-            )
-          : '') +
+        section('Client Details', rows(clientRows)) +
+        section('Project Details', rows(projectRows)) +
+        section('Contact Persons', grid(contacts, contactCols)) +
+        (o.handoverType === 'ASO' ? section('SO Contacts', grid(soList, soCols)) : '') +
         section('Attachments', files.length ? `<ul>${files.map((x, i) => `<li>${esc(fileNames[i]!)}${x.note ? ` (${esc(x.note)})` : ''}</li>`).join('')}</ul>` : '') +
-        `<p>Kindly share the generated codes to proceed with the Recce/Operations assignment.</p>` +
+        `<p>Please reply to this mail with the <strong>Project Code</strong> (8 or more digits) and the estimate numbers (EST-123456) so the Recce assignment can proceed.</p>` +
         `<p>Regards,<br><strong>${esc(bd?.name ?? team)}</strong><br>${team}<br>${esc(COMPANY.name)}</p>`,
     },
   };
@@ -437,6 +451,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     });
     const ATTACHMENTS_SECTION = /<h3>\s*Attachments\s*<\/h3>\s*<ul>[\s\S]*?<\/ul>/i;
     const body = ATTACHMENTS_SECTION.test(input.body) ? input.body.replace(ATTACHMENTS_SECTION, () => (list.length ? `<h3>Attachments</h3><ul>${list.join('')}</ul>` : '')) : input.body;
+    const routing = await routingOf('PROJECT_CODE');
     const sent = await deliver({
       order: o._id,
       client: o.client,
@@ -449,7 +464,14 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       attachments,
       rateCardRevision: included?.revision ?? undefined,
       requestKey: input.requestKey,
-      signage: { source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team', client: { clientName: client?.name ?? '', clientCode }, docTypes },
+      signage: {
+        ...(routing.replyTo ? { replyTo: routing.replyTo } : {}),
+        source: isCs(actor) ? 'Client Servicing Team' : 'Business Development Team',
+        client: { clientName: client?.name ?? '', clientCode },
+        docTypes,
+        // The template prints the client, project and contact details itself; the written text goes out as a rich note only when it differs from the default.
+        ...(signageMailAvailable() ? { facts: (await getRecce(id, actor)).draft.facts, ...(sameText(input.body, DEFAULT_NOTE) ? {} : { noteHtml: sanitizeHtml(input.body) }) } : {}),
+      },
       actor,
     });
     const status = (sent as { status?: string }).status ?? 'SENT';
@@ -548,9 +570,9 @@ export async function skipRateCard(id: string, actor: Actor) {
 }
 
 /** Codes are unique across operations projects and other orders. */
-async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, estimationCode: string) {
+async function assertCodesFree(orderId: Types.ObjectId, projectCode: string, estimationCode?: string) {
   if (await Project.exists({ code: projectCode })) throw invalid('projectCode', `Project code ${projectCode} already exists`);
-  const other = await SalesOrder.findOne({ _id: { $ne: orderId }, deletedAt: null, $or: [{ 'recce.projectCode': projectCode }, { 'recce.estimationCode': estimationCode }] })
+  const other = await SalesOrder.findOne({ _id: { $ne: orderId }, deletedAt: null, $or: [{ 'recce.projectCode': projectCode }, ...(estimationCode ? [{ 'recce.estimationCode': estimationCode }] : [])] })
     .select('orderNo recce.projectCode')
     .lean();
   if (other?.recce?.projectCode === projectCode) throw invalid('projectCode', `Project code ${projectCode} is already used by order ${other.orderNo}`);
@@ -634,6 +656,7 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
   await assertCodesFree(o._id, input.projectCode, input.estimationCode);
   // The codes come only from the client's Zoho estimate: it is read again and must match.
   const est = await getZohoEstimate(input.zohoEstimateId);
+  const estimation = input.estimationCode || undefined;
   if (!belongsTo(est, await estimateOwnerOf(o, input.clientId))) throw invalid('projectCode', 'This Zoho estimate does not belong to this client. Choose the project code again.');
   if (est.reference_number?.trim() !== input.projectCode || (est.estimate_number ?? '').trim().toUpperCase() !== input.estimationCode)
     throw invalid('projectCode', 'The estimate changed in Zoho. Reload the project code list and choose again.');
@@ -646,17 +669,17 @@ export async function saveCodes(id: string, input: z.infer<typeof recceCodesBody
     const other = await Client.findOne({ _id: { $ne: o.client }, deletedAt: null, $or: [{ code: clientId }, { zohoCustomerNo: clientId }] }).select('name').lean();
     if (other) throw invalid('clientId', `Client code ${clientId} already belongs to ${other.name}`);
   }
-  const previous = o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {};
+  const { estimationCode: _oldEstimation, ...previous } = (o.recce ? (o.recce as unknown as { toObject?: () => object }).toObject?.() ?? o.recce : {}) as Record<string, unknown>;
   try {
     const r = await SalesOrder.updateOne(
       branchFilter(o, actor),
       {
         $set: { recce: { ...previous, projectCode: input.projectCode, estimationCode: input.estimationCode, zohoEstimateId: input.zohoEstimateId, zohoEstimate: { date: est.date ?? null, total: est.total ?? null, status: est.status_formatted || est.status || null, salesperson: est.salesperson_name ?? null, location: est.location_name ?? null }, clientId: clientId ?? null, codesSavedAt: new Date(), codesSavedBy: actor.id }, updatedBy: actor.id },
         $push: {
-          leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode} / ${input.estimationCode}${clientId ? ` · Client ID ${clientId}` : ''}`, {
+          leadLogsArray: leadLog(actor, 'STEP', null, null, `Codes saved: ${input.projectCode}${estimation ? ` / ${estimation}` : ''}${clientId ? ` · Client ID ${clientId}` : ''}`, {
             step: 'codes',
             oldValue: o.recce?.projectCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode ?? null, clientId: o.recce.clientId ?? null } : null,
-            newValue: { projectCode: input.projectCode, estimationCode: input.estimationCode, clientId: clientId ?? null },
+            newValue: { projectCode: input.projectCode, estimationCode: estimation ?? null, clientId: clientId ?? null },
           }),
         },
       },
@@ -691,8 +714,8 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   const o = await liveOrder(id);
   assertBranchOpen(o, actor);
   await claimRecce(o, actor);
-  const codes = o.recce?.projectCode && o.recce.estimationCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode } : null;
-  if (!codes) throw invalid('projectCode', 'Enter the project code and estimation code first');
+  const codes = o.recce?.projectCode ? { projectCode: o.recce.projectCode, estimationCode: o.recce.estimationCode || undefined } : null;
+  if (!codes) throw invalid('projectCode', 'Enter the project code first');
   if (o.clientType !== 'EXISTING' && !o.recce?.clientId) throw invalid('clientId', 'Enter the Client ID created in Zoho first (Project Code & Estimation Code step)');
   const client = await clientOf(o);
   const gaps = await stepGaps(o.toObject(), client);
@@ -728,7 +751,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
     status: 'NEW',
     requirement: {
       source: 'OTHER',
-      sourceNote: `Lead Management: ${o.orderNo} (estimation ${codes.estimationCode})`,
+      sourceNote: `Lead Management: ${o.orderNo}${codes.estimationCode ? ` (estimation ${codes.estimationCode})` : ''}`,
       description: notes || undefined,
       recceRequired: true,
       siteDataScenario: type === 'SHOP_MEASUREMENT' ? 'CLIENT_PROVIDED' : 'MEASUREMENT_REQUIRED',
@@ -743,7 +766,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
   const project = await createProject(parsed.data, actor, { clientDetails: o.client ? null : latestDetails(o) });
   const projectId = project._id as Types.ObjectId;
   try {
-    await Project.updateOne({ _id: projectId }, { $set: { estimationCode: codes.estimationCode, salesOrder: o._id } });
+    await Project.updateOne({ _id: projectId }, { $set: { ...(codes.estimationCode ? { estimationCode: codes.estimationCode } : {}), salesOrder: o._id } });
     await assignProject(String(projectId), { assigneeId: input.assigneeId }, actor);
   } catch (e) {
     await dropProject(projectId);
@@ -771,7 +794,7 @@ export async function assignRecce(id: string, input: z.infer<typeof recceAssignB
         {
           $set: {
             ...assignment,
-            handoverClient: await clientSnapshot(o),
+            handoverClient: await clientSnapshot({ client: o.client, clientDetails: o.clientDetails, clientType: o.clientType, handoverType: o.handoverType, soContacts: o.soContacts, orderContacts: o.orderContacts }),
             assignRoute: 'RECCE',
             'lead.status': 'COMPLETED',
             'lead.completedAt': now,

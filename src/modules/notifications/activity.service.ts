@@ -58,7 +58,7 @@ export async function announceActivity(i: AuditInput, auditId: Types.ObjectId | 
     const noun = NOUN[i.entity] ?? i.entity;
     const title = `${TITLE_NOUN[i.entity] ?? i.entity} ${PAST[i.action] ?? verb}`;
     const body = `${who?.name ?? 'Someone'} (${ROLE[i.actor.role] ?? i.actor.role}) ${verb} ${noun}${fields} in ${p.code}${clientName ? ` · ${clientName}` : ''}${i.reason ? `: ${i.reason}` : ''}.`;
-    const project = { _id: p._id, code: p.code, clientName: client?.name };
+    const project = { _id: p._id, code: p.code, clientName: clientName ?? undefined };
     const base = { title: `${p.code}: ${title}`, body, project, actorId: i.actor.id };
     if (!alreadyAnnounced(i)) {
       await notify({ ...base, kind: 'ACTIVITY', recipients: [p.assignedTo, p.owner ?? p.createdBy], dedupe: (r) => `activity:${auditId}:${r}` });

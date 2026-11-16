@@ -15,6 +15,7 @@ export interface ZohoContact {
   status?: string;
   industry_type?: string;
   billing_address?: { address?: string; street2?: string; city?: string; state?: string; zip?: string };
+  shipping_address?: { address?: string; street2?: string; city?: string; state?: string; zip?: string };
   contact_persons?: { first_name?: string; last_name?: string; email?: string; phone?: string; mobile?: string; designation?: string; is_primary_contact?: boolean }[];
 }
 
@@ -65,7 +66,7 @@ export function toVendorFields(z: ZohoContact) {
 }
 
 /** One row of the Zoho vendor list (the list call carries these fields; address and contact persons only come with the detail call). */
-export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; created_time?: string }) {
+export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; created_time?: string; cf_contact_code?: string }) {
   const gst = (z.gst_no ?? '').trim().toUpperCase();
   const pan = (z.pan_no ?? '').trim().toUpperCase();
   const modified = z.last_modified_time ? new Date(z.last_modified_time) : undefined;
@@ -78,6 +79,7 @@ export function toZohoVendorRow(z: ZohoContact & { last_modified_time?: string; 
     mobile: mobile(z.mobile) ?? mobile(z.phone),
     gstin: GSTIN.test(gst) ? gst : undefined,
     pan: PAN.test(pan) ? pan : GSTIN.test(gst) ? gst.slice(2, 12) : undefined,
+    contactCode: clean(z.cf_contact_code, 60),
     zohoStatus: z.status === 'inactive' ? ('inactive' as const) : ('active' as const),
     zohoModifiedAt: modified && !Number.isNaN(modified.getTime()) ? modified : undefined,
     zohoCreatedAt: created && !Number.isNaN(created.getTime()) ? created : undefined,
@@ -90,6 +92,9 @@ export function toZohoVendorDetail(z: ZohoContact & { created_by_name?: string }
   return {
     city: clean(b.city, 80),
     address: clean([b.address, b.street2, b.city, b.state, b.zip].filter(Boolean).join(', '), 300),
+    state: clean(b.state, 80),
+    /** Every address Zoho has for the vendor (billing, shipping), kept as separate parts. */
+    addresses: ([['billing', z.billing_address], ['shipping', z.shipping_address]] as const).flatMap(([type, a]) => (a && (a.address || a.street2 || a.city || a.state || a.zip) ? [{ kind: type, address: clean(a.address, 200) ?? null, street2: clean(a.street2, 200) ?? null, city: clean(a.city, 80) ?? null, state: clean(a.state, 80) ?? null, zip: clean(a.zip, 12) ?? null }] : [])),
     createdByName: clean(z.created_by_name, 120),
   };
 }

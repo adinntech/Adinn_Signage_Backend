@@ -2,14 +2,22 @@ import type { z } from 'zod';
 import { AppError } from '../../common/errors';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
+import { AuditLog } from '../audit/auditLog.model';
 import { normKey } from '../sites/site.fields';
-import { ZohoVendor } from '../zoho/zohoVendor.model';
+import { zohoGet } from '../zoho/zoho.client';
+import { toZohoVendorDetail, toZohoVendorRow, type ZohoContact } from '../zoho/zoho.mapper';
 import { Vendor } from './vendor.model';
 import type { priceBody, skillBody } from './vendor.service';
 import { VendorPrice } from './vendorPrice.model';
+import { User } from '../users/user.model';
+import { VendorRateApproval } from './vendorRateApproval.model';
+import { cappedAtLimit, companyRates, exceedsLimit, latestApprovals, pendingApprovals, requestRateApproval } from './vendorRateApproval.service';
 import { VendorSkill } from './vendorSkill.model';
 
-export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null };
+/** `pending`: a typed cost above the company rate that is waiting for the approver's reply. */
+export type Pending = { requestId: string; ratePerShop: number | null; farRatePerShop: number | null; limitRate: number | null; limitFar: number | null; /** When the approval mail was sent. */ requestedAt?: Date | null };
+export type Approval = Awaited<ReturnType<typeof latestApprovals>> extends Map<string, infer A> ? A : never;
+export type Price = { ratePerShop: number | null; farRatePerShop: number | null; skills: string[]; source: 'VENDOR' | 'ZOHO' | null; /** When the cost record was created and last changed. */ createdAt?: Date; updatedAt?: Date; pending?: Pending; /** The latest amount approval: waiting, approved or not approved. */ approval?: Approval };
 const NONE: Price = { ratePerShop: null, farRatePerShop: null, skills: [], source: null };
 
 /* --------------------------------------- skills --------------------------------------- */
@@ -33,21 +41,35 @@ async function checkedSkills(names: string[]): Promise<string[]> {
   return keys.map((k) => found.find((f) => f.nameKey === k)!.name);
 }
 
+/** One Zoho vendor read live: the list fields plus address and who created it. Returns null when Zoho cannot be reached and `keepOnFail` is set (an earlier snapshot exists). */
+export async function zohoSnapshot(contactId: string, keepOnFail: boolean) {
+  const detail = await zohoGet<{ contact: ZohoContact & { created_by_name?: string; cf_contact_code?: string; created_time?: string; last_modified_time?: string } }>(`/contacts/${encodeURIComponent(contactId)}`).then((d) => d.contact, (e) => { if (keepOnFail) return null; throw e; });
+  return detail ? { ...toZohoVendorRow(detail), ...toZohoVendorDetail(detail) } : null;
+}
+
 /* --------------------------------------- prices --------------------------------------- */
 
 /** Price per shop and skills of each Zoho vendor: the registered vendor's own when it is registered, otherwise the ones typed in Vendor master. */
 export async function pricesOfZohoVendors(contactIds: string[]): Promise<Map<string, Price>> {
   const [vendors, typed] = await Promise.all([
-    Vendor.find({ zohoContactId: { $in: contactIds }, deletedAt: null }).select('zohoContactId ratePerShop farRatePerShop skills').lean(),
+    Vendor.find({ zohoContactId: { $in: contactIds }, deletedAt: null }).select('zohoContactId ratePerShop farRatePerShop skills createdAt updatedAt').lean(),
     VendorPrice.find({ zohoContactId: { $in: contactIds } }).lean(),
   ]);
   const out = new Map<string, Price>();
-  for (const t of typed) out.set(t.zohoContactId, { ratePerShop: t.ratePerShop ?? null, farRatePerShop: t.farRatePerShop ?? null, skills: t.skills ?? [], source: 'ZOHO' });
-  for (const v of vendors) if (v.zohoContactId) out.set(v.zohoContactId, { ratePerShop: v.ratePerShop ?? null, farRatePerShop: v.farRatePerShop ?? null, skills: v.skills ?? [], source: 'VENDOR' });
+  for (const t of typed) out.set(t.zohoContactId, { ratePerShop: t.ratePerShop ?? null, farRatePerShop: t.farRatePerShop ?? null, skills: t.skills ?? [], source: 'ZOHO', ...(t.createdAt ? { createdAt: t.createdAt } : {}), ...(t.updatedAt ? { updatedAt: t.updatedAt } : {}) });
+  for (const v of vendors) if (v.zohoContactId) out.set(v.zohoContactId, { ratePerShop: v.ratePerShop ?? null, farRatePerShop: v.farRatePerShop ?? null, skills: v.skills ?? [], source: 'VENDOR', ...(v.createdAt ? { createdAt: v.createdAt } : {}), ...(v.updatedAt ? { updatedAt: v.updatedAt } : {}) });
+  // A cost waiting for approval counts as added / updated when the request was sent (a vendor with no saved cost yet has no other date).
+  for (const [id, p] of await pendingApprovals(contactIds)) {
+    const cur = out.get(id) ?? NONE;
+    const sent = p.requestedAt ?? undefined;
+    const updated = sent && (!cur.updatedAt || sent > cur.updatedAt) ? sent : cur.updatedAt;
+    out.set(id, { ...cur, pending: p, ...(cur.createdAt ?? sent ? { createdAt: (cur.createdAt ?? sent) as Date } : {}), ...(updated ? { updatedAt: updated } : {}) });
+  }
+  for (const [id, a] of await latestApprovals(contactIds)) out.set(id, { ...(out.get(id) ?? NONE), approval: a });
   return out;
 }
 
-/** Zoho contact ids that already have a cost added (used by the "cost added / not added" filter). */
+/** Zoho contact ids that already have a cost added, or one waiting for approval (used by the "cost added / not added" filter and the Vendors with cost list). */
 export async function pricedZohoContactIds(): Promise<string[]> {
   const [vendors, typed] = await Promise.all([
     Vendor.find({ zohoContactId: { $exists: true, $ne: null }, ratePerShop: { $ne: null }, deletedAt: null }).select('zohoContactId').lean(),
@@ -61,15 +83,37 @@ export async function pricedZohoContactIds(): Promise<string[]> {
  * vendor (so allocation and costing see it); a vendor not registered yet keeps it here until it is registered. An empty
  * price removes the cost (the vendor leaves the "cost added" list and the company rate applies). Skills left out stay as they are.
  */
-export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof priceBody>, actor: Actor) {
-  const zoho = await ZohoVendor.findOne({ zohoContactId: contactId }).select('name').lean();
-  if (!zoho) throw AppError.notFound('Zoho vendor not found');
+export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof priceBody>, actor: Actor, opts: { approved?: boolean } = {}): Promise<Price> {
+  const vendor = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null });
   const far = body.farRatePerShop ?? null;
   if (body.ratePerShop == null && far != null) throw AppError.badRequest('Enter the price per shop first');
   if (body.ratePerShop != null && far != null && far < body.ratePerShop) throw AppError.badRequest('The far-distance price cannot be lower than the normal price');
   const skills = body.skills ? await checkedSkills(body.skills) : undefined;
   const set = { ratePerShop: body.ratePerShop, farRatePerShop: far };
-  const vendor = await Vendor.findOne({ zohoContactId: contactId, deletedAt: null });
+
+  // A cost above the company rate (Admin > Cost Rates) is not saved yet: the approver is mailed, and the old cost stays until they answer.
+  if (!opts.approved) {
+    const limit = await companyRates();
+    if (exceedsLimit(set, limit)) {
+      const current = (await pricesOfZohoVendors([contactId])).get(contactId) ?? NONE;
+      const prior = vendor ? null : await VendorPrice.findOne({ zohoContactId: contactId }).lean();
+      // Who the vendor is: the registered vendor's own record, otherwise read from Zoho now (a vendor with no cost yet has nothing stored).
+      const snap = vendor ? null : await zohoSnapshot(contactId, !!prior?.name);
+      const who = vendor
+        ? { name: vendor.name, vendorNo: vendor.zohoVendorNo ?? null, info: { email: vendor.email, mobile: vendor.mobile, gstin: vendor.gstin, pan: vendor.pan, city: vendor.district, address: vendor.address } }
+        : { name: snap?.name ?? prior?.name ?? 'Vendor', vendorNo: snap?.vendorNo ?? prior?.vendorNo ?? null, info: { email: snap?.email ?? prior?.email, mobile: snap?.mobile ?? prior?.mobile, gstin: snap?.gstin ?? prior?.gstin, pan: snap?.pan ?? prior?.pan, city: snap?.city ?? prior?.city, address: snap?.address ?? prior?.address, createdByName: snap?.createdByName ?? prior?.createdByName, contactCode: snap?.contactCode ?? prior?.contactCode } };
+      const approval = await requestRateApproval(
+        { zohoContactId: contactId, vendor, vendorName: who.name, vendorNo: who.vendorNo, info: who.info, requested: set, limit, current: { ratePerShop: current.ratePerShop, farRatePerShop: current.farRatePerShop } },
+        actor,
+      );
+      await recordAudit({ actor, action: 'PRICE_APPROVAL_REQUESTED', entity: vendor ? 'Vendor' : 'VendorPrice', entityId: vendor?._id ?? approval._id, reason: `${approval.requestId}: asked ${set.ratePerShop}/${set.farRatePerShop ?? '-'}, company rate ${limit.ratePerShop}/${limit.farRatePerShop}` });
+      // Skills still save now; only the price waits.
+      const held = await setZohoVendorPrice(contactId, { ratePerShop: current.ratePerShop, farRatePerShop: current.farRatePerShop, ...(body.skills ? { skills: body.skills } : {}) }, actor, { approved: true });
+      return { ...held, pending: { requestId: approval.requestId, ratePerShop: set.ratePerShop ?? null, farRatePerShop: set.farRatePerShop ?? null, limitRate: limit.ratePerShop, limitFar: limit.farRatePerShop } };
+    }
+    // A cost within the company rate saved now replaces one that was still waiting for approval.
+    await VendorRateApproval.updateMany({ zohoContactId: contactId, status: 'PENDING' }, { $set: { status: 'REPLACED', decidedAt: new Date(), decidedBy: 'Replaced by a newer cost' } });
+  }
   if (vendor) {
     const old = { ratePerShop: vendor.ratePerShop ?? null, farRatePerShop: vendor.farRatePerShop ?? null };
     // An empty value removes the field: the vendor falls back to the company rate.
@@ -79,8 +123,104 @@ export async function setZohoVendorPrice(contactId: string, body: z.infer<typeof
     await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'Vendor', entityId: vendor._id, changes: [{ field: 'ratePerShop', oldValue: old.ratePerShop, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: old.farRatePerShop, newValue: set.farRatePerShop }] });
   } else {
     const prior = await VendorPrice.findOne({ zohoContactId: contactId }).lean();
-    const row = await VendorPrice.findOneAndUpdate({ zohoContactId: contactId }, { $set: { ...set, ...(skills ? { skills } : {}), updatedBy: actor.id } }, { upsert: true, new: true });
-    await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: row._id, reason: zoho.name, changes: [{ field: 'ratePerShop', oldValue: prior?.ratePerShop ?? null, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: prior?.farRatePerShop ?? null, newValue: set.farRatePerShop }] });
+    const keepSkills = skills ?? prior?.skills ?? [];
+    // No price and no skills: nothing is kept for this vendor (the Zoho list itself is never stored).
+    if (set.ratePerShop == null && !keepSkills.length) {
+      if (prior) {
+        await VendorPrice.deleteOne({ _id: prior._id });
+        await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: prior._id, reason: prior.name ?? contactId, changes: [{ field: 'ratePerShop', oldValue: prior.ratePerShop ?? null, newValue: null }, { field: 'farRatePerShop', oldValue: prior.farRatePerShop ?? null, newValue: null }] });
+      }
+      return NONE;
+    }
+    // Who the vendor is, read from Zoho now (the browser never supplies it); an earlier snapshot is kept when Zoho cannot be reached.
+    const snap = await zohoSnapshot(contactId, !!prior?.name);
+    const snapshot = snap ? { vendorNo: snap.vendorNo, name: snap.name, email: snap.email, mobile: snap.mobile, gstin: snap.gstin, pan: snap.pan, city: snap.city, address: snap.address, createdByName: snap.createdByName, contactCode: snap.contactCode, zohoStatus: snap.zohoStatus, zohoCreatedAt: snap.zohoCreatedAt, snapshotAt: new Date() } : {};
+    const row = await VendorPrice.findOneAndUpdate({ zohoContactId: contactId }, { $set: { ...set, ...snapshot, skills: keepSkills, updatedBy: actor.id } }, { upsert: true, new: true });
+    await recordAudit({ actor, action: 'PRICE_UPDATE', entity: 'VendorPrice', entityId: row._id, reason: row.name ?? contactId, changes: [{ field: 'ratePerShop', oldValue: prior?.ratePerShop ?? null, newValue: set.ratePerShop }, { field: 'farRatePerShop', oldValue: prior?.farRatePerShop ?? null, newValue: set.farRatePerShop }] });
   }
   return (await pricesOfZohoVendors([contactId])).get(contactId) ?? NONE;
+}
+
+/**
+ * The approver answered. APPROVED applies the typed cost; NOT_APPROVED applies the company rate instead (every price capped at it).
+ * Only the first answer counts. Returns null when the request is not waiting any more.
+ */
+export async function decideRateApproval(
+  requestId: string,
+  decision: 'APPROVED' | 'NOT_APPROVED',
+  decidedBy: string,
+  reply?: { messageId: string; from: string; receivedAt: Date; snippet: string },
+  /** redo: change an answer already given (a corrected reply, or a person changing the status). Only the vendor's latest request can be changed. */
+  opts: { redo?: boolean } = {},
+) {
+  const a = await VendorRateApproval.findOne({ requestId, status: opts.redo ? { $in: ['PENDING', 'APPROVED', 'NOT_APPROVED'] } : 'PENDING' }).lean();
+  if (!a) return null;
+  if (a.status === decision) return null; // nothing to change
+  if (a.status !== 'PENDING' && (await VendorRateApproval.exists({ zohoContactId: a.zohoContactId, createdAt: { $gt: (a as { createdAt?: Date }).createdAt }, status: { $ne: 'REPLACED' } }))) return null; // a newer request took over
+  const typed = { ratePerShop: a.requested.ratePerShop ?? null, farRatePerShop: a.requested.farRatePerShop ?? null };
+  const applied = decision === 'APPROVED' ? typed : cappedAtLimit(typed, { ratePerShop: a.limit.ratePerShop ?? 0, farRatePerShop: a.limit.farRatePerShop ?? 0 });
+  const claimed = await VendorRateApproval.findOneAndUpdate({ _id: a._id, status: a.status }, { $set: { status: decision, decidedAt: new Date(), decidedBy, applied, ...(reply ? { reply } : {}) } });
+  if (!claimed) return null;
+  const actor = { id: String(a.requestedBy), role: 'SYSTEM' };
+  await setZohoVendorPrice(a.zohoContactId, { ratePerShop: applied.ratePerShop, farRatePerShop: applied.farRatePerShop }, actor, { approved: true });
+  await recordAudit({ actor, action: decision === 'APPROVED' ? 'PRICE_APPROVED' : 'PRICE_NOT_APPROVED', entity: 'VendorRateApproval', entityId: a._id, reason: `${requestId} by ${decidedBy}${a.status !== 'PENDING' ? ` (changed from ${a.status})` : ''}: applied ${applied.ratePerShop}/${applied.farRatePerShop ?? '-'}` });
+  return { requestId, decision, applied, vendorName: a.vendorName ?? '', changedFrom: a.status !== 'PENDING' ? a.status : null };
+}
+
+/** A person (Operations) changes the status of an amount request: APPROVED applies the typed cost, NOT_APPROVED the company rate. Kept in the request's history. */
+export async function changeRateApprovalStatus(requestId: string, decision: 'APPROVED' | 'NOT_APPROVED', actor: Actor, reason?: string) {
+  const name = (await User.findById(actor.id).select('name').lean())?.name ?? 'User';
+  // Not approved is only set by a person after a reply was read (the reply may have been read wrongly). Approved comes from the reply only.
+  const current = await VendorRateApproval.findOne({ requestId }).select('reply history').lean();
+  if (!current) throw AppError.notFound('Amount request not found');
+  if (!current.reply && !current.history?.length) throw AppError.conflict('Get the approver\'s reply first. Not approved can be set only after a reply is read.');
+  const done = await decideRateApproval(requestId, decision, `${name} (manual)`, undefined, { redo: true });
+  if (!done) throw AppError.conflict('This request already has that status, or a newer request replaced it. Reload the page.');
+  const why = reason?.trim() ? `. Reason: ${reason.trim().slice(0, 200)}` : '';
+  await VendorRateApproval.updateOne({ requestId }, { $push: { history: { at: new Date(), from: name, outcome: `Status changed by ${name}: ${done.changedFrom ?? 'PENDING'} to ${decision}${why}` } } });
+  return done;
+}
+
+/* ------------------------------------ cost history ------------------------------------ */
+
+export interface PriceChange { at: Date; by: string; ratePerShop: { from: number | null; to: number | null } | null; farRatePerShop: { from: number | null; to: number | null } | null }
+export interface PriceRequest { requestId: string; at: Date; status: string; requested: { ratePerShop: number | null; farRatePerShop: number | null }; limit: { ratePerShop: number | null; farRatePerShop: number | null }; decidedAt: Date | null }
+
+/**
+ * Every change of a vendor's cost (from the audit log: who, when, old and new value) and every amount request, oldest first.
+ * Nothing new is stored: each cost change was already audited. Used for the cost chart in the amount approval dialog.
+ */
+/** One reply read for any amount request of the vendor, with the request it answered. */
+export interface PriceReply { requestId: string; requestStatus: string; requested: { ratePerShop: number | null; farRatePerShop: number | null }; at?: Date; receivedAt?: Date; from?: string; snippet?: string; outcome?: string }
+
+export async function priceHistoryOfZohoVendor(contactId: string): Promise<{ changes: PriceChange[]; requests: PriceRequest[]; replies: PriceReply[]; approval: Approval | null }> {
+  const [vendor, typed, allRequests] = await Promise.all([
+    Vendor.findOne({ zohoContactId: contactId }).select('_id').lean(),
+    VendorPrice.findOne({ zohoContactId: contactId }).select('_id').lean(),
+    VendorRateApproval.find({ zohoContactId: contactId }).sort({ createdAt: 1 }).lean(),
+  ]);
+  // A request that a newer one replaced is not an amount request any more, but a reply that came for it was still read: replies keep it.
+  const requests = allRequests.filter((r) => r.status !== 'REPLACED');
+  const replies: PriceReply[] = allRequests
+    .flatMap((r) => (r.history ?? []).map((h) => ({ requestId: r.requestId, requestStatus: r.status ?? 'PENDING', requested: { ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null }, ...(h.at ? { at: h.at } : {}), ...(h.receivedAt ? { receivedAt: h.receivedAt } : {}), ...(h.from ? { from: h.from } : {}), ...(h.snippet ? { snippet: h.snippet } : {}), ...(h.outcome ? { outcome: h.outcome } : {}) })))
+    .sort((x, y) => new Date(y.receivedAt ?? y.at ?? 0).getTime() - new Date(x.receivedAt ?? x.at ?? 0).getTime());
+  const ids = [vendor?._id, typed?._id].filter((x) => !!x);
+  const logs = ids.length
+    ? await AuditLog.find({ entity: { $in: ['Vendor', 'VendorPrice'] }, entityId: { $in: ids }, 'changes.field': { $in: ['ratePerShop', 'farRatePerShop'] } }).sort({ at: 1 }).limit(200).populate('user', 'name').lean()
+    : [];
+  const pair = (l: (typeof logs)[number], field: string) => {
+    const c = l.changes?.find((x) => x.field === field);
+    return c ? { from: (c.oldValue as number | null) ?? null, to: (c.newValue as number | null) ?? null } : null;
+  };
+  return {
+    replies,
+    changes: logs.map((l) => ({ at: l.at, by: (l.user as unknown as { name?: string } | null)?.name ?? l.role ?? 'User', ratePerShop: pair(l, 'ratePerShop'), farRatePerShop: pair(l, 'farRatePerShop') })),
+    requests: requests.map((r) => ({
+      requestId: r.requestId, at: (r as { createdAt?: Date }).createdAt ?? new Date(0), status: r.status ?? 'PENDING',
+      requested: { ratePerShop: r.requested.ratePerShop ?? null, farRatePerShop: r.requested.farRatePerShop ?? null },
+      limit: { ratePerShop: r.limit.ratePerShop ?? null, farRatePerShop: r.limit.farRatePerShop ?? null }, decidedAt: r.decidedAt ?? null,
+    })),
+    // The latest request with every reply read: the dialog shows this live, so a reply just fetched appears without reopening it.
+    approval: (await latestApprovals([contactId])).get(contactId) ?? null,
+  };
 }

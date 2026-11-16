@@ -7,12 +7,13 @@ import { actorOf, objectId } from '../../common/query';
 import { receive } from '../files/file.controller';
 import { z } from 'zod';
 import { lookupZohoVendor, zohoVendorDetails } from '../zoho/zoho.service';
-import { exportZohoVendors, listZohoVendors, startZohoVendorSync, zohoExportQuery, zohoVendorListQuery, zohoVendorStatus } from '../zoho/zoho.vendors';
+import { exportZohoVendors, listZohoVendors, zohoExportQuery, zohoVendorListQuery, startZohoCitySync, zohoVendorCities, zohoVendorStatus } from '../zoho/zoho.vendors';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
 import * as svc from './vendor.service';
 import { lookupPincode, pincodeParam } from './pincode.service';
-import { addVendorSkill, listVendorSkills, setZohoVendorPrice } from './vendorPrice.service';
+import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, priceHistoryOfZohoVendor, setZohoVendorPrice } from './vendorPrice.service';
+import { companyRates } from './vendorRateApproval.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
 
@@ -40,6 +41,11 @@ vendorRouter.get('/types', ...read, asyncHandler(async (_req, res) => ok(res, aw
 vendorRouter.post('/types', ...write, asyncHandler(async (req, res) => ok(res, await svc.addVendorType(svc.vendorTypeBody.parse(req.body), actorOf(req)), undefined, 201)));
 vendorRouter.get('/skills', ...read, asyncHandler(async (_req, res) => ok(res, await listVendorSkills())));
 vendorRouter.post('/skills', ...write, asyncHandler(async (req, res) => ok(res, await addVendorSkill(svc.skillBody.parse(req.body), actorOf(req)), undefined, 201)));
+// The company rates the Super Admin set (Admin > Cost Rates): shown in the Add cost box; a cost above them needs approval.
+// A person can only reject (after a reply was read); approval comes from the approver's reply.
+const decisionBody = z.object({ decision: z.literal('NOT_APPROVED'), reason: z.string().trim().max(200).optional() });
+vendorRouter.put('/rate-approvals/:requestId/decision', ...write, asyncHandler(async (req, res) => ok(res, await changeRateApprovalStatus(z.string().regex(/^(ADN-Signage-vap|Adn-Signage-VenRate)-\d{7,}$/).parse(req.params.requestId), decisionBody.parse(req.body).decision, actorOf(req), decisionBody.parse(req.body).reason))));
+vendorRouter.get('/company-rates', ...read, asyncHandler(async (_req, res) => ok(res, await companyRates())));
 vendorRouter.get('/active', ...read, asyncHandler(async (_req, res) => ok(res, await svc.activeVendors())));
 vendorRouter.get('/template', ...read, asyncHandler(async (_req, res) => sheet(res, await vendorTemplate(), 'vendor-template.xlsx')));
 const download = (res: import('express').Response, f: { buffer: Buffer; contentType: string; ext: string }, name: string) => {
@@ -55,14 +61,16 @@ vendorRouter.post('/import', ...write, upload, asyncHandler(async (req, res) => 
   ok(res, await importVendors(req.file, req.query.commit === 'true', actorOf(req)));
 }));
 vendorRouter.post('/', ...write, asyncHandler(async (req, res) => ok(res, await svc.createVendor(svc.vendorBody.parse(req.body), actorOf(req)), undefined, 201)));
-// Zoho vendors: a stored copy of Zoho's vendor list. Not registered vendors; "Register" is a separate step.
-vendorRouter.get('/zoho-directory', ...read, asyncHandler(async (req, res) => { const r = await listZohoVendors(zohoVendorListQuery.parse(req.query)); ok(res, r.items, r.meta); }));
+// Zoho vendors: read live from Zoho Books (only vendors that got a cost are stored). Not registered vendors; "Register" is a separate step.
+vendorRouter.get('/zoho-directory/cities', ...read, asyncHandler(async (_req, res) => ok(res, await zohoVendorCities())));
+vendorRouter.post('/zoho-directory/cities/sync', ...read, asyncHandler(async (_req, res) => ok(res, startZohoCitySync())));
+vendorRouter.get('/zoho-directory',...read, asyncHandler(async (req, res) => { const r = await listZohoVendors(zohoVendorListQuery.parse(req.query)); ok(res, r.items, r.meta); }));
 vendorRouter.get('/zoho-directory/export', ...read, asyncHandler(async (req, res) => download(res, await exportZohoVendors(zohoExportQuery.parse(req.query)), 'zoho-vendors')));
-vendorRouter.get('/zoho-directory/status', ...read, asyncHandler(async (_req, res) => ok(res, await zohoVendorStatus())));
-vendorRouter.post('/zoho-directory/sync', ...write, asyncHandler(async (req, res) => ok(res, await startZohoVendorSync(actorOf(req)), undefined, 202)));
+vendorRouter.get('/zoho-directory/status', ...read, asyncHandler(async (req, res) => ok(res, await zohoVendorStatus(req.query.signageOnly === 'true' || req.query.signageOnly === 'false' ? req.query.signageOnly : undefined, req.query.count === 'true'))));
 // Vendor price management: price per shop of one Zoho vendor (typed in the list).
 const zohoContactParam = z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') });
 vendorRouter.put('/zoho-directory/:contactId/price', ...write, asyncHandler(async (req, res) => ok(res, await setZohoVendorPrice(zohoContactParam.parse(req.params).contactId, svc.priceBody.parse(req.body), actorOf(req)))));
+vendorRouter.get('/zoho-directory/:contactId/price-history', ...read, asyncHandler(async (req, res) => ok(res, await priceHistoryOfZohoVendor(zohoContactParam.parse(req.params).contactId))));
 vendorRouter.get('/zoho-directory/:contactId/details', ...write, asyncHandler(async (req, res) => ok(res, await zohoVendorDetails(z.object({ contactId: z.string().regex(/^\d{10,25}$/, 'Invalid Zoho contact id') }).parse(req.params).contactId))));
 // Fill the registration form from a Zoho Books vendor number (e.g. 12543). Must stay above '/:id'.
 vendorRouter.get('/zoho/:vendorNo', ...write, asyncHandler(async (req, res) => ok(res, await lookupZohoVendor(svc.zohoVendorNoParam.parse(req.params).vendorNo))));

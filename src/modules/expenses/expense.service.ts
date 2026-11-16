@@ -36,7 +36,7 @@ export async function approverIds() {
 
 export async function notifyApprovers(project: { _id: Types.ObjectId; code: string; client: unknown; clientDetails?: unknown }, title: string, body: string, key: string, actor: Actor) {
   const client = { name: await clientNameOf(project) };
-  await notify({ kind: 'COST_APPROVAL', recipients: await approverIds(), title, body, project: { _id: project._id, code: project.code, clientName: client?.name }, actorId: actor.id, dedupe: (r) => `${key}:${r}` });
+  await notify({ kind: 'COST_APPROVAL', recipients: await approverIds(), title, body, project: { _id: project._id, code: project.code, clientName: client?.name ?? undefined }, actorId: actor.id, dedupe: (r) => `${key}:${r}` });
 }
 
 async function assertReceipt(projectId: string, fileId: string) {

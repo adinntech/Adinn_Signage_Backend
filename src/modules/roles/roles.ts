@@ -49,6 +49,8 @@ export const PERMISSIONS = [
   // Recce cost module: submit own trip claims / review them (Admin edits the rates with finance:manage).
   'recce-cost:submit',
   'recce-cost:review',
+  // Admin panel: who each kind of request email goes to (To / CC / BCC / reply mailbox). SUPER_ADMIN only.
+  'mail:manage',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 

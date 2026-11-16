@@ -10,6 +10,8 @@ import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { discardStoredFiles, readStoredFile, storedFileUrl, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
+import { routingOf } from '../mailSettings/mailRouting.service';
+import { newRequestId, subjectWithId } from '../mailSettings/requestId';
 import { mailAvailable } from '../notifications/mail.service';
 import { Project } from '../projects/project.model';
 import { liveOrder } from '../sales/order.service';
@@ -35,7 +37,6 @@ const day = (d?: Date | null) => (d ? d.toISOString().slice(0, 10) : '');
 
 /** Sender identities Client Servicing may choose: MAIL_FROM plus the configured extras. */
 export const senderIdentities = () => [...new Set([env.MAIL_FROM, ...(env.MAIL_FROM_IDENTITIES ?? '').split(';')].map((s) => s?.trim()).filter(Boolean) as string[])];
-const group = (v?: string) => (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 const mailKindOf = (kinds: CodeKind[]): Kind => (kinds.length === 2 ? 'COMBINED_CODE_REQUEST' : kinds[0] === 'CLIENT_CODE' ? 'CLIENT_CODE_REQUEST' : 'PROJECT_CODE_REQUEST');
 
@@ -77,21 +78,21 @@ async function assertRequestable(o: Doc, client: { approvedCode?: string | null 
 const row = (r: string, v: string) => `${r}: <strong>${escapeHtml(v)}</strong>`;
 
 function defaultDrafts(o: Doc, client: { name?: string | null; clientNo?: string | null; gstin?: string | null; onboarding?: { pan?: string | null } | null }, me: string) {
-  const sig = `<p>Regards,<br>${escapeHtml(me)}<br>Client Servicing</p>`;
+  const sig = `<p>Thank you,<br>${escapeHtml(me)}<br>Client Servicing</p>`;
   const clientBlock =
-    `<h3>Client Code Request</h3><p>Please create a client code for the client below.</p>` +
+    `<p>Please create a client code for the client below and reply with it as <strong>Client Code: ABC123</strong>.</p>` +
     `<p>${[row('Client', client.name ?? '-'), row('Client ID', client.clientNo ?? '-'), row('GST Number', client.gstin ?? '-'), row('PAN', client.onboarding?.pan ?? '-')].join('<br>')}</p>`;
   const projectBlock =
-    `<h3>Project Code Request</h3><p>Please create a project code for the order below.</p>` +
+    `<p>Please create a project code for the order below and reply with it as <strong>Project Code: 12345678</strong>.</p>` +
     `<p>${[row('Client', client.name ?? '-'), row('Order No', o.orderNo)].join('<br>')}</p>`;
   if (signageMailAvailable()) {
     // The PHP template prints every detail; this text only goes out as "Additional Notes".
-    const note = (what: string) => `<p>Please create the ${what} and confirm once it is done.</p>`;
+    const note = (what: string, example: string) => `<p>Kindly create the ${what} and reply to this mail with it, for example <strong>${example}</strong>.</p>`;
     const s = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
     return {
-      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code') },
-      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code') },
-      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code') },
+      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
+      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code', 'Client Code: ABC123') },
+      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code', 'Project Code: 12345678') },
     };
   }
   const subj = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
@@ -133,6 +134,7 @@ export async function overview(orderId: string, actor: Actor) {
   ]);
   if (!client) throw AppError.notFound('Client not found');
   const requests = await present(rowsRaw);
+  const routing = { CLIENT_CODE: await routingOf('CLIENT_CODE'), PROJECT_CODE: await routingOf('PROJECT_CODE') };
   const stateOf = async (kind: CodeKind) => {
     const code = await confirmedCodeOf(kind, o._id, client, o.recce?.projectCode);
     const rows = requests.filter((r) => r.kind === kind);
@@ -169,7 +171,9 @@ export async function overview(orderId: string, actor: Actor) {
       enabled: mailAvailable() || signageMailAvailable(),
       from: env.MAIL_FROM ?? null,
       identities: senderIdentities(),
-      groups: { CLIENT_CODE: group(env.CODE_REQUEST_CLIENT_RECIPIENTS), PROJECT_CODE: group(env.CODE_REQUEST_PROJECT_RECIPIENTS) },
+      groups: { CLIENT_CODE: routing.CLIENT_CODE.to, PROJECT_CODE: routing.PROJECT_CODE.to },
+      /** Admin panel > Mail settings: the To / CC / BCC each request email opens with. */
+      routing,
     },
     defaults: defaultDrafts(o, client, me?.name ?? 'Client Servicing'),
     drafts: rowsRaw.filter((r) => r.status === 'DRAFT' && r.draft).map((r) => ({ kind: r.kind, ...r.draft })),
@@ -267,6 +271,8 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
     const mailBatchId = randomUUID();
     const mode = m.kinds.length === 2 ? ('COMBINED' as const) : multi ? ('SEPARATE' as const) : ('SINGLE' as const);
     const rowIds: Types.ObjectId[] = [];
+    const idType = m.kinds.length === 2 ? ('COMBINED_CODE' as const) : m.kinds[0]!;
+    const routing = await routingOf(m.kinds.includes('PROJECT_CODE') ? 'PROJECT_CODE' : 'CLIENT_CODE');
     for (const kind of m.kinds) {
       const set = { client: o.client, mailBatchId, mode, requestKey: keyOf(i), bcc: m.bcc, source: 'CS' as const, createdBy: actor.id };
       const r =
@@ -275,6 +281,9 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
         (await CodeRequest.create({ order: o._id, kind, status: 'DRAFT', ...set }));
       rowIds.push(r._id);
     }
+    // The ID is taken once per email: a failed email that is retried keeps it.
+    const requestId = (await CodeRequest.findOne({ _id: { $in: rowIds }, requestId: { $type: 'string' } }).select('requestId').lean())?.requestId ?? (await newRequestId(idType));
+    await CodeRequest.updateMany({ _id: { $in: rowIds } }, { $set: { requestId } });
     const entry = await deliver({
       order: o._id,
       client: o.client,
@@ -283,10 +292,10 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
       cc: m.cc,
       bcc: m.bcc,
       from: m.from,
-      subject: m.subject,
+      subject: subjectWithId(m.subject, requestId),
       body: signageMailAvailable() ? sanitizeHtml(m.body) : sanitizeHtml(m.body) + footer(),
       attachments: stored,
-      ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, m.kinds, mailBatchId, m.body) } : {}),
+      ...(signageMailAvailable() ? { signage: { ...buildCodeMail({ order: o, client }, m.kinds, requestId, m.body), ...(routing.replyTo ? { replyTo: routing.replyTo } : {}) } } : {}),
       requestKey: keyOf(i),
       actor,
     });
@@ -332,6 +341,9 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
   if (!prior) throw AppError.notFound('The original email was not found');
   const client = await Client.findById(o.client).select('name clientNo gstin address email phone approvedCode onboarding.pan contacts').lean();
   if (!client) throw AppError.notFound('Client not found');
+  const requestId = rows.find((r) => r.requestId)?.requestId ?? (await newRequestId(rows.length === 2 ? 'COMBINED_CODE' : rows[0]!.kind));
+  await CodeRequest.updateMany({ _id: { $in: rows.map((r) => r._id) } }, { $set: { requestId } });
+  const routing = await routingOf(rows.some((r) => r.kind === 'PROJECT_CODE') ? 'PROJECT_CODE' : 'CLIENT_CODE');
   const entry = await deliver({
     order: o._id,
     client: o.client,
@@ -339,11 +351,11 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
     to: prior.to,
     cc: prior.cc,
     bcc: rows[0]!.bcc,
-    subject: prior.subject ?? '',
+    subject: subjectWithId(prior.subject ?? '', requestId),
     body: prior.body ?? '',
     attachments: (prior.attachments ?? []).filter((a) => a.fileId) as StoredFile[],
     resentFrom: prior._id,
-    ...(signageMailAvailable() ? { signage: buildCodeMail({ order: o, client }, rows.map((r) => r.kind), rows[0]!.mailBatchId ?? String(rows[0]!._id), prior.body ?? '') } : {}),
+    ...(signageMailAvailable() ? { signage: { ...buildCodeMail({ order: o, client }, rows.map((r) => r.kind), requestId, prior.body ?? ''), ...(routing.replyTo ? { replyTo: routing.replyTo } : {}) } } : {}),
     actor,
   });
   if (!entry) throw new AppError(500, 'INTERNAL', 'The email record could not be saved');
@@ -393,6 +405,16 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
   if (await CodeRequest.exists({ kind, confirmedCode: code, order: { $ne: o._id } })) throw invalid('code', `${LABEL[kind]} ${code} is already confirmed on another order`);
 
   const req = await liveRequest(o, kind, actor);
+  // What the person changed from what the reply gave (code, estimates) is kept with who and when.
+  const fetched = { code: req.reply?.detectedCode ?? '', estimates: [...(req.reply?.estimates ?? [])] };
+  const finalEstimates = kind === 'PROJECT_CODE' ? [...new Set(input.estimates ?? fetched.estimates)] : [];
+  const edits: { at: Date; by: string; byName: string; field: string; from: string; to: string }[] = [];
+  if (req.reply) {
+    const byName = (await User.findById(actor.id).select('name').lean())?.name ?? '';
+    const at = new Date();
+    if (code !== fetched.code) edits.push({ at, by: actor.id, byName, field: 'code', from: fetched.code, to: code });
+    if (kind === 'PROJECT_CODE' && finalEstimates.join(',') !== fetched.estimates.join(',')) edits.push({ at, by: actor.id, byName, field: 'estimates', from: fetched.estimates.join(', '), to: finalEstimates.join(', ') });
+  }
   const stored: StoredFile[] = [];
   try {
     for (const f of uploads) stored.push(await storeEmbeddedFile({ category: 'CODE_CONFIRMATION_EVIDENCE', clientName: client.name ?? 'Client', folderKey: o.orderNo, file: f, actor, owner: { entity: 'SalesOrder', id: o._id } }));
@@ -403,7 +425,7 @@ export async function confirmCode(orderId: string, input: z.infer<typeof confirm
   try {
     const r = await CodeRequest.updateOne(
       { _id: req._id, status: 'PENDING_CONFIRMATION' },
-      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote, evidence: stored } },
+      { $set: { status: 'CONFIRMED', confirmedCode: code, confirmedAt: new Date(), confirmedBy: actor.id, evidenceNote: input.evidenceNote, evidence: stored, ...(kind === 'PROJECT_CODE' ? { estimates: finalEstimates } : {}), ...(edits.length ? { editHistory: edits } : {}) } },
     );
     if (!r.matchedCount) throw AppError.conflict('This request was already handled. Reload the page.');
     if (kind === 'CLIENT_CODE') {

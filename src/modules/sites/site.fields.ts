@@ -38,7 +38,8 @@ const PATTERNS: [MappableField, string[], string[]][] = [
   ['shopName', ['shopname', 'shop', 'storename', 'store', 'outletname', 'outlet', 'firmname', 'firm', 'businessname', 'dealershopname', 'retailer', 'retailername', 'countername'], ['shopname', 'storename', 'outletname', 'retailername']],
   ['dealerName', ['dealername', 'dealer', 'customername', 'customer', 'customerdealername', 'partyname', 'party', 'ownername', 'name'], ['dealer', 'customer']],
   ['contactPerson', ['contactperson', 'contactname', 'contact'], ['contactperson']],
-  ['location', ['location', 'area', 'locality', 'place', 'town', 'city'], ['location']],
+  // "Allocation Status" contains the letters "location": only whole names count here, never a part of a longer word.
+  ['location', ['location', 'area', 'locality', 'place', 'town', 'city', 'areatown', 'areaandtown', 'townarea', 'areaname', 'townname', 'village', 'locationarea', 'locationname', 'shoplocation'], ['locationname', 'shoplocation']],
   ['unit', ['unit', 'uom'], []],
   ['boardType', ['boardtype', 'signagetype', 'type'], ['boardtype']],
   ['quantity', ['qty', 'quantity', 'noofboards', 'boards', 'nos'], []],
