@@ -66,7 +66,7 @@ async function codeReply(requestId: string, msg: IncomingReply, fresh: string, f
     const pr = kind === 'PROJECT_CODE' ? projectRead(fresh) : null;
     const found = pr ?? findClientCode(fresh);
     let autoConfirmError: string | undefined;
-    const estimates = kind === 'PROJECT_CODE' ? findEstimates(fresh) : [];
+    const estimates = kind === 'PROJECT_CODE' ? findEstimates(fresh, rulesFromEnv()) : [];
     const base = { messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), ...(pr ? { status: pr.status, reason: pr.reason } : {}) };
     // A later reply on the same thread overwrites the one shown (a corrected code); every reply stays in the history with its time.
     const newest = row.reply?.receivedAt;
@@ -100,7 +100,7 @@ async function salesProjectReply(requestId: string, msg: IncomingReply, fresh: s
   const seen = o.recce?.codeReply?.messageId === msg.messageId || o.recce?.codeReplyHistory?.some((h) => h.messageId === msg.messageId);
   if (seen) return 'duplicate';
   const found = projectRead(fresh);
-  const estimates = findEstimates(fresh);
+  const estimates = findEstimates(fresh, rulesFromEnv());
   const entry = { requestId, messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), status: found.status, reason: found.reason };
   const newest = o.recce?.codeReply?.receivedAt;
   const isNewest = !newest || receivedAt >= newest;

@@ -4,7 +4,7 @@ import { runReplyCase } from '../src/modules/mailReplies/replyTestRunner';
 
 describe('reply test suite size', () => {
   it('has at least 180 cases in the four groups', () => {
-    expect(VENDOR_CASES).toHaveLength(50);
+    expect(VENDOR_CASES).toHaveLength(53);
     expect(RATE_CASES).toHaveLength(50);
     expect(PROJECT_CASES).toHaveLength(50);
     expect(CROSS_CASES).toHaveLength(30);

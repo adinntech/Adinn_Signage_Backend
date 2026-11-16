@@ -28,13 +28,17 @@ export interface ReplyRules {
   vendorMaxDigits: number;
   projectMinDigits: number;
   projectMaxDigits: number;
+  /** Estimate numbers (after EST): this many digits or more, and at most estMaxDigits. */
   estDigits: number;
+  estMaxDigits: number;
+  /** Words that start another system's number (UF987654320): never read as a code. */
+  unrelatedPrefixes: string[];
   /** Characters that may sit between EST and its digits (all read as "-"). */
   estSeparators: string;
   /** Extra project code formats (regex sources, case-insensitive), e.g. "PRJ[-_/ ]?\\d{4}[-_/ ]?\\d{3,5}". */
   extraProjectPatterns: string[];
 }
-export const DEFAULT_RULES: ReplyRules = { vendorMinDigits: 5, vendorMaxDigits: 12, projectMinDigits: 8, projectMaxDigits: 15, estDigits: 6, estSeparators: '-_/ ', extraProjectPatterns: [] };
+export const DEFAULT_RULES: ReplyRules = { vendorMinDigits: 5, vendorMaxDigits: 12, projectMinDigits: 8, projectMaxDigits: 15, estDigits: 5, estMaxDigits: 12, unrelatedPrefixes: ['UF'], estSeparators: '-_/ ', extraProjectPatterns: [] };
 export function rulesFromEnv(e: Record<string, string | undefined> = process.env): ReplyRules {
   const n = (v: string | undefined, d: number) => (v && Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : d);
   return {
@@ -43,6 +47,8 @@ export function rulesFromEnv(e: Record<string, string | undefined> = process.env
     projectMinDigits: n(e.PROJECT_CODE_MIN_DIGITS, DEFAULT_RULES.projectMinDigits),
     projectMaxDigits: DEFAULT_RULES.projectMaxDigits,
     estDigits: n(e.PROJECT_CODE_EST_DIGITS, DEFAULT_RULES.estDigits),
+    estMaxDigits: n(e.PROJECT_CODE_EST_MAX_DIGITS, DEFAULT_RULES.estMaxDigits),
+    unrelatedPrefixes: e.UNRELATED_CODE_PREFIXES === undefined ? DEFAULT_RULES.unrelatedPrefixes : e.UNRELATED_CODE_PREFIXES.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     estSeparators: e.PROJECT_CODE_EST_SEPARATORS ?? DEFAULT_RULES.estSeparators,
     extraProjectPatterns: (e.PROJECT_CODE_EXTRA_PATTERNS ?? '').split('|||').map((s) => s.trim()).filter(Boolean),
   };
@@ -80,19 +86,132 @@ export function freshText(text: string): string {
   return lines.join('\n').trim();
 }
 
-/** Estimate numbers (EST-20234, EST-020456): many can come with one project code. */
-const EST_RE = /(?<![A-Z0-9])EST(?:\s*[-–—]\s*)?\d{3,10}(?!\d)/gi;
-// Request IDs and estimate numbers are removed first, so their digits are never mistaken for a project code.
+/** Request IDs and estimate numbers are removed first, so their digits are never mistaken for a vendor ID or a project code. */
 /** Bold / italic marks a mail app adds to plain text (*12543 - SRN MEDIA*, _text_, ~text~, `text`) are not part of what was written. */
 export const plain = (s: string) => s.replace(/[*~`]+/g, '').replace(/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g, '');
-const norm = (s: string) => plain(s).replace(ID_RE, ' ').replace(EST_RE, ' ').replace(/[ \t]+/g, ' ');
 const uniq = <T,>(a: T[]) => [...new Set(a)];
-/** Every estimate number in the reply, once each, in the order written, as EST-<digits>. */
-export const findEstimates = (text: string): string[] => uniq([...text.matchAll(EST_RE)].map((m) => `EST-${m[0].replace(/\D/g, '')}`));
+const digitsOf = (s: string) => s.replace(/\D/g, '');
+const lineAt = (t: string, i: number) => {
+  const a = t.lastIndexOf('\n', i) + 1;
+  const b = t.indexOf('\n', i);
+  return t.slice(a, b < 0 ? undefined : b).trim();
+};
+
+/** Whitespace is always a separator (a trailing space is lost in an env file); the other characters come from PROJECT_CODE_EST_SEPARATORS. */
+const sepClass = (seps: string) => `[\\s${[...seps.replace(/\s/g, ''), '–', '—', ':'].map((c) => (/\w/.test(c) ? c : `\\${c}`)).join('')}]`;
+
+/* ---------------------------------------------------------------------------------------------------------------------------
+ * Candidates. A code is never read from a whole mail squashed into one number. The text is first cleaned of things that are
+ * known to be something else (request IDs, estimate numbers, GSTIN, PAN, e-mail addresses, phone numbers, dates, amounts and
+ * configured unrelated prefixes such as UF987654320); then it is cut into candidates (one word, ended by a space, comma, bar or
+ * slash); and only inside ONE candidate are the digits taken, in the order written: "%3924&242*8fafdRW" gives 39242428.
+ * --------------------------------------------------------------------------------------------------------------------------- */
+const TOKEN_SPLIT = /[\s,;|/\\]+/;
+const GSTIN = /\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]\b/gi;
+const PAN = /\b[A-Z]{5}\d{4}[A-Z]\b/gi;
+const GST_TOKEN = /\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z\d]Z[A-Za-z\d]/;
+const PAN_TOKEN = /[A-Za-z]{5}\d{4}[A-Za-z]/;
+const MONTHS = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)';
+/** Text that is known to be something else, replaced by a space (a phone number with a 10-digit run is left: see readTokens). */
+const scrub = (s: string) =>
+  s
+    .replace(GSTIN, ' ')
+    .replace(PAN, ' ')
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}/g, ' ') // e-mail addresses
+    .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')
+    .replace(/(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d+)?/gi, ' ') // amounts
+    .replace(/\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b/g, ' ')
+    .replace(/\+91[\s-]?[6-9]\d{9}(?!\d)/g, ' ') // phone numbers written with a country code or in two groups
+    .replace(/(?<!\d)[6-9]\d{4}[\s-]\d{5}(?!\d)/g, ' ')
+    .replace(/\b(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])[./-](?:\d{4}|\d{2})\b/g, ' ') // dates 12/11/2026, 12-11-26
+    .replace(new RegExp(`\\b\\d{1,2}[-\\s]${MONTHS}[a-z]*[-\\s,.]*\\d{2,4}\\b`, 'gi'), ' '); // 12 Nov 2026
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** A word that starts with a configured unrelated prefix followed by digits (UF987654320, UF-903282) is another system's number. */
+const isUnrelated = (tok: string, rules: ReplyRules) => rules.unrelatedPrefixes.some((p) => new RegExp(`^[^A-Za-z0-9]*${escapeRe(p)}[^A-Za-z0-9]*\\d`, 'i').test(tok));
+const dropUnrelated = (s: string, rules: ReplyRules) => (rules.unrelatedPrefixes.length ? s.replace(/\S+/g, (tok) => (isUnrelated(tok, rules) ? ' ' : tok)) : s);
+
+/** Estimate numbers: "EST" (any case, not inside a longer word: TEST, PREST, ESTIMATE are not it), the separators, then ONE candidate. */
+const estRegex = (rules: ReplyRules) => new RegExp(`(?<![A-Za-z0-9])EST(?![A-Za-z])${sepClass(rules.estSeparators)}*([^\\s,;|/]*)`, 'gi');
+const stripEstimates = (s: string, rules: ReplyRules) => s.replace(estRegex(rules), ' ');
+const norm = (s: string, rules: ReplyRules = DEFAULT_RULES) => plain(stripEstimates(s, rules)).replace(ID_RE, ' ').replace(/[ \t]+/g, ' ');
+/** A line that names another kind of code ("Project code: ...", "Vendor ID: ...", "Client code: ...") is not read for this kind when it carries no label of its own. */
+const PROJECT_LINE = /project[\s_]*(?:code|no\.?|number|id)\b|\bproject\b\s*[:=#-]/i;
+const VENDOR_LINE = /\b(?:vendor|supplier)[\s_]*(?:registration[\s_]*)?(?:id|no\.?|number|code)\b|\bv[\s_]*id\b/i;
+const CLIENT_LINE = /client[\s_]*(?:code|id|no\.?|number)\b/i;
+/** The text of a mail without the lines that belong to the other kinds, and each line cut at "Mobile", "Invoice", "GST" ... */
+const withoutLines = (t: string, drop: RegExp[]) =>
+  t.split('\n').filter((l) => !drop.some((d) => d.test(l))).map((l) => cutAtStop(l)).join('\n');
+const CANCELLED_RE = /(?<!not\s)\b(cancel+ed|cancellation|revoked|withdrawn|terminated|void(?:ed)?)\b/i;
+
+interface Cand {
+  /** The candidate as written. */
+  raw: string;
+  /** Its digits, in the order written (a string: leading zeros stay). */
+  id: string;
+  /** Letters or symbols sit inside it. */
+  mixed: boolean;
+}
+/** One segment cut into candidates. `good` have min..max digits; `short` are the digit counts that did not fit. */
+function readTokens(seg: string, min: number, max: number, skipPhone: boolean): { good: Cand[]; short: string[]; phone: boolean; phones: string[] } {
+  const good: Cand[] = [];
+  const short: string[] = [];
+  const phones: string[] = [];
+  let phone = false;
+  for (const tok of seg.split(TOKEN_SPLIT)) {
+    if (!digitsOf(tok) || GST_TOKEN.test(tok) || PAN_TOKEN.test(tok)) continue;
+    // 12345-67890: two numbers joined by a dash stay two candidates; 12-34-56-78 is one.
+    const parts = tok.split(/[-–—]+/).filter(Boolean);
+    const units = parts.filter((p) => digitsOf(p).length >= min).length >= 2 ? parts.filter((p) => digitsOf(p)) : [tok];
+    for (const u of units) {
+      const d = digitsOf(u);
+      if (!d) continue;
+      if (/^[\s+()\d–—-]+$/.test(u) && /^[6-9]\d{9}$/.test(d)) {
+        phone = true;
+        if (skipPhone) { phones.push(d); continue; }
+      }
+      if (d.length >= min && d.length <= max) good.push({ raw: u.replace(/[.,:;!?]+$/, ''), id: d, mixed: /\D/.test(u.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')) });
+      else short.push(d);
+    }
+  }
+  return { good, short, phone, phones };
+}
+
+/* ------------------------------------------------------------------ estimate numbers ------------------------------------------------------------------ */
+export interface EstimateRead {
+  /** The estimate as written, "EST-45@43#949". */
+  raw: string;
+  digits: string;
+  /** What would be saved: EST-<digits>; null when the digits do not fit the rule. */
+  normalized: string | null;
+  valid: boolean;
+  reason: string;
+  context: string;
+}
+/** Every EST candidate in the text: valid (estMin..estMax digits) or with the reason it is not. A word after EST without digits is not an estimate. */
+export function readEstimates(text: string, rules: ReplyRules = DEFAULT_RULES): EstimateRead[] {
+  const out: EstimateRead[] = [];
+  const t = dropUnrelated(scrub(text.replace(ID_RE, ' ')), rules);
+  for (const m of t.matchAll(estRegex(rules))) {
+    const d = digitsOf(m[1] ?? '');
+    if (d.length < 2) continue;
+    const valid = d.length >= rules.estDigits && d.length <= rules.estMaxDigits;
+    out.push({
+      raw: m[0].trim(),
+      digits: d,
+      normalized: valid ? `EST-${d}` : null,
+      valid,
+      reason: valid ? 'Digits after the EST prefix' : d.length < rules.estDigits ? `An estimate number needs ${rules.estDigits} or more digits (found ${d.length})` : `An estimate number has at most ${rules.estMaxDigits} digits (found ${d.length})`,
+      context: lineAt(t, m.index!),
+    });
+  }
+  return out;
+}
+/** Every valid estimate number in the reply, once each, in the order written, as EST-<digits>. */
+export const findEstimates = (text: string, rules: ReplyRules = DEFAULT_RULES): string[] => uniq(readEstimates(text, rules).filter((e) => e.valid).map((e) => e.normalized!));
 
 export type Found = { code: string | null; ambiguous: string[] };
 
-/** What reading one kind of code from a reply gave. `raw` is what was written, `normalized` is what would be saved. */
+/** What reading one kind of code from a reply gave. `raw` is what was written, `normalized` is what would be saved, `context` the line it came from. */
 export type CodeStatus = 'EXTRACTED' | 'REVIEW_REQUIRED' | 'INVALID' | 'CANCELLED' | 'PENDING' | 'NOT_FOUND';
 export interface CodeRead {
   status: CodeStatus;
@@ -102,9 +221,30 @@ export interface CodeRead {
   reason: string;
   candidates: string[];
   flags: string[];
+  context?: string | null;
 }
 const read = (status: CodeStatus, raw: string | null, normalized: string | null, confidence: number, reason: string, candidates: string[] = [], flags: string[] = []): CodeRead => ({ status, raw, normalized, confidence, reason, candidates, flags });
 const toFound = (r: CodeRead): Found => (r.status === 'EXTRACTED' ? { code: r.normalized, ambiguous: [] } : { code: null, ambiguous: r.status === 'REVIEW_REQUIRED' ? r.candidates : [] });
+
+/**
+ * The estimate number of a reply, by itself ("EST-12abc345" gives EST-12345). One estimate is EXTRACTED; several different ones, or
+ * a cancelled one, are left for a person; fewer digits than the rule is INVALID. The reply may carry many estimates for one project
+ * (findEstimates lists them all); this is the single-value reading used when exactly one is expected.
+ */
+export function extractEstimate(text: string, rules: ReplyRules = DEFAULT_RULES): CodeRead {
+  const reads = readEstimates(text, rules);
+  const valid = reads.filter((e) => e.valid);
+  const ids = uniq(valid.map((e) => e.normalized!));
+  const cancelled = CANCELLED_RE.test(text);
+  if (ids.length > 1) return { ...read('REVIEW_REQUIRED', valid.map((e) => e.raw).join(' / '), null, 0.4, `More than one estimate number (${ids.join(', ')}): a person decides`, ids, ['MULTIPLE_CANDIDATES']), context: valid[0]!.context };
+  if (ids.length === 1) {
+    const e = valid[0]!;
+    if (cancelled) return { ...read('CANCELLED', e.raw, null, 0.9, 'The reply says it is cancelled: the estimate is not confirmed', ids, ['CANCELLED']), context: e.context };
+    return { ...read('EXTRACTED', e.raw, e.normalized, /\D/.test(e.raw.replace(/^EST[\s_\-–—/:]*/i, '').replace(/[.,:;!?]+$/, '')) ? 0.8 : 0.95, e.reason, ids, /\D/.test(e.raw.replace(/^EST[\s_\-–—/:]*/i, '').replace(/[.,:;!?]+$/, '')) ? ['MIXED_CHARS'] : []), context: e.context };
+  }
+  if (reads.length) return { ...read('INVALID', reads[0]!.raw, null, 0.2, reads[0]!.reason, [], ['INVALID_FORMAT']), context: reads[0]!.context };
+  return read('NOT_FOUND', null, null, 0, 'No estimate number (EST-...) in the reply');
+}
 
 /** Words after which the text is about something else (phone, GST, an amount, a quoted old mail), so a number there is not the code. */
 const STOP = /\b(?:gst(?:in)?|pan|mobile|mob|phone|ph|contact|tel|cell|invoice|inv|amount|date|ref|po|quoted?|previous|aadhaar|bank|account|ifsc)\b/i;
@@ -112,8 +252,6 @@ const cutAtStop = (s: string) => {
   const i = s.search(STOP);
   return i >= 0 ? s.slice(0, i) : s;
 };
-const GSTIN = /\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]\b/gi;
-const PAN = /\b[A-Z]{5}\d{4}[A-Z]\b/gi;
 const MOBILE = /^[6-9]\d{9}$/;
 const isMobile = (d: string) => MOBILE.test(d);
 /** After a label, up to the end of its line (and before any "GST:", "Mobile:" ...). */
@@ -124,154 +262,183 @@ function segmentsAfter(t: string, label: RegExp): string[] {
 }
 
 /**
- * Vendor ID from Accounts' reply: DIGITS ONLY, `vendorMinDigits` or more in a row (letters around it are dropped:
- * "AB12345" gives 12345). In order of trust:
- * 1. after "vendor id / no / number / code" (the rest of that line, before GST / mobile / quoted text);
+ * Vendor ID from Accounts' reply: DIGITS ONLY, `vendorMinDigits` or more, taken from ONE candidate (a word), letters and symbols in it
+ * are dropped and the digits keep their order ("AB12CD345" and "78@95#4" give 12345 and 78954; "UF987654320" is another system's
+ * number and is ignored). In order of trust:
+ * 1. after "vendor id / no / number / code", "vendor:", "VId" (the rest of that line, before GST / mobile / quoted text);
  * 2. after a bare "code" or "id";
  * 3. a number followed by a dash and a name: "Zoho Book - 12589 - SRN MEDIA", "12589 - SRN MEDIA";
- * 4. a line that is only the number;
- * 5. the only 5 to 9 digit number in the whole reply (phone numbers, GSTIN, dates, years and amounts are not counted).
- * Two different numbers at the same level is REVIEW_REQUIRED. A number broken by decoration ("12***345") is only a
- * candidate for a person (REVIEW_REQUIRED), never saved on its own.
+ * 4. a line that is only one word holding the number ("78@95#4", "12589");
+ * 5. the only 5 to 9 digit number in the whole reply, or (last) the only word of mixed letters / digits that holds enough digits.
+ * Two different numbers at the same level is REVIEW_REQUIRED. Phone numbers, GSTIN, PAN, dates, years and amounts are not counted.
  */
 export function extractVendorId(text: string, rules: ReplyRules = DEFAULT_RULES): CodeRead {
+  const out = { context: null as string | null };
+  return { ...vendorCore(text, rules, out), context: out.context };
+}
+function vendorCore(text: string, rules: ReplyRules, out: { context: string | null }): CodeRead {
   const min = rules.vendorMinDigits;
   const max = rules.vendorMaxDigits;
-  const t = text.replace(ID_RE, ' ').replace(GSTIN, ' ').replace(PAN, ' ');
-  const cancelled = /(?<!not\s)\b(cancel+ed|cancellation|revoked|withdrawn|terminated|void(?:ed)?)\b/i.test(t);
-  const run = new RegExp(`(?<!\\d)([A-Za-z]{1,6}[-_/]?)?(\\d{${min},${max}})(?!\\d)`, 'g');
+  const t = stripEstimates(dropUnrelated(scrub(text.replace(ID_RE, ' ')), rules), rules);
+  const cancelled = CANCELLED_RE.test(t);
   const flags: string[] = [];
-  const pick = (seg: string) => {
-    const hits: { raw: string; id: string }[] = [];
-    for (const m of seg.matchAll(run)) {
-      if (isMobile(m[2]!)) { flags.push('PHONE_LIKE'); continue; }
-      hits.push({ raw: m[0], id: m[2]! });
-      if (m[1]) flags.push('LETTERS_DROPPED');
-    }
-    return hits;
-  };
-  const finish = (hits: { raw: string; id: string }[], conf: number, how: string): CodeRead | null => {
+  const finish = (hits: Cand[], conf: number, how: string, ctx: string): CodeRead | null => {
     if (!hits.length) return null;
     const ids = uniq(hits.map((h) => h.id));
+    out.context = t.split('\n').map((l) => l.trim()).find((l) => ctx && l.includes(ctx.trim())) ?? ctx;
+    for (const h of hits) if (h.mixed) flags.push(/[A-Za-z]/.test(h.raw) ? 'LETTERS_DROPPED' : 'SYMBOLS_DROPPED');
     if (cancelled) return read('CANCELLED', hits[0]!.raw, null, 0.9, 'The reply says the registration is cancelled: the ID is not confirmed', ids, ['CANCELLED']);
     if (ids.length > 1) return read('REVIEW_REQUIRED', hits.map((h) => h.raw).join(' / '), null, 0.4, `More than one vendor ID in the reply (${ids.join(', ')}): a person decides`, ids, ['MULTIPLE_CANDIDATES']);
-    return read('EXTRACTED', hits[0]!.raw, ids[0]!, conf, how, ids, uniq(flags));
+    return read('EXTRACTED', hits[0]!.raw, ids[0]!, hits[0]!.mixed ? Math.min(conf, 0.7) : conf, how, ids, uniq(flags));
   };
 
   // 1 and 2: after a label.
-  const l1 = /(?:vendor|supplier)[\s_]*(?:registration[\s_]*)?(?:id|no\.?|number|code)(?:[\s_]*(?:is(?![a-z])|:|=|#|-))?/gi;
+  const l1 = /(?:(?:vendor|supplier)[\s_]*(?:registration[\s_]*)?(?:id|no\.?|number|code)|\bv[\s_]*id\b|(?:vendor|supplier)(?=[\s_]*[:=#-]))(?:[\s_]*(?:is(?![a-z])|:|=|#|-))?/gi;
   let segs = segmentsAfter(t, l1);
   if (!segs.length) {
     const l2 = /(?<![a-z])(?:code|id)(?![a-z])(?:[\s_]*(?:is(?![a-z])|:|=|#|-))?/gi;
     segs = [...t.matchAll(l2)].filter((m) => !/(?:project|client|gst|pan|mobile|est|order|invoice)\W{0,4}$/i.test(t.slice(Math.max(0, m.index! - 14), m.index!))).map((m) => cutAtStop(t.slice(m.index! + m[0].length).split('\n')[0]!));
   }
+  segs = segs.map((s) => s.split(/project[\s_]*(?:code|no\.?|number|id)\b|client[\s_]*(?:code|id|no\.?|number)\b/i)[0]!);
   if (segs.length) {
-    const r = finish(segs.flatMap(pick), 0.95, 'Found after the words "vendor id"');
+    const reads = segs.map((s) => readTokens(s, min, max, true));
+    if (reads.some((r) => r.phone)) flags.push('PHONE_LIKE');
+    const r = finish(reads.flatMap((x) => x.good), 0.95, 'Found after the words "vendor id"', segs.find((s) => digitsOf(s)) ?? '');
     if (r) return r;
-    // Nothing long enough: a number broken by decoration is only offered to a person.
-    for (const seg of segs) {
-      const chain = seg.match(/\d+(?:[\s]*[*#@~_]+[\s]*\d+)+/);
-      const joined = chain?.[0].replace(/\D/g, '') ?? '';
-      if (chain && joined.length >= min && joined.length <= max) return read(cancelled ? 'CANCELLED' : 'REVIEW_REQUIRED', chain[0], joined, 0.4, `The number is broken by symbols (${chain[0]}): joined it reads ${joined}. Check it against the mail before saving`, [joined], ['RECONSTRUCTED']);
+    const shorts = [...reads.flatMap((x) => x.short), ...reads.flatMap((x) => x.phones)];
+    if (shorts.length) {
+      const seg = segs.find((x) => digitsOf(x));
+      out.context = (seg && t.split('\n').map((l) => l.trim()).find((l) => l.includes(seg.trim()))) || null;
+      return read('INVALID', shorts[0]!, null, 0.2, `The vendor ID needs ${min} or more digits (found ${Math.max(...shorts.map((s) => s.length))})`, [], ['TOO_SHORT']);
     }
-    const frag = segs.join(' ').match(/\d+/);
-    if (frag) return read('INVALID', frag[0], null, 0.2, `The vendor ID needs ${min} or more digits in a row (found ${frag[0].length})`, [], ['TOO_SHORT']);
-    return read(cancelled ? 'CANCELLED' : 'NOT_FOUND', null, null, 0, 'No number after the words "vendor id"');
+    // The words "vendor id" are there but no digits follow them on that line (the number sits on the next line, or the words come from
+    // the quoted request): do not stop, read the reply the same way as when there is no label.
   }
 
-  // 3 to 5: no label.
-  const n = norm(t);
-  const named = [...n.matchAll(new RegExp(`(?<![\\d.])(\\d{${min},${max}})(?![\\d.])\\s*[-–—:]\\s*(?=[A-Za-z])`, 'g'))].map((m) => ({ raw: m[0].trim(), id: m[1]! }));
-  let r = finish(named, 0.8, 'A number followed by a name');
+  // 3 to 5: no label. Lines that are about a project or client code are not read for a vendor ID.
+  const free = withoutLines(t, [PROJECT_LINE, CLIENT_LINE]);
+  const n = norm(free, rules);
+  const named = [...n.matchAll(new RegExp(`(?<![\\d.])(\\d{${min},${max}})(?![\\d.])\\s*[-–—:]\\s*(?=[A-Za-z])`, 'g'))].map((m) => ({ raw: m[0].trim(), id: m[1]!, mixed: false }));
+  let r = finish(named, 0.8, 'A number followed by a name', named[0]?.raw ?? '');
   if (r) return r;
-  const only = n.split('\n').map((l) => l.trim()).filter((l) => new RegExp(`^\\d{${min},${max}}$`).test(l) && !isMobile(l)).map((l) => ({ raw: l, id: l }));
-  r = finish(only, 0.7, 'A line holding only the number');
+  const lines = free.split('\n').map((l) => l.trim()).filter(Boolean);
+  const only: Cand[] = [];
+  for (const l of lines) {
+    if (/\s/.test(l)) continue;
+    const rt = readTokens(l, min, max, true);
+    if (rt.phone) flags.push('PHONE_LIKE');
+    only.push(...rt.good);
+  }
+  r = finish(only, 0.7, 'A line holding only the number', only[0]?.raw ?? '');
   if (r) return r;
-  const loose = n
-    .replace(/(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d+)?/gi, ' ')
-    .replace(/\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b/g, ' ') // amounts
-    .replace(/\+?\d[\d\s-]{8,}\d/g, ' ') // phone numbers
-    .replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g, ' ') // dates
-    .replace(/\b(19|20)\d{2}\b/g, ' '); // years
-  const nums = [...loose.matchAll(new RegExp(`(?<![\\d.])(\\d{${min},9})(?![\\d.])`, 'g'))].filter((m) => !isMobile(m[1]!)).map((m) => ({ raw: m[1]!, id: m[1]! }));
-  r = finish(nums, 0.55, 'The only number of that size in the reply (no "vendor id" label)');
+  const loose = n.replace(/\b(19|20)\d{2}\b/g, ' '); // years
+  const nums = [...loose.matchAll(new RegExp(`(?<![\\d.])(\\d{${min},9})(?![\\d.])`, 'g'))].filter((m) => !isMobile(m[1]!)).map((m) => ({ raw: m[1]!, id: m[1]!, mixed: false }));
+  r = finish(nums, 0.55, 'The only number of that size in the reply (no "vendor id" label)', nums[0]?.raw ?? '');
   if (r) return r;
+  const mixedWords = readTokens(loose, min, max, true).good.filter((h) => h.mixed);
+  r = finish(mixedWords, 0.5, 'The only word holding enough digits among letters / symbols (no "vendor id" label)', mixedWords[0]?.raw ?? '');
+  if (r) return r;
+  const whole = free.trim();
+  const wholeDigits = digitsOf(whole);
+  if (whole && !/\s/.test(whole) && wholeDigits.length >= 3 && wholeDigits.length < min) {
+    out.context = whole;
+    return read('INVALID', whole, null, 0.15, `The vendor ID needs ${min} or more digits (found ${wholeDigits.length})`, [], ['TOO_SHORT']);
+  }
   const short = loose.match(/(?<![\d.])\d{2,4}(?![\d.])/);
-  return short && /vendor|id\b|registered|created/i.test(t) ? read('INVALID', short[0], null, 0.15, `The vendor ID needs ${min} or more digits in a row`, [], ['TOO_SHORT']) : read(cancelled ? 'CANCELLED' : 'NOT_FOUND', null, null, 0, 'No vendor ID in the reply');
+  return short && /vendor|id\b|registered|created/i.test(t) ? read('INVALID', short[0], null, 0.15, `The vendor ID needs ${min} or more digits`, [], ['TOO_SHORT']) : read(cancelled ? 'CANCELLED' : 'NOT_FOUND', null, null, 0, 'No vendor ID in the reply');
 }
 export const findVendorNo = (text: string, rules: ReplyRules = DEFAULT_RULES): Found => toFound(extractVendorId(text, rules));
 
-/** Whitespace is always a separator (a trailing space is lost in an env file); the other characters come from PROJECT_CODE_EST_SEPARATORS. */
-const sepClass = (seps: string) => `[\\s${[...seps.replace(/\s/g, ''), '–', '—'].map((c) => (/\w/.test(c) ? c : `\\${c}`)).join('')}]`;
 const PENDING_WORDS = /\b(pending|expected|awaiting|yet\s+to|not\s+yet|tentative|will\s+be|to\s+be\s+(?:created|generated|issued)|shortly|soon|once\s+approved)\b/i;
 
 /**
- * Project code: 8 or more digits in a row; or the separate EST-<6 digits> pattern (est, Est, "EST - 457435", EST_457435 all
- * give EST-457435); or an extra configured pattern. Looked for after "project code / no / number / id", "code generated". EST
- * numbers without such a label are only taken when the same line says it was approved / created / generated, otherwise they are
- * estimate numbers (see findEstimates). Digits of dates, amounts and phone numbers are never joined or used. A line that says
- * "pending" / "expected" does not confirm anything (PENDING).
+ * Project code: `projectMinDigits` (8) or more digits taken from ONE candidate; letters and symbols inside it are dropped and the
+ * digits keep their order ("12@34#56$78", "AB12CD34EF56GH78" and "12-34-56-78" give 12345678). After a "project code" label a code
+ * written in groups ("1234 5678") is joined too. Without a label only a line holding a single word, or a plain 8+ digit number, is
+ * taken; a mixed word inside a sentence is only offered to a person. An EST number is an estimate, never a project code (see
+ * findEstimates / extractEstimate). Phone numbers, GSTIN, PAN, dates, amounts and unrelated prefixes (UF...) are never used. A line
+ * that says "pending" / "expected" confirms nothing (PENDING), a cancelled one is not confirmed (CANCELLED).
  */
 export function extractProjectCode(text: string, rules: ReplyRules = DEFAULT_RULES): CodeRead {
-  const t = text.replace(ID_RE, ' ');
-  const sep = sepClass(rules.estSeparators);
-  const estRe = new RegExp(`(?<![A-Za-z0-9])EST${sep}*(\\d+)(?![\\dA-Za-z])`, 'gi');
-  const numRe = new RegExp(`(?<![A-Za-z0-9.])(\\d+)(?![A-Za-z0-9]|\\.\\d)`, 'g');
+  const out = { context: null as string | null };
+  return { ...projectCore(text, rules, out), context: out.context };
+}
+function projectCore(text: string, rules: ReplyRules, out: { context: string | null }): CodeRead {
+  const min = rules.projectMinDigits;
+  const max = rules.projectMaxDigits;
+  const cleaned = dropUnrelated(scrub(text.replace(ID_RE, ' ')), rules);
+  const estimates = readEstimates(cleaned, rules).filter((e) => e.valid);
+  const t = stripEstimates(cleaned, rules);
+  const cancelled = CANCELLED_RE.test(t);
   const extra = rules.extraProjectPatterns.flatMap((p) => { try { return [new RegExp(p, 'gi')]; } catch { return []; } });
   const flags: string[] = [];
-  type Hit = { raw: string; code: string; line: string };
-  const scan = (seg: string, line: string, labelled: boolean): { good: Hit[]; bad: { raw: string; why: string }[] } => {
+  type Hit = { raw: string; code: string; line: string; mixed: boolean };
+  const bad: { raw: string; why: string }[] = [];
+  const tooShort = (d: string) => `A project code needs ${min} or more digits (found ${d.length})`;
+  const tooLong = (d: string) => `A project code has at most ${max} digits (found ${d.length})`;
+  const scan = (seg: string, line: string, labelled: boolean, single: boolean): { good: Hit[]; mixed: Hit[]; bad: { raw: string; why: string }[] } => {
     const good: Hit[] = [];
-    const bad: { raw: string; why: string }[] = [];
+    const mixed: Hit[] = [];
+    const badHere: { raw: string; why: string }[] = [];
     let rest = seg;
-    for (const re of extra) { for (const m of rest.matchAll(re)) good.push({ raw: m[0], code: m[0].toUpperCase().replace(/[\s_/]+/g, '-'), line }); rest = rest.replace(re, ' '); }
-    for (const m of rest.matchAll(estRe)) {
-      if (m[1]!.length === rules.estDigits) good.push({ raw: m[0], code: `EST-${m[1]}`, line });
-      else bad.push({ raw: m[0], why: `An EST code needs exactly ${rules.estDigits} digits (found ${m[1]!.length})` });
+    for (const re of extra) { for (const m of rest.matchAll(re)) good.push({ raw: m[0], code: m[0].toUpperCase().replace(/[\s_/]+/g, '-'), line, mixed: false }); rest = rest.replace(re, ' '); }
+    const r = readTokens(rest, min, max, !labelled);
+    for (const c of r.good) {
+      const hit = { raw: c.raw, code: c.id, line, mixed: c.mixed };
+      if (labelled || single || !c.mixed) good.push(hit);
+      else mixed.push(hit);
     }
-    rest = rest.replace(estRe, ' ');
-    for (const m of rest.matchAll(numRe)) {
-      const d = m[1]!;
-      if (d.length >= rules.projectMinDigits && d.length <= rules.projectMaxDigits && (labelled || !isMobile(d))) good.push({ raw: d, code: d, line });
-      else if (d.length > rules.projectMaxDigits) bad.push({ raw: d, why: `A project code has at most ${rules.projectMaxDigits} digits (found ${d.length})` });
-      else if (d.length === rules.estDigits) bad.push({ raw: d, why: `A ${d.length}-digit number is only a project code with the EST prefix` });
-      else if (d.length >= 4 && d.length < rules.projectMinDigits) bad.push({ raw: d, why: `A project code needs ${rules.projectMinDigits} or more digits in a row (found ${d.length})` });
+    if (!r.good.length && labelled) {
+      // "Project code: 1234 5678": groups after the label are one code.
+      const groups = rest.split(TOKEN_SPLIT).filter((tok) => digitsOf(tok) && !GST_TOKEN.test(tok) && !PAN_TOKEN.test(tok));
+      const joined = digitsOf(groups.join(''));
+      if (groups.length > 1 && joined.length >= min && joined.length <= max) { good.push({ raw: groups.join(' '), code: joined, line, mixed: true }); flags.push('JOINED_GROUPS'); return { good, mixed, bad: badHere }; }
     }
-    return { good, bad };
+    if (labelled || single) for (const d of r.short) { if (d.length > max) badHere.push({ raw: d, why: tooLong(d) }); else if (d.length >= 4) badHere.push({ raw: d, why: tooShort(d) }); }
+    return { good, mixed, bad: badHere };
   };
 
   const label = /project[\s_]*(?:code|no\.?|number|id)?(?:[\s_]*is(?![a-z]))?|code[\s_]*(?:generated|created|issued)|(?:generated|created|issued)[\s_]*code/gi;
   const good: Hit[] = [];
-  const bad: { raw: string; why: string }[] = [];
+  const mixedFree: Hit[] = [];
   for (const m of t.matchAll(label)) {
-    const line = t.slice(m.index!).split('\n')[0]!;
+    const line = lineAt(t, m.index!);
     const seg = cutAtStop(t.slice(m.index! + m[0].length).split('\n')[0]!);
-    const r = scan(seg, line, true);
+    const r = scan(seg, line, true, false);
     good.push(...r.good);
     bad.push(...r.bad);
   }
   if (!good.length && !bad.length) {
-    // No label: a lone 8+ digit number, or an EST code on a line that says it was approved / created / generated.
-    const cleaned = t.replace(/(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d+)?/gi, ' ').replace(/\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b/g, ' ').replace(/\+?\d[\d\s-]{8,}\d/g, ' ').replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g, ' ');
-    for (const line of cleaned.split('\n')) {
-      const clean = plain(line);
-      const r = scan(clean, clean, false);
-      good.push(...r.good.filter((h) => !/^EST-/.test(h.code) || /\b(approved|created|generated|issued|code)\b/i.test(clean)));
-      if (!r.good.length) bad.push(...r.bad.filter((b) => !/^\d+$/.test(b.raw)));
+    // No label: a line that is one word, or a plain 8+ digit number inside a sentence.
+    for (const raw of t.split('\n')) {
+      if (VENDOR_LINE.test(raw) || CLIENT_LINE.test(raw)) continue;
+      const line = cutAtStop(raw).trim();
+      if (!line) continue;
+      const r = scan(line, line, false, !/\s/.test(line));
+      good.push(...r.good);
+      mixedFree.push(...r.mixed);
+      bad.push(...r.bad);
     }
     if (good.length) flags.push('UNLABELLED');
   }
-  // A numeric project code next to EST numbers: the EST numbers are estimates that came with it (see findEstimates), not codes.
-  const numeric = good.filter((h) => /^\d+$/.test(h.code));
-  const used = numeric.length ? numeric : good;
-  const codes = uniq(used.map((h) => h.code));
+  const codes = uniq(good.map((h) => h.code));
   if (codes.length) {
-    const pending = used.some((h) => PENDING_WORDS.test(h.line));
-    if (pending) return read('PENDING', used[0]!.raw, null, 0.9, 'The reply says the code is pending / expected: nothing is confirmed', codes, ['PENDING']);
-    if (codes.length > 1) return read('REVIEW_REQUIRED', used.map((h) => h.raw).join(' / '), null, 0.4, `More than one project code in the reply (${codes.join(', ')}): a person decides`, codes, ['MULTIPLE_CANDIDATES']);
-    return read('EXTRACTED', used[0]!.raw, codes[0]!, flags.includes('UNLABELLED') ? 0.6 : 0.95, flags.includes('UNLABELLED') ? 'The only project code in the reply (no "project code" label)' : 'Found after the words "project code"', codes, numeric.length && numeric.length < good.length ? [...flags, 'ESTIMATES_IGNORED'] : flags);
+    out.context = good[0]!.line;
+    const anyMixed = good.some((h) => h.mixed);
+    if (anyMixed) flags.push('MIXED_CHARS');
+    if (cancelled) return read('CANCELLED', good[0]!.raw, null, 0.9, 'The reply says the project is cancelled: the code is not confirmed', codes, ['CANCELLED']);
+    if (good.some((h) => PENDING_WORDS.test(h.line))) return read('PENDING', good[0]!.raw, null, 0.9, 'The reply says the code is pending / expected: nothing is confirmed', codes, ['PENDING']);
+    if (codes.length > 1) return read('REVIEW_REQUIRED', good.map((h) => h.raw).join(' / '), null, 0.4, `More than one project code in the reply (${codes.join(', ')}): a person decides`, codes, ['MULTIPLE_CANDIDATES']);
+    const base = flags.includes('UNLABELLED') ? 0.6 : 0.95;
+    return read('EXTRACTED', good[0]!.raw, codes[0]!, anyMixed ? Math.min(base, 0.75) : base, flags.includes('UNLABELLED') ? 'The only project code in the reply (no "project code" label)' : 'Found after the words "project code"', codes, uniq(flags));
   }
-  if (bad.length) return read('INVALID', bad[0]!.raw, null, 0.2, bad[0]!.why, [], ['INVALID_FORMAT']);
+  if (bad.length) { out.context = null; return read('INVALID', bad[0]!.raw, null, 0.2, bad[0]!.why, [], ['INVALID_FORMAT']); }
+  if (mixedFree.length) {
+    const c = uniq(mixedFree.map((h) => h.code));
+    out.context = mixedFree[0]!.line;
+    return read('REVIEW_REQUIRED', mixedFree[0]!.raw, c.length === 1 ? c[0]! : null, 0.4, `A word with letters / symbols holds ${c.join(' / ')} but there is no "project code" label: a person checks`, c, ['MIXED_CHARS', 'UNLABELLED']);
+  }
+  if (estimates.length) return read('NOT_FOUND', null, null, 0, `Only an estimate number (${estimates.map((e) => e.normalized).join(', ')}) was found: an EST number is never a project code`, [], ['ESTIMATE_ONLY']);
   return read('NOT_FOUND', null, null, 0, 'No project code in the reply');
 }
 export const findProjectCode = (text: string, rules: ReplyRules = DEFAULT_RULES): Found => toFound(extractProjectCode(text, rules));
