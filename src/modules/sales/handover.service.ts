@@ -5,7 +5,8 @@ import { AppError } from '../../common/errors';
 import { type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
-import { clientNameOf, clientOf, contactPersonsOf } from '../clients/clientDetails';
+import { saveContactBook } from '../clients/clientContactBook';
+import { clientNameOf, clientOf, CONTACT_PERSON_GAP, contactPersonGaps, contactPersonsOf, pointOfContact } from '../clients/clientDetails';
 import { discardStoredFiles, eraseStoredFile, readStoredFile, storeEmbeddedFile, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
@@ -16,6 +17,7 @@ import { handoverUnlocked } from './lead.service';
 import { leadLog, liveOrder, pipelineLog } from './order.service';
 import { SalesOrder, type AssignRoute, type HandoverType } from './sales.model';
 import { renderShopListPdf } from './shop-list.pdf';
+import { ensureBaselineVersion, listShopVersions, recordShopVersion, type VersionKind, type VersionTable } from './shopVersions';
 
 /** Client Servicing only sees orders handed to them; everyone else with sales access sees all. */
 export const isCs = (actor: Actor) => actor.role === 'CLIENT_SERVICING';
@@ -71,8 +73,10 @@ type GapInput = {
   shopList?: { total?: number | null; error?: number | null } | null;
   soContacts?: { name?: string | null; phone?: string | null }[] | null;
 };
-/** ASO needs at least one SO contact with a name and a phone number (email optional). */
-export const SO_CONTACT_GAP = 'Add at least one SO Contact with name and phone number';
+/** SO needs at least one POC contact with a name and a phone number (designation and email optional). Stored as soContacts. */
+export const SO_CONTACT_GAP = 'Add at least one POC Contact with name and phone number';
+/** Client contact person gap and point of contact: shared from clientDetails (also used by the Rate Card). */
+export { CONTACT_PERSON_GAP, contactPersonGaps, pointOfContact };
 /** Toggle off = client details and contact persons only. Orders from before the toggle count as full. */
 const isFull = (o: { handoverFull?: boolean | null }) => o.handoverFull !== false;
 
@@ -94,7 +98,7 @@ export function handoverGaps(o: GapInput): string[] {
 /** Handover: type, who it went to, the shop list summary, the communication and what is still missing (rows come from listShops). */
 export async function getHandover(id: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
+    .select('orderNo client clientDetails clientType csAssignee handover handoverFull handoverType handoverUpdatedAt soContacts orderContacts contactsFrom shopColumns declaredShopTotal shopList handoverDocumentsArray handoverMessagesArray handoverShopsArray.attachments.fileId')
     .populate('csAssignee', 'name email phone')
     .populate('handover.assignedBy', 'name role')
     .populate('handoverMessagesArray.by', 'name role')
@@ -120,10 +124,14 @@ export async function getHandover(id: string) {
     documents: [...(o.handoverDocumentsArray ?? [])].filter((d) => shop && d.kind === 'SHOP_LIST' && !d.shopType).sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0)),
     /** Communication & attachments, oldest first (chat order). */
     messages: o.handoverMessagesArray ?? [],
-    /** ASO: the SO contacts (kept when the type changes; shown for ASO only). */
-    soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** POC contacts (stored as soContacts; kept when the type changes; required for SO, optional for the shop types). */
+    soContacts: (o.soContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary, ref: k.ref ?? null })),
+    /** Operational point of contact: the primary POC contact, else the primary client contact. */
+    primaryContact: pointOfContact(await clientOf(o), o),
     /** Contact persons saved for this order only (used while the Zoho client has none). */
     orderContacts: (o.orderContacts ?? []).map((k) => ({ _id: String(k._id), name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', isPrimary: !!k.isPrimary })),
+    /** The contacts above started as a copy of this client's saved contacts (from its earlier orders). */
+    contactsFrom: o.contactsFrom?.at ? { orderNo: o.contactsFrom.orderNo ?? null, at: o.contactsFrom.at } : null,
     /** SO: Additional Documents (kept apart from chat files; kept when the type changes, shown for SO only), oldest first. */
     soDocuments: o.handoverType === 'ASO' ? soDocumentsOf(o) : [],
     updatedAt: o.handoverUpdatedAt ?? null,
@@ -259,26 +267,29 @@ async function swapShopSet(orderId: Types.ObjectId, from: string | null, to: str
   };
 }
 
-type SoContact = { name: string; phone: string; email?: string | undefined; isPrimary: boolean };
-const soLine = (k: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }) =>
-  [k.name, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
+type SoContact = { name: string; designation?: string | undefined; phone: string; email?: string | undefined; isPrimary: boolean; ref?: string | undefined };
+const soLine = (k: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }) =>
+  [k.name, k.designation, k.phone, k.email, k.isPrimary ? 'primary' : null].filter(Boolean).join(' · ');
 
 /**
- * ASO: saves the whole SO contact list (validated and given one primary by soContactsBody). The list is kept apart
- * from the client's contact persons and stays on the order if the type changes later (shown for ASO only).
+ * POC contacts (SO, Only Shop Details, Shop + Measurement): saves the whole list (validated and given one primary by
+ * soContactsBody). Stored as soContacts, kept apart from the client's contact persons and kept when the type changes.
+ * Required (one at least) for SO only.
  */
 export async function setSoContacts(id: string, contacts: SoContact[], actor: Actor) {
   const o = await liveOrder(id);
   assertEditable(o, actor);
-  if (o.handoverType !== 'ASO') throw AppError.conflict('SO contacts are for ASO handovers. Choose ASO first.');
+  if (!o.handoverType) throw AppError.conflict('Choose the assign type first: SO, Only Shop Details or Shop + Measurement.');
   await handoverRoute(o);
   const before = (o.soContacts ?? []).map(soLine);
   const after = contacts.map(soLine);
-  const r = await SalesOrder.updateOne(openFilter(o, actor), { $set: { soContacts: contacts.map((k) => ({ ...k, email: k.email ?? null })), updatedBy: actor.id } });
+  const r = await SalesOrder.updateOne(openFilter(o, actor), { $set: { soContacts: contacts.map((k) => ({ ...k, designation: k.designation ?? null, email: k.email ?? null, ref: k.ref ?? null })), updatedBy: actor.id } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   if (before.join('\n') !== after.join('\n')) {
-    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `SO contacts saved (${contacts.length})` });
+    await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'soContacts', oldValue: before, newValue: after }], reason: `POC contacts saved (${contacts.length})` });
   }
+  // The client's saved contacts (the next order of this client starts with them).
+  await saveContactBook(o, { pocContacts: contacts }, actor.id);
   return getHandover(id);
 }
 
@@ -290,8 +301,8 @@ export { contactPersonsOf };
 
 /**
  * Zoho client without contact persons: saves this order's contact persons (validated and given one primary by
- * orderContactsBody). Kept on the order only; Zoho and the client record are not changed. Optional (an empty list
- * clears them) and never needed to continue or assign.
+ * orderContactsBody). Kept on the order only; Zoho and the client record are not changed. On the Recce route one
+ * contact person (name and mobile) is required to continue (contactPersonGaps).
  */
 export async function setOrderContacts(id: string, contacts: OrderContact[], actor: Actor) {
   const o = await liveOrder(id);
@@ -309,6 +320,8 @@ export async function setOrderContacts(id: string, contacts: OrderContact[], act
   if (before.join('\n') !== after.join('\n')) {
     await recordAudit({ actor, action: 'UPDATE', entity: 'SalesOrder', entityId: o._id, changes: [{ field: 'orderContacts', oldValue: before, newValue: after }], reason: `Order contact persons saved (${contacts.length})` });
   }
+  // The client's saved contacts (the next order of this client starts with them).
+  await saveContactBook(o, { contactPersons: contacts }, actor.id);
   return getHandover(id);
 }
 
@@ -325,7 +338,20 @@ export const MAX_ROW_IMAGES = 10;
 const IMAGE_RE = /\.(jpe?g|png|webp)$/i;
 const AUDIO_RE = /\.(mp3|m4a|webm|ogg|wav)$/i;
 /** Columns of the downloaded Excel that are not shop fields (ignored when the file is uploaded again). */
-const EXPORT_ONLY = ['row id', 'images', 'status', 'issues', 'modified at', 'modified by'];
+// 's.no': the serial column Download Excel adds (a sheet's own S.No column still matches its table column first).
+const EXPORT_ONLY = ['row id', 's.no', 'images', 'status', 'issues', 'modified at', 'modified by'];
+/** A sheet's own serial number column ("S.No", "Sl. No", "Sr No", "Serial No"): exports then add no second one. */
+const SERIAL_HEADER = /^(s\.?\s*no\.?|sl\.?\s*no\.?|sr\.?\s*no\.?|serial(\s*(no\.?|number))?)$/i;
+const hasSerialColumn = (headers: string[]) => headers.some((h) => SERIAL_HEADER.test(h.trim()));
+/**
+ * Download Excel: S.No first (1, 2, 3...) and the internal Row ID as the LAST, hidden column. The Row ID is not shown,
+ * but uploading the downloaded file again still updates those rows instead of adding them twice.
+ */
+function serialAndHiddenRowId(ws: ExcelJS.Worksheet, withSerial: boolean) {
+  if (withSerial) ws.getColumn(1).alignment = { horizontal: 'left' };
+  const last = ws.getColumn(ws.columnCount);
+  last.hidden = true;
+}
 
 const assertShopType = (o: { handoverType?: string | null }) => {
   if (!o.handoverType || !shopTypes.includes(o.handoverType)) throw AppError.conflict('Choose Shop Details Only or Shop + Measurement first');
@@ -418,6 +444,93 @@ async function findRow(orderId: Types.ObjectId, rowId: string) {
 
 type ShopRowBody = ShopRowInput & { extra?: Extra | undefined; cells?: Record<string, string> | undefined };
 
+/* ------------------------- version history (snapshots of the whole table) ------------------------- */
+
+type TableDoc = { handoverType?: string | null; handoverShopsArray?: unknown[] | null; shopColumns?: unknown; shopList?: { fileName?: string | null } | null };
+const text = (v: unknown) => (v == null ? '' : String(v));
+/**
+ * The shop table as shown (for a version): the uploaded columns in sheet order with their cells, or the shop fields of
+ * older tables; Shop + Measurement without its own size column adds the app Size. Rows keep their order and Row ID.
+ */
+function shopTableOf(o: TableDoc): VersionTable {
+  const rows = (o.handoverShopsArray ?? []) as Record<string, any>[];
+  const sized = o.handoverType === 'SHOP_MEASUREMENT';
+  const size = (r: Record<string, any>) => (r.width && r.height ? `${r.width} x ${r.height}${r.unit ? ` ${r.unit}` : ''}` : '');
+  const columns = columnsOf(o);
+  let cols: { id: string; header: string; get: (r: Record<string, any>) => unknown }[];
+  if (columns) {
+    cols = columns.map((c, i) => ({ id: c.id, header: c.header.trim() || `Column ${i + 1}`, get: (r) => r.cells?.[c.id] }));
+    if (sized && !hasSizeColumn(columns)) cols.push({ id: 'app:size', header: 'Size (W x H)', get: size });
+  } else {
+    const f = (id: string, header: string, get: (r: Record<string, any>) => unknown) => ({ id: `f:${id}`, header, get });
+    cols = [
+      f('shopName', 'Shop Name', (r) => r.shopName),
+      f('dealerName', 'Dealer Name', (r) => r.dealerName),
+      f('location', 'Location', (r) => r.location),
+      f('district', 'District', (r) => r.district),
+      f('address1', 'Address 1', (r) => r.address1),
+      f('address2', 'Address 2', (r) => r.address2),
+      f('address3', 'Address 3', (r) => r.address3),
+      f('pincode', 'Pincode', (r) => r.pincode),
+      f('mobile', 'Mobile', (r) => [r.mobile, r.mobileAlt].filter(Boolean).join(' / ')),
+      f('gstin', 'GST No', (r) => r.gstin),
+      f('contactPerson', 'Contact Person', (r) => r.contactPerson),
+      ...(sized ? [f('size', 'Size (W x H)', size)] : []),
+      f('boardType', 'Board Type', (r) => r.boardType),
+      f('quantity', 'Qty', (r) => r.quantity),
+      f('remarks', 'Remarks', (r) => r.remarks),
+      f('clientSiteCode', 'Client Site Code', (r) => r.clientSiteCode),
+      ...[...new Set(rows.flatMap((r) => Object.keys(r.extra ?? {})))].map((k) => ({ id: `x:${k}`, header: k, get: (r: Record<string, any>) => r.extra?.[k] })),
+    ];
+  }
+  return {
+    columns: cols.map(({ id, header }) => ({ id, header })),
+    rows: rows.map((r, i) => ({
+      rowId: text(r.rowId) || `row-${r.rowNumber ?? i + 1}`,
+      cells: Object.fromEntries(cols.map((c) => [c.id, text(c.get(r))]).filter(([, v]) => v.trim() !== '')),
+    })),
+  };
+}
+
+const TABLE_FIELDS = 'handoverType handoverShopsArray shopColumns shopList';
+/** Before a change: an order with shop data but no versions yet keeps that data as V1 ("Existing data"). */
+async function baselineVersion(o: { _id: Types.ObjectId; handoverType?: string | null }, actor: Actor) {
+  if (!isShopType(o.handoverType)) return;
+  try {
+    await ensureBaselineVersion({
+      orderId: o._id,
+      type: o.handoverType!,
+      actor,
+      load: async () => {
+        const doc = (await SalesOrder.findById(o._id).select(TABLE_FIELDS).lean()) as TableDoc | null;
+        return doc ? { table: shopTableOf(doc), fileName: doc.shopList?.fileName ?? null } : null;
+      },
+    });
+  } catch (e) {
+    console.error('shop list baseline version failed', { orderId: String(o._id) }, e);
+  }
+}
+/**
+ * After a successful change: the table as saved becomes the next version (none when it equals the latest). The
+ * change itself is already saved; a failure here is logged and never undoes or fails it.
+ */
+async function saveVersion(orderId: Types.ObjectId, actor: Actor, kind: VersionKind, fileName?: string | null) {
+  try {
+    const doc = (await SalesOrder.findById(orderId).select(TABLE_FIELDS).lean()) as TableDoc | null;
+    if (!doc || !isShopType(doc.handoverType)) return;
+    await recordShopVersion({ orderId, type: doc.handoverType!, table: shopTableOf(doc), kind, fileName: fileName !== undefined ? fileName : (doc.shopList?.fileName ?? null), actor });
+  } catch (e) {
+    console.error('shop list version save failed', { orderId: String(orderId), kind }, e);
+  }
+}
+
+/** Versions of the current type; an order with shop data from before version history gets its V1 first. */
+export async function shopVersions(id: string, actor: Actor) {
+  const o = await SalesOrder.findOne({ _id: id, deletedAt: null }).select('handoverType').lean();
+  if (o) await baselineVersion(o, actor);
+  return listShopVersions(id);
+}
+
 /* ------------------------- imported columns (the sheet as uploaded) ------------------------- */
 
 /** One column of the uploaded Excel: stable id, original header text (may be blank or repeated), and the shop field it feeds internally. */
@@ -485,6 +598,7 @@ export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) 
   if (columns && !Object.keys(cells!).length && !MEASURE_FIELDS.some((f) => values[f])) throw new AppError(422, 'VALIDATION_ERROR', 'Fill at least one cell', [{ path: 'cells', message: 'Fill at least one cell' }]);
   await handoverRoute(o);
   await ensureRowIds(o._id);
+  await baselineVersion(o, actor);
   const c = columns ? deriveRow(cells!, columns, o.handoverType, values) : cleanRow(values, o.handoverType);
   const last = await SalesOrder.findById(o._id).select('handoverShopsArray.rowNumber').lean();
   const rowNumber = Math.max(0, ...(last?.handoverShopsArray ?? []).map((r) => r.rowNumber ?? 0)) + 1;
@@ -498,6 +612,7 @@ export async function addShopRow(id: string, values: ShopRowBody, actor: Actor) 
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'ADD');
   return row;
 }
 
@@ -540,11 +655,13 @@ export async function updateShopRow(id: string, rowId: string, values: ShopRowBo
     });
   }
   await handoverRoute(o);
+  await baselineVersion(o, actor);
   Object.assign(set, { 'handoverShopsArray.$.state': c.state, 'handoverShopsArray.$.issues': c.issues, 'handoverShopsArray.$.updatedAt': new Date(), 'handoverShopsArray.$.updatedBy': actor.id, updatedBy: actor.id });
   for (const f of SHOP_FIELDS) set[`handoverShopsArray.$.${f}`] = c.fields[f];
   const r = await SalesOrder.updateOne({ ...openFilter(o, actor), 'handoverShopsArray.rowId': rowId }, { $set: set, $push: { handoverShopLogs: log } });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'EDIT');
   return findRow(o._id, rowId);
 }
 
@@ -554,6 +671,7 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   assertEditable(o, actor);
   await handoverRoute(o);
   const before = await findRow(o._id, rowId);
+  await baselineVersion(o, actor);
   const columns = columnsOf(o);
   const log = columns
     ? shopLog(actor, 'DELETE', rowId, { before: measureOf(before), cells: cellChanges(columns, cleanCells(before.cells as Cells | undefined, columns), null), label: labelOf(before, columns) })
@@ -566,6 +684,7 @@ export async function deleteShopRow(id: string, rowId: string, actor: Actor) {
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   for (const f of (before.attachments ?? []) as StoredFile[]) await eraseStoredFile(f, actor, ownerOf(o._id));
   await syncShopSummary(o._id);
+  await saveVersion(o._id, actor, 'DELETE');
   return { rowId, deleted: true };
 }
 
@@ -694,6 +813,27 @@ function detectHeader(g: SheetGrid): { index: number; score: number } | null {
   return best;
 }
 
+/**
+ * Header row when no shop / dealer column is recognised: the first row (within the scan) with at least two different
+ * values that fills at least half of the sheet's width. A title row above the table (one merged text, repeated in
+ * every cell, e.g. "ADINN | MADURAI RECCE …") is skipped this way.
+ */
+function fallbackHeader(g: SheetGrid): number {
+  const scan = g.rows.slice(0, HEADER_SCAN);
+  const width = Math.max(1, ...scan.map((r) => r.cells.filter((c) => String(c ?? '').trim()).length));
+  const i = scan.findIndex((r) => {
+    const vals = r.cells.map((c) => String(c ?? '').trim()).filter(Boolean);
+    return new Set(vals.map((v) => v.toLowerCase())).size >= 2 && vals.length * 2 >= width;
+  });
+  return i < 0 ? 0 : i;
+}
+
+/** Several sheets: the one whose header is recognised best, else the one with the most rows (never asked). */
+function pickSheet(sheets: SheetGrid[]): SheetGrid {
+  const scored = sheets.map((g) => ({ g, score: detectHeader(g)?.score ?? -1 }));
+  return scored.sort((a, b) => b.score - a.score || b.g.rows.length - a.g.rows.length)[0]!.g;
+}
+
 type UploadOptions = { sheet?: string | undefined; headerRow?: number | undefined; mapping?: Record<string, string> | undefined; preview?: boolean | undefined };
 
 /**
@@ -732,13 +872,10 @@ export function resolveImport(grids: SheetGrid[], opts: UploadOptions, type: str
     const lists = filled.filter((g) => g.rows.length > 1);
     if (lists.length === 1) sheet = lists[0];
   }
-  if (!sheet) {
-    const first = filled[0]!;
-    const h = headerNames(first.rows[0]!.cells, first.rows[0]!.cells.length);
-    return ask(first, 0, 'This workbook has several sheets with data. Choose the sheet with the shop list.', h, autoMap(h));
-  }
+  // Several sheets with data: the shop list is picked automatically (no sheet chooser).
+  if (!sheet) sheet = pickSheet(filled);
 
-  const headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? 0);
+  const headerIndex = opts.headerRow ? sheet.rows.findIndex((r) => r.rowNumber === opts.headerRow) : (detectHeader(sheet)?.index ?? fallbackHeader(sheet));
   if (headerIndex < 0) throw new AppError(422, 'VALIDATION_ERROR', `Row ${opts.headerRow} is blank or outside the sheet`, [{ path: 'headerRow', message: 'Choose another header row' }]);
   const dataRows = sheet.rows.slice(headerIndex + 1);
   const headerCells = sheet.rows[headerIndex]!.cells;
@@ -802,6 +939,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
   assertEditable(o, actor);
   assertShopType(o);
   await ensureRowIds(o._id);
+  await baselineVersion(o, actor);
 
   const parsed = resolveImport(await readGrids(file.buffer, file.originalname), opts, o.handoverType);
   const doc = await SalesOrder.findById(o._id).select('handoverShopsArray shopColumns shopList.fileHash').lean();
@@ -912,6 +1050,7 @@ export async function uploadShopList(id: string, file: UploadedFile | undefined,
     throw AppError.conflict('The shop list changed meanwhile (or the order was handed over). Reload and upload again.');
   }
   await recordAudit({ actor, action: 'UPLOAD', entity: 'SalesOrder', entityId: o._id, reason: `Shop list ${source}: ${added.length} rows added, ${updates.size} updated` });
+  await saveVersion(o._id, actor, 'UPLOAD', shopList.fileName);
   return {
     ...(await getHandover(id)),
     imported: {
@@ -933,12 +1072,15 @@ export async function removeShopList(id: string, actor: Actor) {
   const doc = await SalesOrder.findById(o._id).select('handoverShopsArray').lean();
   const count = doc?.handoverShopsArray?.length ?? 0;
   const oldRowFiles = await rowFiles(o._id);
+  await baselineVersion(o, actor);
   const r = await SalesOrder.updateOne(openFilter(o, actor), {
     $set: { handoverShopsArray: [], shopColumns: null, shopList: null, declaredShopTotal: null, updatedBy: actor.id },
     $push: { handoverShopLogs: shopLog(actor, 'CLEAR', null, { note: `${count} row${count === 1 ? '' : 's'} cleared` }) },
   });
   if (!r.matchedCount) assertNotHandedOver({ csAssignee: true });
   for (const f of oldRowFiles) await eraseStoredFile(f, actor, ownerOf(o._id));
+  // Clear All: an empty version (previous versions stay).
+  if (count) await saveVersion(o._id, actor, 'CLEAR', null);
   return getHandover(id);
 }
 
@@ -959,7 +1101,7 @@ export async function exportShops(id: string) {
   const columns = columnsOf(o);
   if (columns) return exportColumns(o, columns, sized);
   const cols: [string, (r: Record<string, any>) => unknown, number][] = [
-    ['Row ID', (r) => r.rowId, 26],
+    ['S.No', (r) => r.__sno, 7],
     ['Shop Name', (r) => r.shopName, 26],
     ['Dealer Name', (r) => r.dealerName, 24],
     ['Location', (r) => r.location, 18],
@@ -982,13 +1124,15 @@ export async function exportShops(id: string) {
     ),
     ...(sized ? ([['Images', (r) => r.attachments?.length ?? 0, 8]] as [string, (r: Record<string, any>) => unknown, number][]) : []),
     ['Modified At', (r) => istStamp(r.updatedAt), 22],
+    ['Row ID', (r) => r.rowId, 26],
   ];
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Shops');
   ws.columns = cols.map(([header, , width]) => ({ header, width }));
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
-  for (const r of o.handoverShopsArray ?? []) ws.addRow(cols.map(([, get]) => cellSafe(get(r as Record<string, any>) ?? '')));
+  (o.handoverShopsArray ?? []).forEach((r, i) => ws.addRow(cols.map(([, get]) => cellSafe(get({ ...(r as Record<string, any>), __sno: i + 1 }) ?? ''))));
+  serialAndHiddenRowId(ws, true);
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
@@ -1002,14 +1146,17 @@ async function exportColumns(o: { orderNo: string; handoverShopsArray?: unknown[
   ];
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Shops');
-  const headers = ['Row ID', ...columns.map((c) => c.header), ...app.map(([h]) => h)];
-  ws.columns = headers.map((header, i) => ({ header, width: i === 0 ? 26 : Math.min(40, Math.max(12, header.length + 4)) }));
+  // S.No first unless the sheet has its own serial column (kept as uploaded); the Row ID last, hidden.
+  const serial = !hasSerialColumn(columns.map((c) => c.header));
+  const headers = [...(serial ? ['S.No'] : []), ...columns.map((c) => c.header), ...app.map(([h]) => h), 'Row ID'];
+  ws.columns = headers.map((header, i) => ({ header, width: serial && i === 0 ? 7 : i === headers.length - 1 ? 26 : Math.min(40, Math.max(12, header.length + 4)) }));
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
-  for (const r of (o.handoverShopsArray ?? []) as Record<string, any>[]) {
+  ((o.handoverShopsArray ?? []) as Record<string, any>[]).forEach((r, i) => {
     const cells = (r.cells ?? {}) as Record<string, string>;
-    ws.addRow([r.rowId, ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? ''))]);
-  }
+    ws.addRow([...(serial ? [i + 1] : []), ...columns.map((c) => cellSafe(cells[c.id] ?? '')), ...app.map(([, get]) => cellSafe(get(r) ?? '')), r.rowId]);
+  });
+  serialAndHiddenRowId(ws, serial);
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, buffer: Buffer.from((await wb.xlsx.writeBuffer()) as ArrayBuffer) };
 }
 
@@ -1073,12 +1220,14 @@ export async function exportShopsPdf(id: string) {
         ...[...new Set(rows.flatMap((r) => Object.keys(r.extra ?? {})))].map((k): Col => [k, (r) => r.extra?.[k]]),
         ...app,
       ];
+  // S.No first (never the internal Row ID), unless the sheet has its own serial column.
+  const serial = !hasSerialColumn(cols.map(([h]) => h));
   const client = { name: await clientNameOf(o) };
   const buffer = await renderShopListPdf({
     title: `${o.orderNo} · Shop List`,
     subtitle: `${client?.name ?? 'Client'} · ${HANDOVER_TYPE_LABELS[o.handoverType as HandoverType]} · ${rows.length} shop${rows.length === 1 ? '' : 's'} · ${istStamp(new Date())}`,
-    headers: cols.map(([h]) => h),
-    rows: rows.map((r) => cols.map(([, get]) => { const v = get(r); return v == null ? '' : String(v); })),
+    headers: [...(serial ? ['S.No'] : []), ...cols.map(([h]) => h)],
+    rows: rows.map((r, i) => [...(serial ? [String(i + 1)] : []), ...cols.map(([, get]) => { const v = get(r); return v == null ? '' : String(v); })]),
     images: sized ? await rowThumbs(rows) : undefined,
   });
   return { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.pdf`, buffer };
@@ -1232,7 +1381,7 @@ export async function removeMessage(id: string, messageId: string, actor: Actor)
  * The client as it is handed over, saved with the assignment (`handoverClient`). GST certificates and custom fields
  * belong to New (Client Management) clients only; Existing (Zoho) clients carry neither.
  */
-export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null; orderContacts?: ContactLike[] | null }) {
+export async function clientSnapshot(o: { client: unknown; clientDetails?: unknown; clientType?: string | null; handoverType?: string | null; soContacts?: { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null }[] | null; orderContacts?: ContactLike[] | null }) {
   // The Client record, or the client kept on the order (Client Servicing).
   const c = await clientOf(o);
   if (!c) return null;
@@ -1251,7 +1400,8 @@ export async function clientSnapshot(o: { client: unknown; clientDetails?: unkno
     customFields: crm ? (c.customFields ?? []).map((f) => ({ label: f.label, value: f.value })) : undefined,
     // The client's contact persons, or this order's own when the Zoho client has none.
     contacts: contactPersonsOf(c, o).map((k) => ({ name: k.name, designation: k.designation, phone: k.phone, email: k.email, isPrimary: !!k.isPrimary })),
-    soContacts: o.handoverType === 'ASO' ? (o.soContacts ?? []).map((k) => ({ name: k.name, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
+    // POC contacts of any assign type (stored as soContacts).
+    soContacts: o.handoverType && o.soContacts?.length ? o.soContacts.map((k) => ({ name: k.name, designation: k.designation ?? undefined, phone: k.phone, email: k.email ?? undefined, isPrimary: !!k.isPrimary })) : undefined,
     takenAt: new Date(),
   };
 }

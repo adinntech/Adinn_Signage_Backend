@@ -58,6 +58,8 @@ const emailSchema = new Schema({
   from: String,
   to: [String],
   cc: [String],
+  /** Blind copies (kept for Email History and Resend; the mail never shows them to the other recipients). */
+  bcc: { type: [String], default: undefined },
   subject: String,
   body: String,
   attachments: [fileRef],
@@ -289,12 +291,15 @@ const orderSchema = new Schema(
      */
     handoverFull: { type: Boolean, default: false },
     /** ASO: the client's SO (sales officer) contacts, kept apart from the client's contact persons. */
-    soContacts: { type: [new Schema({ name: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
+    /** POC contacts (SO, Only Shop Details, Shop + Measurement); `ref`: the client contact it was picked from, if any. */
+    soContacts: { type: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean, ref: String })], default: undefined },
     /**
      * Contact persons added for this order only, when the Zoho client has none (Client Servicing, Recce Team > Assign
      * Type & Details). Never written to Zoho or the client record; used only while the Zoho client has no contacts.
      */
     orderContacts: { type: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean })], default: undefined },
+    /** The contact persons / POC contacts above started as a copy of the client's saved contacts (clientcontactbooks). */
+    contactsFrom: { type: new Schema({ orderNo: String, at: Date }, { _id: false }), default: undefined },
     /**
      * Project Assign route, taken by the first save on it: HANDOVER (Client Servicing: handover details) or RECCE
      * (Recce team: project code request email). The other route is then disabled.
@@ -311,6 +316,10 @@ const orderSchema = new Schema(
           projectCode: String,
           /** EST- and 6 digits, e.g. EST-323343. */
           estimationCode: String,
+          /** Zoho Books estimate the codes were chosen from. */
+          zohoEstimateId: String,
+          /** The Zoho estimate as it was when the codes were saved (shown with the saved codes). */
+          zohoEstimate: { type: new Schema({ date: String, total: Number, status: String, salesperson: String, location: String }, { _id: false }), default: undefined },
           codesSavedAt: Date,
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */
@@ -364,8 +373,8 @@ const orderSchema = new Schema(
           gstCertificates: { type: [fileRef], default: undefined },
           customFields: { type: [new Schema({ label: String, value: String }, { _id: false })], default: undefined },
           contacts: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })],
-          /** ASO handovers: the SO contacts as handed over. */
-          soContacts: { type: [new Schema({ name: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })], default: undefined },
+          /** The POC contacts as handed over. */
+          soContacts: { type: [new Schema({ name: String, designation: String, phone: String, email: String, isPrimary: Boolean }, { _id: false })], default: undefined },
           takenAt: Date,
         },
         { _id: false },

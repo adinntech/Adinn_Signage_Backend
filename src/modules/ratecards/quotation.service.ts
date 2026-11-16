@@ -6,7 +6,7 @@ import { AppError } from '../../common/errors';
 import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
-import { clientOf, contactPersonsOf } from '../clients/clientDetails';
+import { clientOf, pointOfContact } from '../clients/clientDetails';
 import { discardStoredFiles, storeEmbeddedFile } from '../files/file.service';
 import { mailAvailable } from '../notifications/mail.service';
 import { orderArray } from '../sales/order.service';
@@ -128,6 +128,8 @@ export function quotationChanges(prev: Snapshot | null, next: Snapshot): Change[
   };
   upd('Client Address', prev.clientAddress, next.clientAddress);
   upd('Contact Person', prev.contact?.name, next.contact?.name);
+  // Compared as the 10 digits, so "+91 98765 43210" and "9876543210" are the same phone.
+  upd('Contact Phone', (prev.contact?.phone ?? '').replace(/\D/g, '').slice(-10), (next.contact?.phone ?? '').replace(/\D/g, '').slice(-10));
   upd('Quotation Date', day(prev.quotationDate), day(next.quotationDate));
   upd('Subject', prev.subject, next.subject);
   upd('Terms & Conditions', htmlToText(prev.terms ?? ''), htmlToText(next.terms ?? ''));
@@ -163,10 +165,9 @@ export async function getQuotation(orderId: string, actor: Actor) {
   const labelled = revisions.map((r) => ({ ...r, label: revisionLabel(r.revision) }));
   const latest = labelled[0] ?? null;
   const me = await User.findById(actor.id).select('name email phone').lean();
-  // Contact Person prefill: the client's primary contact (else its first); a Zoho client without contacts uses this
-  // order's saved contact persons the same way (primary, else the first). SO contacts are not used here.
-  const persons = contactPersonsOf(client, order);
-  const primary = persons.find((c) => c.isPrimary) ?? persons[0];
+  // Contact Person prefill (a new Rate Card only; a saved one keeps its values): the order's point of contact, i.e.
+  // the primary POC contact, else the primary client contact (the order's own contact persons for a Zoho client without any).
+  const primary = pointOfContact(client, order);
   // Rate Card step (Client Servicing): Bill To is the full address; elsewhere the city, as on the ADINN rate card.
   const fullAddress = fullAddressOf(client);
   const step = !!order.recce?.rateCardRequired;
@@ -183,11 +184,24 @@ export async function getQuotation(orderId: string, actor: Actor) {
         terms: DEFAULT_TERMS,
         regards: { name: me?.name ?? '', designation: 'Business Development Manager', mobile: me?.phone ?? '', email: me?.email ?? '' },
       };
+  // Rate Card step with a saved version: the point of contact changed in Assign Type & Details after it was saved
+  // (including a saved contact that was removed there). The contact is never typed in this step, so it always follows
+  // the point of contact. The saved version is never changed; the editor shows the new contact as an unsaved change
+  // (saving makes the next version).
+  const norm = (s?: string | null) => (s ?? '').trim().toLowerCase();
+  const digits = (s?: string | null) => (s ?? '').replace(/\D/g, '').slice(-10);
+  const saved = latest?.contact;
+  const pocUpdate =
+    step && latest && primary?.name && (norm(saved?.name) !== norm(primary.name) || digits(saved?.phone) !== digits(primary.phone))
+      ? { name: primary.name, phone: digits(primary.phone), previousName: saved?.name ?? '', previousPhone: digits(saved?.phone) }
+      : null;
   return {
     orderId: String(order._id),
     orderNo: order.orderNo,
     stage: order.stage,
     editable: isEditable(order),
+    /** Rate Card step: the order's point of contact differs from the saved version's contact (see above), else null. */
+    pocUpdate,
     lockedReason: lockedReason(order),
     /** Lead stage (RATE_CARD / NEGOTIATION / ...) or null for an order outside Lead Management. */
     leadStage: order.lead?.stage ?? null,
@@ -265,6 +279,16 @@ export async function saveQuotation(orderId: string, input: z.infer<typeof quota
   if (locked) throw AppError.conflict(locked);
 
   const latest = await latestRevision(orderId);
+  // Rate Card step: Bill To and the contact person / phone are not typed. They are always the client's address and the
+  // order's point of contact, whatever the request carries (the editor shows the same values read-only).
+  if (order.recce?.rateCardRequired) {
+    const primary = pointOfContact(client, order);
+    input = {
+      ...input,
+      clientAddress: fullAddressOf(client) || client.city || input.clientAddress,
+      contact: primary?.name ? { ...input.contact, name: primary.name, phone: (primary.phone ?? '').replace(/\D/g, '').slice(-10) || undefined } : input.contact,
+    };
+  }
   const { next, changes } = await prepareRevision(input, latest as Snapshot | null, !!opts.autoDate);
   if (latest && !changes.length) return { saved: false, revision: { ...latest, label: revisionLabel(latest.revision) } };
 

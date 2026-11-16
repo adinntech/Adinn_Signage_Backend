@@ -158,6 +158,36 @@ type ContactLike = { name?: string | null; designation?: string | null; phone?: 
 export const contactPersonsOf = (client: { contacts?: ContactLike[] | null } | null | undefined, o: { orderContacts?: ContactLike[] | null }): ContactLike[] =>
   client?.contacts?.length ? client.contacts : (o.orderContacts ?? []);
 
+/** Recce route: the client contact person is mandatory (Zoho's, or this order's own when Zoho has none). */
+export const CONTACT_PERSON_GAP = 'Add the client contact person with name and mobile number';
+
+type PocLike = { name?: string | null; designation?: string | null; phone?: string | null; email?: string | null; isPrimary?: boolean | null };
+/** Gap of the mandatory client contact person: Zoho's contacts (read-only) or this order's own (name and mobile). */
+export function contactPersonGaps(client: { contacts?: PocLike[] | null } | null | undefined, o: { orderContacts?: PocLike[] | null }): string[] {
+  const zoho = client?.contacts ?? [];
+  if (zoho.length) return zoho.some((k) => k.name?.trim()) ? [] : [CONTACT_PERSON_GAP];
+  return (o.orderContacts ?? []).some((k) => k.name?.trim() && k.phone?.trim()) ? [] : [CONTACT_PERSON_GAP];
+}
+
+/**
+ * The order's operational point of contact: the primary POC contact (else the first) when an assign type is chosen,
+ * otherwise the primary client contact (else the first). Used by the handover / Recce details, the project code
+ * request email and the Rate Card's Contact Person prefill.
+ */
+export function pointOfContact(
+  client: { contacts?: PocLike[] | null } | null | undefined,
+  o: { handoverType?: string | null; soContacts?: PocLike[] | null; orderContacts?: PocLike[] | null },
+) {
+  const pick = (list: PocLike[]) => {
+    const named = list.filter((k) => k.name?.trim());
+    return named.find((k) => k.isPrimary) ?? named[0] ?? null;
+  };
+  const poc = o.handoverType ? pick(o.soContacts ?? []) : null;
+  const k = poc ?? pick(contactPersonsOf(client, o));
+  if (!k) return null;
+  return { name: k.name ?? '', designation: k.designation ?? '', phone: k.phone ?? '', email: k.email ?? '', source: (poc ? 'POC' : 'CLIENT') as 'POC' | 'CLIENT' };
+}
+
 /** The client's name only (notifications, file folders). */
 export const clientNameOf = async (x: WithClient) => (await clientOf(x))?.name ?? null;
 

@@ -41,10 +41,12 @@ export async function searchZohoClients(q: { q?: string | undefined; page: numbe
     sort_column: 'contact_name',
     sort_order: 'A',
   });
-  const ids = r.contacts.map((c) => c.contact_id);
+  // Zoho can ignore contact_type with search_text and return vendors too: only customers are listed.
+  const contacts = r.contacts.filter((c) => !c.contact_type || c.contact_type === 'customer');
+  const ids = contacts.map((c) => c.contact_id);
   const imported = await Client.find({ zohoContactId: { $in: ids }, deletedAt: null }).select('zohoContactId clientNo').lean();
   const byZoho = new Map(imported.map((c) => [c.zohoContactId, c.clientNo]));
-  const items = r.contacts.map((c) => ({
+  const items = contacts.map((c) => ({
     contactId: c.contact_id,
     name: c.company_name || c.contact_name || '',
     email: c.email,

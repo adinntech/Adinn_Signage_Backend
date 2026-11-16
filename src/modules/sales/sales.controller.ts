@@ -7,6 +7,7 @@ import { csQuotationBody, quotationBody } from '../ratecards/ratecard.validators
 import * as quotation from '../ratecards/quotation.service';
 import * as approval from './approval.service';
 import * as handover from './handover.service';
+import * as shopVersions from './shopVersions';
 import * as leads from './lead.service';
 import * as onboard from './onboarding.service';
 import * as recce from './recce.service';
@@ -45,6 +46,7 @@ import {
   zohoClientQuery,
   recceAssignBody,
   recceCodesBody,
+  recceEstimatesQuery,
 } from './sales.validators';
 import { Client } from '../clients/client.model';
 import { linkedZohoClients } from '../clients/client.service';
@@ -68,6 +70,8 @@ export const createOrder = asyncHandler(async (req, res) => {
 export const zohoClients = asyncHandler(async (req, res) => {
   const { q } = zohoClientQuery.parse(req.query);
   const items = await searchZohoClients(q);
+  // Client Servicing (Create Project): Zoho only; the clients collection is not used (no CRM link shown).
+  if (actorOf(req).role === 'CLIENT_SERVICING') return ok(res, items.map((z) => ({ ...z, clientId: null, clientNo: null, code: null })), { mode: zohoMode() });
   // Zoho's search does not cover GSTIN: a GSTIN already known on a linked local client finds its Zoho customer.
   const gst = q.toUpperCase();
   if (GSTIN_RE.test(gst) && !items.some((z) => z.gstin === gst)) {
@@ -83,6 +87,8 @@ export const zohoClient = asyncHandler(async (req, res) => {
   const zohoId = z.string().trim().min(1).max(40).regex(/^[\w-]+$/).parse(req.params.zohoId);
   const c = await getZohoClient(zohoId);
   if (!c) throw AppError.notFound('This customer is no longer in Zoho.');
+  // Client Servicing (Create Project): Zoho only; the clients collection is not used (no CRM link shown).
+  if (actorOf(req).role === 'CLIENT_SERVICING') return ok(res, { ...c, clientId: null, clientNo: null, code: null }, { mode: zohoMode() });
   const linked = (await linkedZohoClients([c.zohoId])).get(c.zohoId);
   // clientNo / code: the local client's (null until it is added); zohoId = Zoho contact id; zohoCustomerNo = Zoho's customer number.
   ok(res, { ...c, clientId: linked?.clientId ?? null, clientNo: linked?.clientNo ?? null, code: linked?.code ?? null }, { mode: zohoMode() });
@@ -134,6 +140,18 @@ export const exportShops = asyncHandler(async (req, res) => {
   const pdf = req.query.format === 'pdf';
   const f = pdf ? await handover.exportShopsPdf(id(req)) : await handover.exportShops(id(req));
   res.setHeader('Content-Type', pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(f.buffer);
+});
+/* Shop list version history (current assign type). */
+const versionNo = (req: Request) => z.coerce.number().int().min(1).max(100000).parse(req.params.version);
+export const shopVersionList = asyncHandler(async (req, res) => ok(res, await handover.shopVersions(id(req), actorOf(req))));
+export const shopVersion = asyncHandler(async (req, res) => ok(res, await shopVersions.getShopVersion(id(req), versionNo(req))));
+export const shopVersionCompare = asyncHandler(async (req, res) => ok(res, await shopVersions.compareShopVersion(id(req), versionNo(req))));
+export const shopVersionExport = asyncHandler(async (req, res) => {
+  const f = await shopVersions.exportShopVersion(id(req), versionNo(req));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${f.name}"`);
   res.setHeader('Cache-Control', 'no-store');
   res.send(f.buffer);
@@ -264,6 +282,7 @@ export const sendCodeRequest = asyncHandler(async (req, res) => {
 export const confirmRecceHandover = asyncHandler(async (req, res) => ok(res, await recce.confirmHandover(id(req), flowActor(req))));
 export const saveRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.saveRateCard(id(req), csQuotationBody.parse(req.body), flowActor(req))));
 export const skipRecceRateCard = asyncHandler(async (req, res) => ok(res, await recce.skipRateCard(id(req), flowActor(req))));
+export const recceEstimates = asyncHandler(async (req, res) => ok(res, await recce.recceEstimates(id(req), recceEstimatesQuery.parse(req.query).clientId, flowActor(req))));
 export const saveRecceCodes = asyncHandler(async (req, res) => ok(res, await recce.saveCodes(id(req), recceCodesBody.parse(req.body), flowActor(req))));
 export const assignRecce = asyncHandler(async (req, res) => ok(res, await recce.assignRecce(id(req), recceAssignBody.parse(req.body), flowActor(req))));
 

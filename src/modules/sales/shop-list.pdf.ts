@@ -9,7 +9,7 @@ const LINE = '#D5DCE8';
 const MUTED = '#5B6B82';
 const HEAD_FILL = '#EEF2F8';
 const MARGIN = 28;
-const PAD = 3;
+const PAD = 4;
 const THUMB = 40;
 
 export interface ShopListPdfInput {
@@ -44,7 +44,8 @@ export function renderShopListPdf(t: ShopListPdfInput): Promise<Buffer> {
     }
     const REG = custom ? 'Body' : 'Helvetica';
     const BOLD = custom ? 'Bold' : 'Helvetica-Bold';
-    const fontSize = cols > 24 ? 5.5 : cols > 16 ? 6.5 : 7.5;
+    // Readable sizes (larger than before); very wide tables still step down so every column fits the page.
+    const fontSize = cols > 24 ? 7 : cols > 16 ? 8 : 9.5;
     const pageW = doc.page.width;
     const pageH = doc.page.height;
     const bottom = pageH - MARGIN - 14;
@@ -56,9 +57,18 @@ export function renderShopListPdf(t: ShopListPdfInput): Promise<Buffer> {
     const sample = t.rows.slice(0, 500);
     const want = t.headers.map((h, i) => Math.min(60, Math.max(4, h.length, ...sample.map((r) => (r[i] ?? '').length))));
     const sum = want.reduce((a, b) => a + b, 0) || 1;
-    const widths = want.map((w) => Math.max(30, (w / sum) * textW));
-    const scale = textW / widths.reduce((a, b) => a + b, 0);
-    for (let i = 0; i < widths.length; i++) widths[i] = widths[i]! * scale;
+    // Each column at least as wide as its longest word (header and values, up to 18 characters), so words such as
+    // "District" or "MADURAI" are not broken mid-word; the rest of the width is shared by content length.
+    const word = (s: string) => s.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), '').slice(0, 18);
+    const minW = t.headers.map((h, i) =>
+      Math.min(
+        textW / 4,
+        Math.max(30, doc.font(BOLD).fontSize(fontSize).widthOfString(word(h)), ...sample.map((r) => doc.font(REG).fontSize(fontSize).widthOfString(word(r[i] ?? '')))) + PAD * 2 + 1,
+      ),
+    );
+    const minSum = minW.reduce((a, b) => a + b, 0);
+    const extra = textW - minSum;
+    const widths = extra > 0 ? minW.map((m, i) => m + (extra * want[i]!) / sum) : minW.map((m) => (m * textW) / minSum);
     if (withImages) widths.push(imgW);
     const heads = withImages ? [...t.headers, 'Images'] : t.headers;
 
@@ -67,9 +77,9 @@ export function renderShopListPdf(t: ShopListPdfInput): Promise<Buffer> {
 
     let y = MARGIN;
     const title = () => {
-      doc.font(BOLD).fontSize(12).fillColor(NAVY).text(t.title, MARGIN, MARGIN, { width: usable });
-      doc.font(REG).fontSize(8).fillColor(MUTED).text(t.subtitle, MARGIN, MARGIN + 16, { width: usable });
-      y = MARGIN + 32;
+      doc.font(BOLD).fontSize(15).fillColor(NAVY).text(t.title, MARGIN, MARGIN, { width: usable });
+      doc.font(REG).fontSize(10).fillColor(MUTED).text(t.subtitle, MARGIN, MARGIN + 20, { width: usable });
+      y = MARGIN + 40;
     };
     const header = () => {
       let x = MARGIN;
@@ -120,14 +130,14 @@ export function renderShopListPdf(t: ShopListPdfInput): Promise<Buffer> {
       }
       y += h;
     });
-    if (!t.rows.length) doc.font(REG).fontSize(9).fillColor(MUTED).text('No shops in the table.', MARGIN, y + 8);
+    if (!t.rows.length) doc.font(REG).fontSize(10).fillColor(MUTED).text('No shops in the table.', MARGIN, y + 8);
 
     const range = doc.bufferedPageRange();
     for (let i = 0; i < range.count; i++) {
       doc.switchToPage(range.start + i);
       // The footer sits in the bottom margin; without this pdfkit would start a new page for it.
       doc.page.margins.bottom = 0;
-      doc.font(REG).fontSize(7).fillColor(MUTED).text(`${t.title} · Page ${i + 1} of ${range.count}`, MARGIN, pageH - MARGIN, { width: usable, align: 'right', lineBreak: false });
+      doc.font(REG).fontSize(8).fillColor(MUTED).text(`${t.title} · Page ${i + 1} of ${range.count}`, MARGIN, pageH - MARGIN, { width: usable, align: 'right', lineBreak: false });
     }
     doc.end();
   });

@@ -99,6 +99,9 @@ async function zohoGet<T>(path: string, params: Record<string, string>): Promise
 /* --------------------------------- mapping --------------------------------- */
 
 /** Books contact -> ZohoClient, with the Admin import's mapping (customer number stripped from the name, contacts cleaned). */
+/** Books contact that is a customer (a missing type is kept: only explicit vendors are dropped). */
+const isCustomer = (c: ZohoContact) => !c.contact_type || c.contact_type === 'customer';
+
 const fromBooks = (c: ZohoContact): ZohoClient => {
   const f = toClientFields(c);
   return {
@@ -143,14 +146,16 @@ export async function searchZohoClients(q: string): Promise<ZohoClient[]> {
   }
   if (env.ZOHO_PRODUCT === 'books') {
     // search_text matches the contact name, which starts with the customer number ("30196 - AGNI STEELS").
+    // Zoho can ignore contact_type when search_text is set and return vendors too, so customers are kept here as well;
+    // a larger page keeps up to 25 after vendors are dropped.
     const r = await booksGet<{ contacts?: ZohoContact[] }>('/contacts', {
       contact_type: 'customer',
       filter_by: 'Status.Active',
       sort_column: 'contact_name',
-      per_page: 25,
+      per_page: 100,
       search_text: term || undefined,
     });
-    return (r.contacts ?? []).map(fromBooks);
+    return (r.contacts ?? []).filter(isCustomer).slice(0, 25).map(fromBooks);
   }
   // CRM search needs at least two characters; without a term the first page of Accounts is listed.
   const r =
@@ -182,7 +187,8 @@ export async function getZohoClient(zohoId: string): Promise<ZohoClient | null> 
       if (e.statusCode === 404) return { contact: undefined };
       throw e;
     });
-    return r.contact ? fromBooks(r.contact) : null;
+    // A vendor id is never a client company.
+    return r.contact && isCustomer(r.contact) ? fromBooks(r.contact) : null;
   }
   const r = await zohoGet<{ data?: CrmAccount[] }>(`/crm/v2/Accounts/${encodeURIComponent(zohoId)}`, {});
   return r?.data?.[0] ? fromCrm(r.data[0]) : null;

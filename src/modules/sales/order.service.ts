@@ -6,6 +6,7 @@ import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { linkZohoCustomer, registerCompany } from '../clients/client.service';
+import { contactBookFor } from '../clients/clientContactBook';
 import { clientDetailsFromZoho, clientOf, clientView, type ClientDetails } from '../clients/clientDetails';
 import { findZohoByGstin, getZohoClient } from '../zoho/zoho.customers';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, storedFileUrl, type UploadedFile } from '../files/file.service';
@@ -73,7 +74,20 @@ export const leadLog = (
 async function createOrder(client: { _id: Types.ObjectId | null; name?: string | null }, clientType: 'NEW' | 'EXISTING', requestKey: string | undefined, actor: Actor, initialNotes?: string, clientDetails?: ClientDetails) {
   const note = `Order created (${clientType === 'NEW' ? 'new' : 'existing'} client)`;
   const now = new Date();
+  // Same client as an earlier order: its last saved contact persons and POC contacts start this order (editable in
+  // Assign Type & Details). Contact persons only while the client itself has none (Zoho / Client Management).
+  const owner = { client: client._id, clientDetails: clientDetails ? [clientDetails] : undefined };
+  const book = await contactBookFor(owner);
+  const ownContacts = book?.contactPersons.length ? !(await clientOf(owner))?.contacts?.length : false;
+  const copied = book
+    ? {
+        ...(ownContacts ? { orderContacts: book.contactPersons } : {}),
+        ...(book.pocContacts.length ? { soContacts: book.pocContacts } : {}),
+        ...(ownContacts || book.pocContacts.length ? { contactsFrom: { orderNo: book.orderNo, at: now } } : {}),
+      }
+    : {};
   const order = await SalesOrder.create({
+    ...copied,
     lead: { stage: 'PROJECT_ASSIGN', stageChangedAt: now, startedAt: now, startedBy: actor.id, status: 'OPEN', initialNotes },
     leadLogsArray: [
       // The client branch the user selected (New / Existing) and the company, as chosen at Create Project.

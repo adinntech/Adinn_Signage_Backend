@@ -6,6 +6,11 @@ import { clientRegistration } from '../clients/client.validators';
 import { PRIORITIES } from '../projects/project.model';
 import { APPROVAL_DOC_TYPES, EMAIL_KINDS, HANDOVER_TYPES, LEAD_STAGES, ORDER_STAGES } from './sales.model';
 
+/** Codes step: the Client ID typed for a New client, to list its Zoho estimates. */
+export const recceEstimatesQuery = z.object({
+  clientId: z.string().trim().regex(/^[A-Za-z0-9-]{2,20}$/, 'Client ID: 2-20 letters, digits or -').optional().or(z.literal('').transform(() => undefined)),
+});
+
 /** Assign to Recce Team: the codes the BD received for the project. */
 export const recceCodesBody = z.object({
   projectCode: z.string().trim().regex(/^\d{8}$/, 'Project code must be exactly 8 digits'),
@@ -14,6 +19,8 @@ export const recceCodesBody = z.object({
     .trim()
     .toUpperCase()
     .regex(/^EST-\d{6}$/, 'Estimation code must be EST- and 6 digits, e.g. EST-323343'),
+  /** The Zoho Books estimate the codes were chosen from (reference_number = project code, estimate_number = estimation code). */
+  zohoEstimateId: z.string({ message: 'Choose the project code from Zoho' }).trim().regex(/^\d{10,25}$/, 'Choose the project code from Zoho'),
   /** New client: the Client ID created in Zoho. Existing clients take theirs from Zoho. */
   clientId: z
     .string()
@@ -29,7 +36,8 @@ export const recceAssignBody = z
     assigneeId: objectId,
     startDate: day,
     targetDate: day,
-    district: z.string().trim().min(2, 'Enter the district / location').max(120),
+    // Optional: no longer asked in the Assign to Recce step (older clients may still send it).
+    district: z.string().trim().max(120).optional().or(z.literal('').transform(() => undefined)),
     priority: z.enum(PRIORITIES).default('MEDIUM'),
     note: z.string().trim().max(2000).optional().or(z.literal('').transform(() => undefined)),
   })
@@ -129,24 +137,36 @@ export const shopUploadBody = z.object({
     }),
 });
 /**
- * ASO: the client's SO contacts. Completely blank rows are dropped; a contact that is kept needs a name and a mobile
- * number, the email is optional. One contact is primary (the first one when none is marked).
+ * POC contacts (stored as soContacts). Completely blank rows are dropped; a contact that is kept needs a name and a
+ * phone number, designation and email are optional. One contact is primary (the first one when none is marked).
+ * `ref`: the client contact it was picked from (none for a contact added here).
  */
 export const soContactsBody = z.object({
   contacts: z
-    .array(z.object({ name: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional() }))
-    .max(50, 'Up to 50 SO contacts')
-    .transform((list) => list.filter((c) => [c.name, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
+    .array(z.object({ name: z.string().optional(), designation: z.string().optional(), phone: z.string().optional(), email: z.string().optional(), isPrimary: z.boolean().optional(), ref: z.string().optional() }))
+    .max(50, 'Up to 50 POC contacts')
+    .transform((list) => list.filter((c) => [c.name, c.designation, c.phone, c.email].some((v) => (v ?? '').trim() !== '')))
     .pipe(
       z
         .array(
           z.object({
-            name: z.string().trim().min(1, 'Enter the contact name').max(120),
+            name: z.string().trim().min(1, 'Enter the POC name').max(120),
+            designation: z.string().trim().max(120).optional().transform((v) => v || undefined),
             phone: mobileRule,
             email: optionalEmail,
             isPrimary: z.boolean().optional(),
+            ref: z.string().trim().max(300).optional().transform((v) => v || undefined),
           }),
         )
+        .superRefine((list, ctx) => {
+          // The same client contact cannot be picked twice.
+          const seen = new Map<string, number>();
+          list.forEach((c, i) => {
+            if (!c.ref) return;
+            if (seen.has(c.ref)) ctx.addIssue({ code: 'custom', path: [i, 'name'], message: `Already selected as POC contact ${seen.get(c.ref)! + 1}` });
+            else seen.set(c.ref, i);
+          });
+        })
         .superRefine((list, ctx) => rejectDuplicateContacts(list, ctx, [])),
     )
     .transform((list) => {
@@ -212,6 +232,8 @@ const emailList = z
 export const sendEmailBody = z.object({
   to: emailList.refine((l) => l.length > 0, 'Enter at least one recipient'),
   cc: emailList.default([]),
+  /** Blind copies (Project Code Request Email): never shown to the To / CC recipients. */
+  bcc: emailList.default([]),
   subject: z.string().trim().min(1, 'Enter the email subject').max(250),
   body: z.string().trim().min(1, 'Enter the email content').max(20000),
   requestKey,

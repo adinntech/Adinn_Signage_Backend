@@ -13,6 +13,7 @@ import { clientNameOf } from '../clients/clientDetails';
 import { StandaloneRateCard } from '../ratecards/rateCardCreation.model';
 import { CodeRequest } from '../codeRequests/codeRequest.model';
 import { SalesOrder } from '../sales/sales.model';
+import { User } from '../users/user.model';
 import { EmailTemplate } from '../templates/template.model';
 import { Vendor } from '../vendors/vendor.model';
 import { CATEGORY_RULES, FILE_CATEGORIES, SECTION_LABEL, buildFileKey, kindOfFile, type FileCategory, type FileKind } from './file.categories';
@@ -316,12 +317,28 @@ export interface EmbeddedFileInput {
  * sniffing, private storage, never overwritten). No FileAsset row is written: the caller saves the returned metadata
  * in its own record, and calls discardStoredFiles() if that save fails.
  */
+/**
+ * A sales order created by a Client Servicing user (Create Project flow): its files are stored under
+ * `Client_Service/Create_Project/...` instead of `BD/Sales/...`. Only NEW uploads use it; stored files keep their key.
+ * A failed lookup falls back to the BD folder, so an upload never fails because of it.
+ */
+async function csCreatedOrder(owner: EmbeddedFileInput['owner']): Promise<boolean> {
+  if (owner.entity !== 'SalesOrder') return false;
+  try {
+    const o = await SalesOrder.findById(owner.id).select('createdBy').lean();
+    if (!o?.createdBy) return false;
+    return !!(await User.exists({ _id: o.createdBy, role: 'CLIENT_SERVICING' }));
+  } catch {
+    return false;
+  }
+}
+
 export async function storeEmbeddedFile(i: EmbeddedFileInput): Promise<StoredFile> {
   if (!i.workflowAuthorized) assertCanWrite(i.actor.role, i.category);
   if (!CATEGORY_RULES[i.category].standalone) throw AppError.badRequest(`${i.category} is a project file category`);
   validateFiles(i.category, [i.file]);
   const storage = getStorage();
-  const key = buildFileKey({ category: i.category, clientName: i.clientName, projectCode: i.folderKey, originalName: i.file.originalname });
+  const key = buildFileKey({ category: i.category, clientName: i.clientName, projectCode: i.folderKey, originalName: i.file.originalname, csCreated: await csCreatedOrder(i.owner) });
   await storage.put(key, i.file.buffer, i.file.mimetype);
   try {
     await recordAudit({ actor: i.actor, action: 'UPLOAD', entity: i.owner.entity, entityId: i.owner.id, changes: [{ field: 'file', oldValue: null, newValue: key }, { field: 'category', oldValue: null, newValue: i.category }] });
