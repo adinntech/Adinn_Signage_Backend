@@ -13,6 +13,10 @@ const userSchema = new Schema(
     passwordHash: { type: String, select: false },
     role: { type: String, enum: ROLES, required: true, index: true },
     isActive: { type: Boolean, default: true },
+    /** Set on a vendor login the office created with a default MPIN: the app forces a new MPIN at first sign-in. */
+    mustChangeMpin: { type: Boolean, default: false },
+    /** The email is a made-up address (vendor has none in Zoho): no mail is ever sent to it, MPIN reset goes through Recce Operations. */
+    emailIsPlaceholder: { type: Boolean, default: false },
     vendorId: { type: Schema.Types.ObjectId, index: true }, // the vendor company a VENDOR login belongs to; sees only that vendor's shops
     // Forgot MPIN / password: a hashed 6-digit code emailed to the user. Single use, short-lived, limited attempts.
     resetCodeHash: { type: String, select: false },
@@ -33,7 +37,9 @@ export const User = model('User', userSchema);
 export const toPublicUser = (u: UserDoc) => ({
   id: String(u._id),
   name: u.name,
-  email: u.email,
+  email: u.emailIsPlaceholder ? null : u.email,
+  hasEmail: !u.emailIsPlaceholder,
+  mustChangeMpin: !!u.mustChangeMpin,
   employeeId: u.employeeId ?? null,
   phone: u.phone ?? null,
   role: u.role,

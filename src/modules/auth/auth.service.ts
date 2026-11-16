@@ -232,7 +232,7 @@ export async function logout(token?: string) {
 const RESET_CODE_MINUTES = 10;
 const MAX_RESET_ATTEMPTS = 5;
 const RESET_RESEND_SECONDS = 60;
-const GENERIC_RESET_MESSAGE = 'If this account exists, a verification code has been sent to its email.';
+const GENERIC_RESET_MESSAGE = 'If this account exists and has an email, a verification code has been sent to it. Vendors without an email: contact Recce Operations to reset your MPIN.';
 
 /**
  * Emails a one-time code. The reply is always the same so nobody can learn which emails are registered.
@@ -243,7 +243,8 @@ export async function requestCredentialReset(identifier: string) {
   // Sent time = expiry - code lifetime. A repeat call inside the cooldown sends nothing, so the first mail's code stays valid.
   const sentAt = user?.resetCodeExpiresAt ? user.resetCodeExpiresAt.getTime() - RESET_CODE_MINUTES * 60_000 : 0;
   const coolingDown = Date.now() - sentAt < RESET_RESEND_SECONDS * 1000;
-  if (user && user.isActive && !coolingDown) {
+  // A login with a made-up address (vendor without an email) has nowhere to send the code: Recce Operations resets the MPIN.
+  if (user && user.isActive && !coolingDown && !user.emailIsPlaceholder) {
     const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
     user.set({ resetCodeHash: await bcrypt.hash(code, 10), resetCodeExpiresAt: new Date(Date.now() + RESET_CODE_MINUTES * 60_000), resetCodeAttempts: 0 });
     await user.save();
@@ -289,6 +290,7 @@ export async function confirmCredentialReset(identifier: string, code: string, n
     ...(method === 'MPIN' ? { mpinHash: await hashMpin(newSecret) } : { passwordHash: await hashPassword(newSecret) }),
     failedLogins: 0,
     lockedUntil: null,
+    mustChangeMpin: false,
     resetCodeHash: undefined,
     resetCodeExpiresAt: undefined,
     resetCodeAttempts: 0,

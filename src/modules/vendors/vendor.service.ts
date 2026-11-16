@@ -15,6 +15,7 @@ import { CostPlan } from '../costing/costing.model';
 import { Notification } from '../notifications/notification.model';
 import { deleteUser } from '../users/user.service';
 import { User } from '../users/user.model';
+import { ensureVendorLoginQuietly } from '../users/vendorLogin.service';
 import { VendorPrice } from './vendorPrice.model';
 import { VendorTypeOption } from './vendorType.model';
 import { lookupGst } from './gstPortal.service';
@@ -209,6 +210,8 @@ export async function adoptZohoVendor(zohoContactId: string, actor: Actor) {
   const have = await Vendor.findOne({ zohoContactId, deletedAt: null });
   if (have) {
     if (have.status !== 'ACTIVE') throw AppError.conflict(`${have.name} (${have.code}) is ${have.status.replace('_', ' ').toLowerCase()} in Vendors, so it cannot be given shops yet`);
+    // Another job may already have given this vendor a login: ensure only creates one when it is missing.
+    await ensureVendorLoginQuietly(have._id, actor);
     return have;
   }
   const z = await VendorPrice.findOne({ zohoContactId }).lean();
@@ -225,6 +228,7 @@ export async function adoptZohoVendor(zohoContactId: string, actor: Actor) {
     statusReason: 'Created from Vendor master when given shops. KYC checklist still to be completed', createdBy: actor.id, updatedBy: actor.id,
   });
   await recordAudit({ actor, action: 'CREATE', entity: 'Vendor', entityId: v._id, reason: `${code} ${v.name}: created from the Zoho vendor in Vendor master when given shops (KYC pending)` });
+  await ensureVendorLoginQuietly(v._id, actor);
   return v;
 }
 
@@ -440,6 +444,8 @@ export async function setVendorId(id: string, body: z.infer<typeof vendorIdBody>
   }
   await recordAudit({ actor, action: 'VENDOR_ID_RECEIVED', entity: 'Vendor', entityId: v._id, changes: [{ field: 'zohoVendorNo', oldValue: old, newValue: body.vendorNo }] });
   if (activate) await recordAudit({ actor, action: 'STATUS_CHANGE', entity: 'Vendor', entityId: v._id, changes: [{ field: 'status', oldValue: 'PENDING_KYC', newValue: 'ACTIVE' }], reason: 'Vendor ID received from Accounts' });
+  // The vendor ID is what the username and default MPIN are made from, so a login that was waiting for it is made now.
+  if (v.status === 'ACTIVE') await ensureVendorLoginQuietly(v._id, actor);
   return getVendor(id);
 }
 
