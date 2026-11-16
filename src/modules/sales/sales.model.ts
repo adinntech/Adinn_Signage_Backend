@@ -64,6 +64,8 @@ const emailSchema = new Schema({
   body: String,
   attachments: [fileRef],
   rateCardRevision: Number,
+  /** Project code request: the attachment that is the shop Excel (named after the uploaded file). */
+  shopListFile: String,
   /**
    * Project code request emails sent through the signage email API: the request reference, and the JSON sent (files
    * as references only, never their content) with the API's reply.

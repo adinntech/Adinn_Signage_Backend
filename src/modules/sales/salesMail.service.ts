@@ -47,6 +47,8 @@ type DeliverInput = {
   body: string;
   attachments: Attachment[];
   rateCardRevision?: number | undefined;
+  /** Project code request: file id of the shop Excel attachment. */
+  shopListFile?: string | undefined;
   requestKey?: string | undefined;
   resentFrom?: Types.ObjectId | undefined;
   /**
@@ -179,6 +181,7 @@ async function deliverOnce(rec: DeliverInput) {
     body: rec.body,
     attachments: rec.attachments,
     rateCardRevision: rec.rateCardRevision,
+    shopListFile: rec.shopListFile,
     requestId,
     apiPayload,
     apiResponse,
@@ -269,7 +272,7 @@ async function attachmentInfo(orderId: string) {
   const rateCards = ids((o?.rateCardArray ?? []).map((r) => (r as { pdf?: { fileId?: unknown } }).pdf?.fileId));
   const soDocs = ids((o?.handoverDocumentsArray ?? []).filter((d) => d.kind === 'SO_DOCUMENT').map((d) => (d.file as { fileId?: unknown } | null)?.fileId));
   const chat = ids((o?.handoverMessagesArray ?? []).flatMap((m) => ((m as { attachments?: { fileId?: unknown }[] }).attachments ?? []).map((a) => a.fileId)));
-  return (a: { fileId?: unknown; name?: string | null; key?: string | null; storage?: string | null }, gst: Set<string>): { category: AttachmentCategory; available: boolean } => {
+  return (a: { fileId?: unknown; name?: string | null; key?: string | null; storage?: string | null }, gst: Set<string>, shopListFile?: string | null): { category: AttachmentCategory; available: boolean } => {
     const id = String(a.fileId);
     const category: AttachmentCategory = rateCards.has(id)
       ? 'RATE_CARD'
@@ -279,7 +282,7 @@ async function attachmentInfo(orderId: string) {
           ? 'COMMUNICATION'
           : gst.has(id)
             ? 'GST_CERTIFICATE'
-            : /_shop_list\.xlsx$/i.test(a.name ?? '')
+            : id === shopListFile || /_shop_list\.xlsx$/i.test(a.name ?? '')
               ? 'SHOP_LIST'
               : 'ADDED';
     return { category, available: !!a.key && !!a.storage };
@@ -300,7 +303,7 @@ export async function listEmails(orderId: string, kind?: Kind) {
     if (e.kind !== 'PROJECT_CODE_REQUEST') return e;
     const p = e.apiPayload as { attachments?: { fileId?: string; docType?: string }[] } | null | undefined;
     const gst = new Set((p?.attachments ?? []).filter((x) => x.docType === 'gst' && x.fileId).map((x) => x.fileId!));
-    return { ...e, attachmentInfo: Object.fromEntries((e.attachments ?? []).map((a) => [String(a.fileId), info(a, gst)])) };
+    return { ...e, attachmentInfo: Object.fromEntries((e.attachments ?? []).map((a) => [String(a.fileId), info(a, gst, (e as { shopListFile?: string | null }).shopListFile)])) };
   });
 }
 
@@ -323,6 +326,7 @@ export async function resendEmail(emailId: string, actor: Actor) {
     body: e.body ?? '',
     attachments: (e.attachments ?? []).filter((a) => a.fileId) as Attachment[],
     rateCardRevision: e.rateCardRevision ?? undefined,
+    shopListFile: (e as { shopListFile?: string | null }).shopListFile ?? undefined,
     resentFrom: e._id,
     // Project code request: same client and source as the original (a new request reference is given).
     signage: (() => {

@@ -558,7 +558,8 @@ export async function deleteCommentAttachment(id: string, commentId: string, fil
  * Signed link for any file shown on an order: comment and requirement note attachments, approval proof, rate card PDFs, sent email
  * attachments, handover documents / shop list, and the Company Profile PDF shown in the email draft.
  */
-export async function orderFileUrl(id: string, fileId: string) {
+/** One stored file of the order (any of its records), by file id. */
+export async function orderStoredFile(id: string, fileId: string) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
     .select(
       'client clientType salescommentsArray.attachments approvalDocumentsArray.file rateCardArray.pdf rateCardPdf salesprofile.attachments handoverDocumentsArray.file handoverShopsArray.attachments handoverVoiceNotesArray.file handoverMessagesArray.attachments handoverMessagesArray.voice requirementNotesArray.attachments onboardingPdf handoverClient.gstCertificates',
@@ -588,5 +589,9 @@ export async function orderFileUrl(id: string, fileId: string) {
     file = t?.pdf;
   }
   if (!file) throw AppError.notFound('File not found');
-  return storedFileUrl(file);
+  return file;
+}
+
+export async function orderFileUrl(id: string, fileId: string) {
+  return storedFileUrl(await orderStoredFile(id, fileId));
 }

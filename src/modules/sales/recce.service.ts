@@ -142,6 +142,16 @@ export const DEFAULT_NOTE = '<p>Kindly create the project code and estimate numb
 /** Same words, whatever the markup (the editor rewrites tags and spacing). */
 const sameText = (a: string, b: string) => htmlToText(a).replace(/\s+/g, ' ').trim() === htmlToText(b).replace(/\s+/g, ' ').trim();
 
+/**
+ * The shop Excel's file name: the uploaded file's name (as .xlsx, the file is the shop table as it is now), else the
+ * generated `<order>_shop_list.xlsx` (shops added by hand).
+ */
+function shopExcelName(o: { orderNo: string; shopList?: { fileName?: string | null } | null }, generated?: string) {
+  const up = o.shopList?.fileName?.trim();
+  if (up) return `${up.replace(/\.[^.]+$/, '') || 'shop-list'}.xlsx`;
+  return generated ?? `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`;
+}
+
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
@@ -233,7 +243,7 @@ export async function getRecce(id: string, actor: Actor) {
     .filter(Boolean)
     .join(', ');
   // Attachments as the API names them (same order as the send: rate card, shop Excel, documents, GST certificates).
-  const shopExcel = shopRows ? { name: `${o.orderNo.replace(/[^\w-]+/g, '_')}_shop_list.xlsx`, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } : null;
+  const shopExcel = shopRows ? { name: shopExcelName(o), mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } : null;
   const files = [
     ...(rcPdf ? [{ file: rcPdf, note: `Rate Card ${revisionLabel(inc!.revision)}` }] : []),
     ...(shopExcel ? [{ file: shopExcel, note: `Shop list, ${shops}` }] : []),
@@ -253,7 +263,9 @@ export async function getRecce(id: string, actor: Actor) {
     ...custom.map((f) => [f.label!, f.value!] as [string, string]),
   ];
   const projectRows: [string, string | null | undefined][] = [['Order Number', o.orderNo], ['Assign Type', typeLabel], ['Shops', shops]];
-  const contactCols: [string, (k: (typeof contacts)[number]) => string | null | undefined][] = [
+  // Email Contact Persons: one person only, the primary POC contact (assign type chosen), else the primary client contact.
+  const emailContacts = poc ? [{ ...poc, isPrimary: true }] : [];
+  const contactCols: [string, (k: (typeof emailContacts)[number]) => string | null | undefined][] = [
     ['Name', (k) => k.name],
     ['Designation', (k) => k.designation],
     ['Mobile', (k) => mobile(k.phone)],
@@ -273,7 +285,7 @@ export async function getRecce(id: string, actor: Actor) {
     sections: [
       { title: 'Client Details', rows: pairsOf(clientRows), table: null },
       { title: 'Project Details', rows: pairsOf(projectRows), table: null },
-      { title: 'Contact Persons', rows: [] as { label: string; value: string }[], table: tableOf(contacts, contactCols) },
+      { title: 'Contact Persons', rows: [] as { label: string; value: string }[], table: tableOf(emailContacts, contactCols) },
       ...(o.handoverType === 'ASO' ? [{ title: 'SO Contacts', rows: [] as { label: string; value: string }[], table: tableOf(soList, soCols) }] : []),
     ].filter((x) => x.rows.length || x.table),
   };
@@ -323,7 +335,7 @@ export async function getRecce(id: string, actor: Actor) {
     zohoClientId: { value: codes?.clientId ?? zohoNo, fromZoho: existing },
     /** Sent automatically with every request email (besides the client details and contacts in the message). */
     autoAttachments: {
-      shopExcel: shopRows ? { rows: shopRows, sized: o.handoverType === 'SHOP_MEASUREMENT' } : null,
+      shopExcel: shopRows ? { rows: shopRows, sized: o.handoverType === 'SHOP_MEASUREMENT', name: o.shopList?.fileName ? shopExcelName(o) : undefined } : null,
       /** Rate Card step: the PDF of the version included in this flow (none when the rate card was skipped). */
       rateCard: rcPdf ? { fileId: String(rcPdf.fileId), name: rcPdf.name, size: rcPdf.size, mimeType: rcPdf.mimeType, label: revisionLabel(inc!.revision) } : null,
       documents: docs.map((f) => ({ fileId: String(f.fileId), name: f.name, size: f.size, mimeType: f.mimeType, so: soDocs.some((x) => String(x.fileId) === String(f.fileId)) })),
@@ -361,7 +373,7 @@ export async function getRecce(id: string, actor: Actor) {
           : `<p>This is a new client. Kindly create the <strong>client ID in Zoho</strong> for this client, and the <strong>project code and estimation code</strong> for the order below. The GST certificate and the client's details are included for the client ID.</p>`) +
         section('Client Details', rows(clientRows)) +
         section('Project Details', rows(projectRows)) +
-        section('Contact Persons', grid(contacts, contactCols)) +
+        section('Contact Persons', grid(emailContacts, contactCols)) +
         (o.handoverType === 'ASO' ? section('SO Contacts', grid(soList, soCols)) : '') +
         section('Attachments', files.length ? `<ul>${files.map((x, i) => `<li>${esc(fileNames[i]!)}${x.note ? ` (${esc(x.note)})` : ''}</li>`).join('')}</ul>` : '') +
         `<p>Please reply to this mail with the <strong>Project Code</strong> (8 or more digits) and the estimate numbers (EST-123456) so the Recce assignment can proceed.</p>` +
@@ -404,6 +416,8 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
   const docSource = ((await SalesOrder.findById(o._id).select('handoverType handoverDocumentsArray handoverMessagesArray.attachments').lean()) ?? {}) as Parameters<typeof soDocuments>[0] &
     Parameters<typeof chatDocuments>[0];
   const stored: StoredFile[] = [];
+  /** The stored copy of the shop Excel (Email History tells it apart by this id, its name being the uploaded file's). */
+  let shopListFile: string | undefined;
   // Signage email API: where each file comes from (first source wins, like the de-duplication below).
   const docTypes: Record<string, string> = {};
   const tag = <T extends { fileId?: unknown }>(list: T[], type: string) => {
@@ -416,7 +430,9 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
     // Shop types: the shop table as it is now, as Excel (with sizes for Shop + Measurement).
     if (o.handoverType && shopTypesList.includes(o.handoverType) && o.shopList?.total) {
       const x = await exportShops(id);
-      stored.push(...tag([await store({ originalname: x.name, mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: x.buffer.length, buffer: x.buffer })], 'shoplist'));
+      const shop = await store({ originalname: shopExcelName(o, x.name), mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', size: x.buffer.length, buffer: x.buffer });
+      shopListFile = String(shop.fileId);
+      stored.push(...tag([shop], 'shoplist'));
     }
     for (const f of files) stored.push(...tag([await store(f)], 'upload'));
     // Documents shared in the handover Communication go as they are (no copy).
@@ -463,6 +479,7 @@ export async function sendCodeRequest(id: string, input: z.infer<typeof sendEmai
       body: sanitizeHtml(body),
       attachments,
       rateCardRevision: included?.revision ?? undefined,
+      shopListFile,
       requestKey: input.requestKey,
       signage: {
         ...(routing.replyTo ? { replyTo: routing.replyTo } : {}),

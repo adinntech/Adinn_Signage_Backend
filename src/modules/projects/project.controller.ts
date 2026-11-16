@@ -2,6 +2,7 @@ import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { projectNotificationLog } from '../notifications/notification.service';
 import { shopRowsQuery } from '../sales/sales.validators';
+import { contentDisposition } from '../files/storage';
 import * as bd from './bdHandover.service';
 import * as s from './project.service';
 import * as areaSvc from './surveyArea.service';
@@ -25,6 +26,13 @@ export const bdHandoverShopsExport = asyncHandler(async (req, res) => {
   res.send(f.buffer);
 });
 export const bdHandoverFileUrl = asyncHandler(async (req, res) => ok(res, await bd.projectHandoverFileUrl(id(req), objectId.parse(req.params.fileId))));
+export const bdHandoverFileContent = asyncHandler(async (req, res) => {
+  const f = await bd.projectHandoverFileContent(id(req), objectId.parse(req.params.fileId));
+  res.setHeader('Content-Type', f.mimeType);
+  res.setHeader('Content-Disposition', contentDisposition('inline', f.name));
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(f.content);
+});
 
 export const list = asyncHandler(async (req, res) => {
   const { items, meta } = await s.listProjects(projectListQuery.parse(req.query), actorOf(req));
