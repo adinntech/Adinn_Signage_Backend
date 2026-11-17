@@ -71,9 +71,26 @@ const HANDLED_MAX = 5000;
  * these IDs are read (usually one or two), so it answers in seconds. When the subject was changed, the reply body is
  * searched for the ID instead. Runs beside the timer's full read (both skip a mail already read).
  */
-export async function checkRequestReplies(requestIds: string[]): Promise<CheckResult> {
+export async function checkRequestReplies(requestIds: string[], opts: { auto?: boolean } = {}): Promise<CheckResult> {
   const ids = [...new Set(requestIds.map((x) => x.trim()).filter(Boolean))].slice(0, 20);
   if (!ids.length) return checkReplies({ fresh: true });
+  const key = [...ids].sort().join(',');
+  const last = recent.get(key);
+  // The screen's automatic check (every 30 s while the Codes step is open): the same requests read in the last 20 s (by
+  // another open screen, or a read still running) give that result, so many open screens never load the mailbox.
+  // A click (Get reply) always reads again.
+  if (opts.auto && last && Date.now() - last.at < AUTO_REUSE_MS) return last.result;
+  const result = readRequests(ids);
+  recent.set(key, { at: Date.now(), result });
+  result.catch(() => recent.delete(key));
+  if (recent.size > 500) for (const [k, v] of recent) if (Date.now() - v.at >= AUTO_REUSE_MS) recent.delete(k);
+  return result;
+}
+
+const AUTO_REUSE_MS = 20_000;
+const recent = new Map<string, { at: number; result: Promise<CheckResult> }>();
+
+async function readRequests(ids: string[]): Promise<CheckResult> {
   const bySubject = await readBoxes({ ids, where: 'subject' });
   return bySubject.found ? bySubject : readBoxes({ ids, where: 'body', inboxOnly: true });
 }
