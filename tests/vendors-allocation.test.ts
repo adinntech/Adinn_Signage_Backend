@@ -166,6 +166,21 @@ describe('shop allocation', () => {
     expect((await api().delete(`/api/v1/vendors/${vendorId}`).set(as('OPS'))).status).toBe(409);
   });
 
+  it('a shop moved to another vendor loses its old login assignment, so the new vendor login can see it', async () => {
+    const { Site } = await import('../src/modules/sites/site.model');
+    await Site.updateOne({ _id: siteIds[0] }, { $set: { assignedTo: uid.OPS, assignedToAt: new Date(), assignedToBy: uid.OPS, status: 'IN_PROGRESS' } });
+    // same vendor again: nothing changes hands, the login assignment stays
+    await api().post(`${A()}/assign`).set(as('OPS')).send({ siteIds: [siteIds[0]], channel: 'VENDOR', vendorId });
+    expect(String((await Site.findById(siteIds[0]).lean())!.assignedTo)).toBe(uid.OPS);
+    // another vendor: starts afresh
+    await api().post(`${A()}/assign`).set(as('OPS')).send({ siteIds: [siteIds[0]], channel: 'VENDOR', vendorId: orgId });
+    const moved = await Site.findById(siteIds[0]).lean();
+    expect(moved!.assignedTo).toBeUndefined();
+    expect(moved!.status).toBe('PENDING');
+    // back to the first vendor so later tests see the same state
+    await api().post(`${A()}/assign`).set(as('OPS')).send({ siteIds: [siteIds[0]], channel: 'VENDOR', vendorId });
+  });
+
   it('suggests a split and applies it', async () => {
     const preview = await api().post(`${A()}/split/preview`).set(as('OPS')).send({ by: 'district', maxPerTeam: 2, teams: [{ vendorId: orgId }, { vendorId: null }, { vendorId: null }] });
     expect(preview.status).toBe(200);

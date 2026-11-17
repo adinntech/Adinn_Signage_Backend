@@ -40,3 +40,4 @@ siteRouter.post('/sites/:id/duplicate', ...writeS, c.duplicate);
 siteRouter.post('/sites/:id/approval', authenticate, scopeSite, ap.set);
 siteRouter.get(`${P}/approval-summary`, ...readP, ap.summary);
 siteRouter.post(`${P}/approve-all`, authenticate, scopeProject('projectId'), ap.approveAll);
+siteRouter.post(`${P}/approve-selected`, authenticate, scopeProject('projectId'), ap.approveSelected);

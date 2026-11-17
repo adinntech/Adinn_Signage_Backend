@@ -41,6 +41,12 @@ const identifierRule = z
   .max(120)
   .transform((v) => v.toLowerCase());
 
+export const vendorIdLoginSchema = z.object({
+  vendorId: z.string().trim().regex(/^\d{4,10}$/, 'Enter the last 4 digits of your vendor ID'),
+  remember: z.boolean().default(true),
+  device: z.string().max(100).optional(),
+});
+
 export const forgotRequestSchema = z.object({ identifier: identifierRule });
 export const forgotConfirmSchema = z.object({
   identifier: identifierRule,

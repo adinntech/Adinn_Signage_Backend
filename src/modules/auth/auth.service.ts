@@ -5,6 +5,7 @@ import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { User, toPublicUser, type UserDoc } from '../users/user.model';
 import { RefreshToken } from './refreshToken.model';
+import { Vendor } from '../vendors/vendor.model';
 import { sendAuthMail } from './authMail';
 import { mpinRule, passwordRule } from '../../common/validators/credentials';
 import { LOGIN_ROLE_GROUPS, ROLE_HOME, ROLE_PLATFORMS, permissionsFor, type LoginRoleKey, type Platform, type Role } from '../roles/roles';
@@ -68,8 +69,34 @@ export function assertPlatform(role: Role, platform?: Platform) {
   }
 }
 
+/**
+ * Vendor card on the mobile app: the vendor types the last 4 digits of the vendor ID (or the full ID). Two vendors can share
+ * the same 4 digits (11001 and 21001), so when several match the MPIN picks the one it belongs to; if the MPIN fits more than
+ * one (both still on the default), the vendor is asked for the full ID. Returns null when no vendor matches, so the normal
+ * username / email lookup still works.
+ */
+async function findVendorLoginByNumber(input: LoginInput) {
+  if (input.loginRole !== 'VENDOR' || !/^\d{4,}$/.test(input.identifier)) return null;
+  const vendors = await Vendor.find({
+    deletedAt: null,
+    zohoVendorNo: input.identifier.length === 4 ? { $regex: `${input.identifier}$` } : input.identifier,
+  })
+    .select('_id')
+    .lean();
+  if (!vendors.length) return null;
+  const users = await User.find({ role: 'VENDOR', vendorId: { $in: vendors.map((v) => v._id) }, deletedAt: null }).select('+passwordHash +mpinHash');
+  if (users.length <= 1) return { user: users[0] ?? null };
+  const supplied = input.mpin ?? '';
+  const fits = [];
+  for (const u of users) if (u.mpinHash && (await bcrypt.compare(supplied, u.mpinHash))) fits.push(u);
+  if (fits.length === 1) return { user: fits[0]! };
+  if (fits.length > 1) throw new AppError(409, 'VENDOR_ID_AMBIGUOUS', 'More than one vendor has these last 4 digits. Enter your full vendor ID.');
+  throw AppError.unauthorized('Invalid credentials', 'INVALID_CREDENTIALS');
+}
+
 export async function login(input: LoginInput, meta: ClientMeta) {
-  const user = await findByIdentifier(input.identifier).select('+passwordHash +mpinHash');
+  const byNumber = await findVendorLoginByNumber(input);
+  const user = byNumber ? byNumber.user : await findByIdentifier(input.identifier).select('+passwordHash +mpinHash');
   if (user?.lockedUntil && user.lockedUntil > new Date()) {
     throw new AppError(429, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes or ask an admin to reset your MPIN.`);
   }
@@ -103,6 +130,36 @@ export async function login(input: LoginInput, meta: ClientMeta) {
   user.lastLoginAt = new Date();
   user.failedLogins = 0;
   user.lockedUntil = null;
+  await user.save();
+  return issueSession(user as unknown as UserDoc, crypto.randomUUID(), meta, input.remember);
+}
+
+export interface VendorIdLoginInput {
+  vendorId: string;
+  remember: boolean;
+}
+
+/**
+ * Vendor mobile sign-in with the vendor ID digits only (last 4 digits or the full ID): no MPIN, no password. If two vendors end
+ * with the same 4 digits the person is asked for the full ID. Only active vendor logins on the mobile app can use it.
+ */
+export async function vendorIdLogin(input: VendorIdLoginInput, meta: ClientMeta) {
+  const vendors = await Vendor.find({
+    status: 'ACTIVE',
+    deletedAt: null,
+    zohoVendorNo: input.vendorId.length === 4 ? { $regex: `${input.vendorId}$` } : input.vendorId,
+  })
+    .select('_id')
+    .lean();
+  const users = vendors.length
+    ? await User.find({ role: 'VENDOR', vendorId: { $in: vendors.map((v) => v._id) }, isActive: true, deletedAt: null })
+    : [];
+  if (users.length > 1) throw new AppError(409, 'VENDOR_ID_AMBIGUOUS', 'More than one vendor has these last 4 digits. Enter your full vendor ID.');
+  const user = users[0];
+  if (!user) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Vendor ID not found. Use "Forgot vendor ID?" to contact the office.');
+  assertPlatform(user.role as Role, 'mobile');
+  user.lastLoginAt = new Date();
+  user.mustChangeMpin = false; // there is no MPIN step on this sign-in
   await user.save();
   return issueSession(user as unknown as UserDoc, crypto.randomUUID(), meta, input.remember);
 }
@@ -152,11 +209,30 @@ export async function register(input: RegisterInput, meta: ClientMeta) {
 }
 
 /** Role always comes from the account record, never from anything the client sent. */
-const sessionUser = (user: UserDoc) => ({
+const sessionUser = async (user: UserDoc) => ({
   ...toPublicUser(user),
   permissions: permissionsFor(user.role as Role),
   home: ROLE_HOME[user.role as Role],
+  // A vendor sees the company's details exactly as the vendor master holds them (name, phone, email, vendor ID).
+  ...(user.role === 'VENDOR' && user.vendorId ? { vendor: await vendorProfile(user.vendorId) } : {}),
 });
+
+async function vendorProfile(vendorId: UserDoc['vendorId']) {
+  const v = await Vendor.findOne({ _id: vendorId, deletedAt: null }).select('name code zohoVendorNo contactPerson mobile mobileAlt email state pincode').lean();
+  if (!v) return null;
+  return {
+    id: String(v._id),
+    name: v.name,
+    code: v.code,
+    vendorNo: v.zohoVendorNo ?? null,
+    contactPerson: v.contactPerson ?? null,
+    phone: v.mobile,
+    altPhone: v.mobileAlt ?? null,
+    email: v.email ?? null,
+    state: v.state ?? null,
+    pincode: v.pincode ?? null,
+  };
+}
 
 function signAccess(user: UserDoc) {
   const payload: AccessPayload = { sub: String(user._id), role: user.role as Role };
@@ -189,7 +265,7 @@ async function issueSession(user: UserDoc, family: string, meta: ClientMeta, rem
     accessToken: signAccess(user),
     refreshToken,
     remember,
-    user: sessionUser(user),
+    user: await sessionUser(user),
   };
 }
 
@@ -303,5 +379,5 @@ export async function confirmCredentialReset(identifier: string, code: string, n
 export async function getMe(userId: string) {
   const user = await User.findById(userId);
   if (!user || !user.isActive || user.deletedAt) throw AppError.unauthorized('Account unavailable');
-  return sessionUser(user as unknown as UserDoc);
+  return await sessionUser(user as unknown as UserDoc);
 }

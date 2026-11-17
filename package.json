@@ -15,6 +15,7 @@
         "set-role-emails": "tsx src/scripts/set-role-emails.ts",
         "zoho:token": "tsx src/scripts/zoho-refresh-token.ts",
         "migrate:sales-arrays": "tsx src/scripts/migrate-sales-arrays.ts",
+        "fix:stale-assignments": "tsx src/scripts/fix-stale-shop-assignments.ts",
         "migrate:file-assets": "tsx src/scripts/migrate-file-assets.ts",
         "seed:industries": "tsx src/scripts/seed-industries.ts",
         "format": "prettier --write src tests",

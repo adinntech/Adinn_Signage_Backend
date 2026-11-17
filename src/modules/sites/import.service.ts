@@ -59,8 +59,13 @@ export async function uploadSheet(projectId: string, file: { buffer: Buffer; ori
 /** A file the BD / Client Servicing attached to the sales order (handover documents, shop lists, chat files) of this project. */
 async function uploadFromHandoverFile(projectId: string, fileId: string, actor: Actor) {
   const project = await Project.findOne({ _id: projectId, deletedAt: null }).select('salesOrder').lean();
-  const order = project?.salesOrder ? await SalesOrder.findOne({ _id: project.salesOrder, deletedAt: null }).select('handoverDocumentsArray.file handoverMessagesArray.attachments').lean() : null;
-  const all: (StoredFile | null | undefined)[] = [...(order?.handoverDocumentsArray ?? []).map((d) => d.file as StoredFile | undefined), ...(order?.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[])];
+  const order = project?.salesOrder ? await SalesOrder.findOne({ _id: project.salesOrder, deletedAt: null }).select('handoverDocumentsArray.file handoverMessagesArray.attachments salesprofile.attachments').lean() : null;
+  // Every place the Attachments panel lists files from: uploaded handover documents, chat files and the files of the project code request mails.
+  const all: (StoredFile | null | undefined)[] = [
+    ...(order?.handoverDocumentsArray ?? []).map((d) => d.file as StoredFile | undefined),
+    ...(order?.handoverMessagesArray ?? []).flatMap((m) => (m.attachments ?? []) as StoredFile[]),
+    ...((order as { salesprofile?: { attachments?: StoredFile[] }[] } | null)?.salesprofile ?? []).flatMap((e) => (e.attachments ?? []) as StoredFile[]),
+  ];
   const file = all.find((f) => f && String(f.fileId) === fileId);
   if (!file) throw AppError.notFound('That file is not an attachment of this project');
   const { name, content } = await readStoredFile(file);

@@ -23,6 +23,7 @@ const sensitiveLimiter = rateLimit({
 
 export const authRouter = Router();
 authRouter.post('/login', loginLimiter, c.login);
+authRouter.post('/vendor-login', loginLimiter, c.vendorLogin);
 authRouter.get('/register-options', c.registerOptions);
 authRouter.post('/register', sensitiveLimiter, c.register);
 authRouter.post('/forgot', sensitiveLimiter, c.forgotRequest);

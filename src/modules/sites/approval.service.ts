@@ -14,6 +14,7 @@ export const approvalBody = z
   .object({ level: z.enum(['ops', 'bd']), value: z.enum(APPROVAL_STATES), note: z.string().trim().max(500).optional() })
   .refine((v) => v.value !== 'CORRECTION' || !!v.note, { path: ['note'], message: 'Say what needs correcting' });
 export const approveAllBody = z.object({ level: z.enum(['ops', 'bd']) });
+export const approveSelectedBody = z.object({ level: z.enum(['ops', 'bd']), ids: z.array(z.string().regex(/^[a-f0-9]{24}$/i)).min(1).max(500) });
 
 const FIELD = { ops: 'opsApproval', bd: 'bdApproval' } as const;
 const NEEDS: Record<'ops' | 'bd', Permission> = { ops: 'verification:manage', bd: 'approvals:client' };
@@ -73,6 +74,27 @@ export async function approveAllPending(projectId: string, level: 'ops' | 'bd', 
   const skipped = await Site.countDocuments({ project: projectId, deletedAt: null, [field]: 'PENDING' });
   const waitingForAddress = level === 'ops' ? await Site.countDocuments({ project: projectId, deletedAt: null, [field]: 'PENDING', ...NO_ADDRESS }) : 0;
   return { approved: res.modifiedCount, stillPending: skipped, waitingForAddress };
+}
+
+/**
+ * Approves the ticked shops in one go, with the same rules as "approve all" (a measurement project needs a size, Operations needs an address).
+ * One audit record is written, so the people on the project get ONE notification, not one per shop.
+ */
+export async function approveSelected(projectId: string, level: 'ops' | 'bd', ids: string[], actor: Actor) {
+  assertLevel(actor, level);
+  const project = await requireProject(projectId);
+  await assertNotCancelled(projectId);
+  const field = FIELD[level];
+  const needsSize = project.requirementType === 'SHOP_MEASUREMENT' ? { width: { $gt: 0 }, height: { $gt: 0 } } : {};
+  const base = { project: projectId, deletedAt: null, _id: { $in: ids } };
+  const res = await Site.updateMany(
+    { ...base, [field]: { $ne: 'APPROVED' }, ...needsSize, ...(level === 'ops' ? FINDABLE : {}) },
+    { $set: { [field]: 'APPROVED', [`${level}ApprovalAt`]: new Date(), [`${level}ApprovalBy`]: actor.id, approvalUpdatedAt: new Date(), approvalUpdatedBy: actor.id } },
+  );
+  const found = await Site.countDocuments(base);
+  if (res.modifiedCount > 0) await recordAudit({ actor, action: 'APPROVAL', entity: 'Project', entityId: projectId, project: projectId, reason: `${level.toUpperCase()} approved ${res.modifiedCount} of ${found} selected shop(s)` });
+  const alreadyDone = await Site.countDocuments({ ...base, [field]: 'APPROVED' }) - res.modifiedCount;
+  return { approved: res.modifiedCount, selected: found, notApproved: Math.max(0, found - res.modifiedCount - Math.max(0, alreadyDone)), alreadyApproved: Math.max(0, alreadyDone) };
 }
 
 /** For each level: how many shops are approved / pending / need correction, who approved last and when, and the latest correction note. */
