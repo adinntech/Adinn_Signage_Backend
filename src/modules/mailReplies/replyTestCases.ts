@@ -1,4 +1,5 @@
 import type { AnalyzeInput, ReplyStatus, Workflow } from './replyAnalyzer';
+import { MIXED_CASES } from './replyTestCasesMixed';
 
 /**
  * The reusable reply test suite: 183 cases for the three mail workflows (53 vendor ID, 50 vendor amount approval, 50 project
@@ -242,7 +243,8 @@ export const CROSS_CASES: ReplyCase[] = [
   c(30, 'VENDOR_ID', 'Request ID written in lower case', base('VENDOR_ID', VND, 'Vendor ID: 78954', ACC, { subject: 'RE: adn-signage-vnd-12112601' }), OK, '78954'),
 ];
 
-export const ALL_CASES: ReplyCase[] = [...VENDOR_CASES, ...RATE_CASES, ...PROJECT_CASES, ...CROSS_CASES];
+/** The original 183 cases plus the mixed-character set (replyTestCasesMixed.ts). */
+export const ALL_CASES: ReplyCase[] = [...VENDOR_CASES, ...RATE_CASES, ...PROJECT_CASES, ...CROSS_CASES, ...MIXED_CASES];
 
 export interface CaseResult {
   id: string;

@@ -6,7 +6,7 @@ import { asyncHandler, ok } from '../../common/http';
 import { actorOf, objectId } from '../../common/query';
 import { receive } from '../files/file.controller';
 import { z } from 'zod';
-import { lookupZohoVendor, zohoVendorDetails } from '../zoho/zoho.service';
+import { lookupZohoVendor, zohoDetailsOfVendor, zohoVendorDetails } from '../zoho/zoho.service';
 import { exportZohoVendors, listZohoVendors, zohoExportQuery, zohoVendorListQuery, startZohoCitySync, zohoVendorCities, zohoVendorStatus } from '../zoho/zoho.vendors';
 import { exportVendors, importVendors, vendorTemplate } from './vendor.excel';
 import { discardRegistrationDraft, registrationDraftBody, registrationMailBody, registrationMailDraft, saveRegistrationDraft, sendRegistrationMail } from './vendor.mail.service';
@@ -16,6 +16,7 @@ import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, priceHistor
 import { companyRates } from './vendorRateApproval.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
+import { ensureVendorLogin, resetVendorLoginMpin } from '../users/vendorLogin.service';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -92,7 +93,12 @@ vendorRouter.post('/:id/status', ...write, asyncHandler(async (req, res) => ok(r
 vendorRouter.delete('/:id', ...write, asyncHandler(async (req, res) => { await svc.deleteVendor(objectId.parse(req.params.id), actorOf(req)); ok(res, { deleted: true }); }));
 
 // Logins of a vendor company (mobile app users). Created here so Operations can link them without the user-admin screen.
+vendorRouter.get('/:id/zoho-details', ...write, asyncHandler(async (req, res) => ok(res, await zohoDetailsOfVendor(objectId.parse(req.params.id)))));
 vendorRouter.get('/:id/logins', ...read, asyncHandler(async (req, res) => ok(res, await listVendorLogins(objectId.parse(req.params.id)))));
+// Creates the default login (username from the name + vendor ID tail, MPIN = vendor ID tail) only when the vendor has none yet.
+vendorRouter.post('/:id/logins/ensure', ...write, asyncHandler(async (req, res) => ok(res, await ensureVendorLogin(objectId.parse(req.params.id), actorOf(req)))));
+// Recce Operations resets a vendor's MPIN to the default (last 4 digits of the vendor ID); the vendor must change it at next sign-in.
+vendorRouter.post('/:id/logins/:userId/reset-mpin', ...write, asyncHandler(async (req, res) => ok(res, await resetVendorLoginMpin(objectId.parse(req.params.id), objectId.parse(req.params.userId), actorOf(req)))));
 vendorRouter.post('/:id/logins', ...write, asyncHandler(async (req, res) => {
   const id = objectId.parse(req.params.id);
   await svc.getVendor(id);

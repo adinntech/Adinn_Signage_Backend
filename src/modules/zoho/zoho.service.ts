@@ -111,6 +111,15 @@ export async function zohoVendorDetails(contactId: string) {
   };
 }
 
+/** Live Zoho Books details of a registered vendor (by its Zoho contact id, else its vendor number): used to fill the "Add login" form. */
+export async function zohoDetailsOfVendor(vendorId: string) {
+  const v = await Vendor.findOne({ _id: vendorId, deletedAt: null }).select('zohoContactId zohoVendorNo').lean();
+  if (!v) throw AppError.notFound('Vendor not found');
+  if (v.zohoContactId) return zohoVendorDetails(v.zohoContactId);
+  if (v.zohoVendorNo) return lookupZohoVendor(String(v.zohoVendorNo));
+  throw AppError.notFound('This vendor is not linked to Zoho Books');
+}
+
 /** Re-reads the contact from Zoho (the browser never supplies the data) and stores it in the clients collection. */
 export async function importZohoContact(contactId: string, actor: Actor) {
   const detail = await zohoGet<{ contact: ZohoContact }>(`/contacts/${encodeURIComponent(contactId)}`);

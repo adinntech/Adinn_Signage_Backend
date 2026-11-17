@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import { Readable } from 'node:stream';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors';
+import { loadXlsx } from '../../common/xlsxLoad';
 import { escapeRegex, pageMeta, type Actor } from '../../common/query';
 import { tabularFile } from '../../common/tabular';
 import { recordAudit } from '../audit/audit.service';
@@ -136,7 +137,7 @@ async function readRows(file: { originalname: string; buffer: Buffer }) {
   const wb = new ExcelJS.Workbook();
   try {
     if (/\.csv$/i.test(file.originalname)) await wb.csv.read(Readable.from(file.buffer));
-    else if (/\.xlsx$/i.test(file.originalname)) await wb.xlsx.load(file.buffer as never);
+    else if (/\.xlsx$/i.test(file.originalname)) await loadXlsx(wb, file.buffer);
     else throw AppError.badRequest('Upload an .xlsx or .csv file');
   } catch (e) {
     if (e instanceof AppError) throw e;

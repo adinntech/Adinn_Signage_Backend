@@ -108,7 +108,7 @@ export async function updateUser(id: string, patch: z.infer<typeof updateUserSch
 /** Admin sets a new MPIN or password (the "forgot credential" path). Clears any lockout and signs the user out everywhere. */
 export async function resetCredential(id: string, input: z.infer<typeof resetCredentialSchema>, actor: Actor) {
   const user = await getAlive(id);
-  user.set({ ...(await credentialFields(input)), failedLogins: 0, lockedUntil: null });
+  user.set({ ...(await credentialFields(input)), failedLogins: 0, lockedUntil: null, mustChangeMpin: false });
   await user.save();
   await revokeSessions(user._id);
   await recordAudit({ actor, action: 'RESET_CREDENTIAL', entity: 'User', entityId: user._id });
@@ -121,7 +121,7 @@ export async function changeOwnCredential(actor: Actor, input: z.infer<typeof ch
   if (!stored || !(await bcrypt.compare(input.currentSecret, stored))) {
     throw new AppError(400, 'INVALID_CREDENTIALS', 'Your current MPIN or password is incorrect');
   }
-  user.set(await credentialFields(input));
+  user.set({ ...(await credentialFields(input)), mustChangeMpin: false });
   await user.save();
   await revokeSessions(user._id); // other devices must sign in again
   await recordAudit({ actor, action: 'CHANGE_CREDENTIAL', entity: 'User', entityId: user._id });
