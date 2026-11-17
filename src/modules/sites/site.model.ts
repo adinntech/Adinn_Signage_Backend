@@ -1,4 +1,5 @@
 import { Schema, model } from 'mongoose';
+import { storedFileSchema } from '../files/storedFile.schema';
 import { SCENARIOS, UNITS } from './site.fields';
 
 /** PENDING until the shop is given to a recce mobile login; IN_PROGRESS from then on. Later recce statuses are added in later phases. */
@@ -61,6 +62,8 @@ const siteSchema = new Schema(
     approvalNote: String,
     approvalUpdatedAt: Date,
     approvalUpdatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    /** Photos the vendor uploaded from the mobile app for this shop (max 10). */
+    vendorImages: { type: [storedFileSchema], default: undefined },
     importBatch: { type: Schema.Types.ObjectId, ref: 'ImportBatch' },
     sourceRow: Number,
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },

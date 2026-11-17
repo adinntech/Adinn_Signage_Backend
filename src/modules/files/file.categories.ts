@@ -30,6 +30,7 @@ export const FILE_CATEGORIES = [
   'CLIENT_GST_CERTIFICATE',
   'VENDOR_KYC_DOCUMENT',
   'TEMPLATE_COMPANY_PROFILE',
+  'VENDOR_SHOP_IMAGE',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
 
@@ -90,6 +91,8 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   CLIENT_GST_CERTIFICATE: { folder: (c, p) => `BD/Clients/${c}/${p}/GST_Certificate`, write: 'clients:write', read: ['clients:read'], kinds: ['document', 'image'], evidence: false, standalone: true },
   // Vendor Management: KYC scans (PAN, GST, bank proof, address proof), stored per vendor (`p` is the vendor code). Removing one, or deleting the vendor, erases it.
   VENDOR_KYC_DOCUMENT: { folder: (c, p) => `Vendors/${c}/${p}/KYC`, write: 'vendors:manage', read: ['vendors:manage', 'finance:manage'], kinds: ['document', 'image'], evidence: false, standalone: true },
+  // Vendor mobile app: photos of one shop (max 10 per shop), kept on the shop (`p` is <project code>_<site code>). Removing one erases it.
+  VENDOR_SHOP_IMAGE: { folder: (c, p) => `Vendor_Work/${c}/${p}/Shop_Images`, write: 'field:execute', read: ['sites:read'], kinds: IMAGES, evidence: false, standalone: true },
   TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
@@ -115,6 +118,7 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   CLIENT_GST_CERTIFICATE: 'Client - GST Certificate',
   VENDOR_KYC_DOCUMENT: 'Vendor - KYC Documents',
   TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
+  VENDOR_SHOP_IMAGE: 'Vendor - Shop Images',
 };
 
 const EXT_KIND: Record<string, FileKind> = {

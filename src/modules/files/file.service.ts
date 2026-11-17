@@ -309,7 +309,7 @@ export interface EmbeddedFileInput {
   /** The caller has already checked the actor's right to add this file as part of a workflow step (skips the category role check). */
   workflowAuthorized?: boolean;
   /** The record the file belongs to (audit trail). */
-  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'Vendor' | 'ConnectChannel' | 'Project' | 'StandaloneRateCard'; id: Types.ObjectId | string };
+  owner: { entity: 'SalesOrder' | 'EmailTemplate' | 'Client' | 'Vendor' | 'ConnectChannel' | 'Project' | 'StandaloneRateCard' | 'Site'; id: Types.ObjectId | string };
 }
 
 /**
