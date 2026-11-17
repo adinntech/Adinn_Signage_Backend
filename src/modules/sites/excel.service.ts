@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
 import { AppError } from '../../common/errors';
+import { loadXlsx } from '../../common/xlsxLoad';
 import { autoMap, FIELD_LABELS, type MappableField, type Scenario } from './site.fields';
 
 export const MAX_ROWS = 20000;
@@ -79,7 +80,7 @@ export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<P
   const isCsv = /\.csv$/i.test(fileName);
   try {
     if (isCsv) await wb.csv.read(Readable.from(buffer));
-    else await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+    else await loadXlsx(wb, buffer);
   } catch {
     throw AppError.badRequest('Could not read the file. Upload a valid .xlsx or .csv file.');
   }
@@ -90,7 +91,8 @@ export async function parseWorkbook(buffer: Buffer, fileName: string): Promise<P
 
   const usable = candidates.filter((c) => c.read && c.read.rows.length > 0);
   // Real shop sheets (at least a shop name, owner or mobile column recognised) first, then by number of rows.
-  const shopLike = (c: (typeof usable)[number]) => (c.read!.score >= 2 ? 1 : 0);
+  // A sheet naming many shop columns (4+) beats a longer notes / READ ME sheet that only matches one or two words by chance.
+  const shopLike = (c: (typeof usable)[number]) => (c.read!.score >= 4 ? 2 : c.read!.score >= 2 ? 1 : 0);
   usable.sort((a, b) => shopLike(b) - shopLike(a) || b.read!.rows.length - a.read!.rows.length);
   const chosen = usable[0];
   if (!chosen) {
@@ -240,7 +242,7 @@ export async function readGrids(buffer: Buffer, fileName: string): Promise<Sheet
   const wb = new ExcelJS.Workbook();
   try {
     if (/\.csv$/i.test(fileName)) await wb.csv.read(Readable.from(buffer));
-    else await wb.xlsx.load(buffer as unknown as ExcelJS.Buffer);
+    else await loadXlsx(wb, buffer);
   } catch {
     throw AppError.badRequest('Could not read the file. Upload a valid .xlsx, .xls or .csv file (it may be damaged or password protected).');
   }

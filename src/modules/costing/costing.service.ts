@@ -92,6 +92,8 @@ async function requireProject(projectId: string) {
   return p;
 }
 const originOf = (p: { originLat?: number | null; originLng?: number | null }): LatLng | null => (hasCoords({ lat: p.originLat, lng: p.originLng }) ? { lat: p.originLat as number, lng: p.originLng as number } : null);
+/** Most vendors offered per area (registered ones and Zoho ones each), so the pick list stays readable. */
+const MAX_OFFERED = 10;
 const isoDay = (d?: Date | null) => (d ? d.toISOString().slice(0, 10) : undefined);
 const districtRe = (name: string) => new RegExp(`^\\s*${escapeRegex(name.trim())}\\s*$`, 'i');
 /** The shops of one plan area: its cluster key, else its district. */
@@ -507,6 +509,8 @@ export const suggestBody = z.object({
   mode: z.enum(['BOTH', 'VENDOR', 'IN_HOUSE']).default('BOTH'),
   /** When true, the groups and the best choice for each are saved into the plan (as a draft). */
   apply: z.boolean().default(false),
+  /** Operations' own pick per area before "Use this plan": the area key -> `IN_HOUSE` or a vendor id from that area's offered vendors. */
+  overrides: z.record(z.string().max(120), z.string().regex(/^(IN_HOUSE|[a-f\d]{24}|zoho:\d{10,25})$/i, 'Invalid vendor')).default({}),
 });
 
 /** Distance a vendor travels to the area: none when they work there, else from where they are, else (unknown place) from the start point. */
@@ -596,7 +600,9 @@ export async function suggestPlan(projectId: string, body: z.infer<typeof sugges
     const lead = covering[0] ?? byNear[0] ?? lowest;
     const picked = new Map<string, (typeof priced)[number]>();
     for (const o of [lead, ...[...priced].sort((a, b) => a.total - b.total).slice(0, 3), ...byNear.slice(0, 2), ...covering.slice(1, 2)]) if (o && !picked.has(o.vendorId)) picked.set(o.vendorId, o);
-    const options = [...picked.values()].slice(0, 5).map((o) => ({ ...o, tags: [o.approvalTag, o.covers ? 'Works in this area' : '', o === byNear[0] ? 'Nearest' : '', o === lowest ? 'Lowest cost' : ''].filter(Boolean) }));
+    // Every vendor with a cost is offered (nearest first after the suggested ones), so Operations can pick any of them before using the plan.
+    for (const o of [...priced].sort((a, b) => (a.nearKm ?? 1e9) - (b.nearKm ?? 1e9) || a.total - b.total)) if (!picked.has(o.vendorId)) picked.set(o.vendorId, o);
+    const options = [...picked.values()].slice(0, MAX_OFFERED).map((o) => ({ ...o, tags: [o.approvalTag, o.covers ? 'Works in this area' : '', o === byNear[0] ? 'Nearest' : '', o === lowest ? 'Lowest cost' : ''].filter(Boolean) }));
     const nearest = covering.length === 0 && options.length > 0;
     const outside = unregistered
       .map((z) => {
@@ -611,7 +617,7 @@ export async function suggestPlan(projectId: string, body: z.infer<typeof sugges
       })
       .filter((o) => o.skillMatch || !body.requireSkills)
       .sort((a, b) => (a.nearKm ?? 1e9) - (b.nearKm ?? 1e9) || a.total - b.total)
-      .slice(0, 3);
+      .slice(0, MAX_OFFERED);
     // Zoho vendors with a cost can be given shops too (their CRM record is created then), so the cheapest of both groups is suggested.
     const best = [options[0], ...outside.filter((o) => o.skillMatch || !body.requireSkills)].filter((o): o is NonNullable<typeof o> => !!o).sort((a, b) => Number(a.needsApproval) - Number(b.needsApproval) || a.total - b.total)[0];
     const registered = new Set(vendors.map((v) => v.zohoContactId).filter(Boolean));
@@ -677,7 +683,11 @@ export async function suggestPlan(projectId: string, body: z.infer<typeof sugges
   // One CRM record per Zoho vendor, even when several routes pick the same vendor (created once, one after the other).
   const adopted = new Map<string, Types.ObjectId>();
   const legOf = async (p: (typeof proposals)[number]) => {
-    const v = p.recommended.channel === 'VENDOR' ? p.vendors.find((o) => o.vendorId === p.recommended.vendorId) : undefined;
+    // A person's pick for this area wins over the suggestion; it must be one of the vendors offered for the area.
+    const pick = body.overrides[p.key];
+    if (pick && pick !== 'IN_HOUSE' && !p.vendors.some((o) => o.vendorId === pick)) throw AppError.badRequest(`That vendor is not offered for ${p.name}. Analyse again`);
+    const channel = pick ? (pick === 'IN_HOUSE' ? 'IN_HOUSE' : 'VENDOR') : p.recommended.channel;
+    const v = channel === 'VENDOR' ? p.vendors.find((o) => o.vendorId === (pick ?? p.recommended.vendorId)) : undefined;
     let vendorRecord: Types.ObjectId | null = null;
     if (v) {
       if (v.vendorId.startsWith('zoho:')) {
@@ -687,8 +697,8 @@ export async function suggestPlan(projectId: string, body: z.infer<typeof sugges
     }
     return {
       key: p.key, name: p.name, district: p.district, shops: p.shops, distanceKm: p.distanceKm, routeKm: p.routeKm, deadline: isoDay(project.targetDate),
-      channel: p.recommended.channel, vendor: vendorRecord, vendorName: v?.name ?? null, cardRate: v?.cardRate ?? null, cardFarRate: v?.cardFarRate ?? null,
-      vendorOther: 0, tripStart: p.tripStart, tripEnd: p.tripEnd, clientsShared: 1, otherAmount: 0, clustered: body.groupBy === 'area', autoSelected: true,
+      channel, vendor: vendorRecord, vendorName: v?.name ?? null, cardRate: v?.cardRate ?? null, cardFarRate: v?.cardFarRate ?? null,
+      vendorOther: 0, tripStart: p.tripStart, tripEnd: p.tripEnd, clientsShared: 1, otherAmount: 0, clustered: body.groupBy === 'area', autoSelected: !pick,
     };
   };
   const legs = [];

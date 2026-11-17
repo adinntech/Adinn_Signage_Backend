@@ -100,6 +100,17 @@ export function startZohoCitySync() {
   return { ...sync };
 }
 
+/**
+ * Keeps the stored copy in step with Zoho Books: every 30 minutes the vendor list is read and any vendor not stored yet
+ * (e.g. the 589th, added in Zoho after the 588th) is read and stored. Vendors already stored are skipped until their weekly refresh.
+ */
+const AUTO_SYNC_MS = 30 * 60 * 1000;
+export function startZohoVendorAutoSync() {
+  if (!env.zohoEnabled) return;
+  setTimeout(() => { if (!sync.running) void runCitySync(); }, 30_000).unref();
+  setInterval(() => { if (!sync.running) void runCitySync(); }, AUTO_SYNC_MS).unref();
+}
+
 /** The cities found so far (with how many vendors each) and how far the reading of the addresses is. */
 export async function zohoVendorCities() {
   const [rows, have] = await Promise.all([

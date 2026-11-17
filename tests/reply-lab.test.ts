@@ -63,7 +63,8 @@ describe('Email Reply Test Lab API', () => {
     expect(res.body.data.rows.filter((r: { pass: boolean }) => !r.pass)).toEqual([]);
     expect(res.body.data.failed).toBe(0);
     const one = await api().post(`${LAB}/run`).set(as('ADMIN')).send({ group: 'CROSS' });
-    expect(one.body.data.total).toBe(30);
+    const { CROSS_CASES, MIXED_CROSS_CASES } = [await import('../src/modules/mailReplies/replyTestCases'), await import('../src/modules/mailReplies/replyTestCasesMixed')].reduce((m, x) => ({ ...m, ...x }), {} as Record<string, never[]>) as unknown as { CROSS_CASES: unknown[]; MIXED_CROSS_CASES: unknown[] };
+    expect(one.body.data.total).toBe(CROSS_CASES.length + MIXED_CROSS_CASES.length);
     expect([await Vendor.countDocuments(), await VendorRateApproval.countDocuments()]).toEqual(before);
   });
 });

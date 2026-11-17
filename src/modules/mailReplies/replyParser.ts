@@ -119,7 +119,7 @@ const scrub = (s: string) =>
     .replace(PAN, ' ')
     .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}/g, ' ') // e-mail addresses
     .replace(/https?:\/\/\S+|www\.\S+/gi, ' ')
-    .replace(/(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d+)?/gi, ' ') // amounts
+    .replace(/(?<![A-Za-z])(?:₹|rs\.?|inr)\s*[\d,]+(?:\.\d+)?/gi, ' ') // amounts
     .replace(/\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b/g, ' ')
     .replace(/\+91[\s-]?[6-9]\d{9}(?!\d)/g, ' ') // phone numbers written with a country code or in two groups
     .replace(/(?<!\d)[6-9]\d{4}[\s-]\d{5}(?!\d)/g, ' ')
@@ -500,7 +500,7 @@ const done = (decision: DecisionRead['decision'], matched: string | null, reason
 export function extractAmounts(text: string): number[] {
   const out: number[] = [];
   const add = (s: string) => { const v = Number(s.replace(/,/g, '')); if (Number.isFinite(v) && v > 0) out.push(v); };
-  for (const m of text.matchAll(/(?:₹|rs\.?|inr|rupees?)\s*([\d,]+(?:\.\d+)?)/gi)) add(m[1]!);
+  for (const m of text.matchAll(/(?<![A-Za-z])(?:₹|rs\.?|inr|rupees?)\s*([\d,]+(?:\.\d+)?)/gi)) add(m[1]!);
   for (const m of text.matchAll(/(?<![\d,.])(\d{1,3}(?:,\d{2,3})+(?:\.\d+)?)(?![\d,])/g)) add(m[1]!);
   for (const m of text.matchAll(/(?<![\d,.])(\d{3,9}(?:\.\d+)?)\s*(?:\/-|rs\b|rupees)/gi)) add(m[1]!);
   return uniq(out);
