@@ -325,8 +325,8 @@ const orderSchema = new Schema(
           codesSavedAt: Date,
           codesSavedBy: { type: Schema.Types.ObjectId, ref: 'User' },
           /** The latest reply read to the project code request mail (the latest overwrites; every one stays in the history). */
-          codeReply: { requestId: String, messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], status: String, reason: String },
-          codeReplyHistory: [{ _id: false, requestId: String, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String], status: String, reason: String }],
+          codeReply: { requestId: String, messageId: String, from: String, receivedAt: Date, snippet: String, detectedCode: String, estimates: [String], candidates: [String], status: String, reason: String },
+          codeReplyHistory: [{ _id: false, requestId: String, messageId: String, from: String, receivedAt: Date, at: Date, snippet: String, detectedCode: String, estimates: [String], candidates: [String], status: String, reason: String }],
           /** Client ID in Zoho: typed for a New client (created in Zoho after the request email), from Zoho for an Existing one. */
           clientId: String,
           /** Recce route step 1 confirmed ("Continue: Project Code Request Email"). */

@@ -155,7 +155,7 @@ function shopExcelName(o: { orderNo: string; shopList?: { fileName?: string | nu
 /** Recce branch for one order: codes, project code request emails, what is still missing, and the assignment. */
 export async function getRecce(id: string, actor: Actor) {
   const o = await SalesOrder.findOne({ _id: id, deletedAt: null })
-    .select('orderNo client clientDetails clientType lead recce csAssignee assignRoute handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopList declaredShopTotal handoverMessagesArray.attachments handoverDocumentsArray salesprofile.kind salesprofile.status salesprofile.sentAt')
+    .select('orderNo client clientDetails clientType lead recce csAssignee assignRoute handoverFull handoverType handoverUpdatedAt soContacts orderContacts shopList declaredShopTotal handoverMessagesArray.attachments handoverDocumentsArray salesprofile.kind salesprofile.status salesprofile.sentAt salesprofile.requestId')
     .populate('recce.assignee', 'name email phone role')
     .populate('recce.assignedBy', 'name')
     .populate('recce.codesSavedBy', 'name')
@@ -308,6 +308,8 @@ export async function getRecce(id: string, actor: Actor) {
     codeReply: r?.codeReply ?? null,
     codeReplyHistory: r?.codeReplyHistory ?? [],
     requests: { count: requests.length, lastSentAt: requests[0]?.sentAt ?? null, lastStatus: requests[0]?.status ?? null },
+    /** Request IDs of the project code request emails (in their subject): Get reply reads only their replies. */
+    requestIds: requests.map((e) => e.requestId).filter((x): x is string => !!x),
     /** Email step done: an email recorded as sent (or not sent only because mail is off). Unlocks the codes. */
     emailDone: sentOk,
     /** Handover Type & Details (step 1) complete: unlocks the request email. */

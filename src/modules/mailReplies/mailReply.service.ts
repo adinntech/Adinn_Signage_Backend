@@ -13,7 +13,7 @@ import { requestKindOf } from '../mailSettings/requestIdTags';
 import { extractAmounts, extractProjectCode, extractVendorId, findClientCode, findDecision, readDecision, findEstimates, freshText, requestIdsIn, rulesFromEnv, senderAllowed, snippetOf } from './replyParser';
 
 /** The saved project code of a read: only a clear one (EXTRACTED) is offered, everything else is left for a person with the reason shown. */
-const projectRead = (text: string) => { const r = extractProjectCode(text, rulesFromEnv()); return { code: r.status === 'EXTRACTED' ? r.normalized : null, status: r.status, reason: r.reason }; };
+const projectRead = (text: string) => { const r = extractProjectCode(text, rulesFromEnv()); return { code: r.status === 'EXTRACTED' ? r.normalized : null, status: r.status, reason: r.reason, candidates: r.candidates ?? [] }; };
 
 /** One mail read from the reply mailbox (the mailbox reader hands over plain data, so this is testable without IMAP). */
 export interface IncomingReply {
@@ -101,7 +101,9 @@ async function salesProjectReply(requestId: string, msg: IncomingReply, fresh: s
   if (seen) return 'duplicate';
   const found = projectRead(fresh);
   const estimates = findEstimates(fresh, rulesFromEnv());
-  const entry = { requestId, messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), status: found.status, reason: found.reason };
+  // No single code: the possible codes the parser found are kept, so the Codes step can match them with the Zoho estimates.
+  const candidates = found.code ? [] : [...new Set(found.candidates)].slice(0, 20);
+  const entry = { requestId, messageId: msg.messageId, from: from[0] ?? '', receivedAt, snippet: snippetOf(fresh), ...(found.code ? { detectedCode: found.code } : {}), ...(estimates.length ? { estimates } : {}), ...(candidates.length ? { candidates } : {}), status: found.status, reason: found.reason };
   const newest = o.recce?.codeReply?.receivedAt;
   const isNewest = !newest || receivedAt >= newest;
   const logged = { ...entry, at: new Date() };

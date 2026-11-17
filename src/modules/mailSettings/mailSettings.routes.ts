@@ -11,5 +11,5 @@ export const mailSettingsRouter = Router();
 mailSettingsRouter.use(authenticate, requirePermission('mail:manage'));
 mailSettingsRouter.get('/routing', asyncHandler(async (_req, res) => ok(res, await listRouting())));
 mailSettingsRouter.get('/replies/status', asyncHandler(async (_req, res) => ok(res, { enabled: env.imapEnabled, mailbox: env.imapEnabled ? env.IMAP_USER : null, everySeconds: env.imapEnabled ? env.MAIL_REPLY_POLL_SECONDS : 0 })));
-mailSettingsRouter.post('/replies/check', asyncHandler(async (_req, res) => ok(res, await checkReplies())));
+mailSettingsRouter.post('/replies/check', asyncHandler(async (_req, res) => ok(res, await checkReplies({ fresh: true }))));
 mailSettingsRouter.put('/routing/:key', asyncHandler(async (req, res) => ok(res, await saveRouting(routingKey.parse(req.params.key), routingBody.parse(req.body), actorOf(req)))));
