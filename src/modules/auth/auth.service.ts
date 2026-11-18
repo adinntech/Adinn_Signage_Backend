@@ -226,7 +226,7 @@ async function vendorProfile(vendorId: UserDoc['vendorId']) {
     code: v.code,
     vendorNo: v.zohoVendorNo ?? null,
     contactPerson: v.contactPerson ?? null,
-    phone: v.mobile,
+    phone: v.mobile || null,
     altPhone: v.mobileAlt ?? null,
     email: v.email ?? null,
     state: v.state ?? null,

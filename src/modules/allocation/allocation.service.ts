@@ -155,7 +155,7 @@ export async function assign(projectId: string, body: z.infer<typeof assignBody>
     : { $set: { channel: body.channel, allocatedAt: new Date(), allocatedBy: actor.id, ...(vendor ? { vendor: body.vendorId } : {}) }, ...(body.channel === 'IN_HOUSE' ? { $unset: { vendor: 1 } } : {}) };
   // A shop that changes hands starts afresh: the login it was given to before (recce person or the old vendor's login) must not
   // keep it, or the new team's login (which sees shops given to it or to no one yet) never shows it.
-  const changesHands =
+  const changesHands: Record<string, unknown> =
     body.channel === 'NONE'
       ? {}
       : body.channel === 'VENDOR'

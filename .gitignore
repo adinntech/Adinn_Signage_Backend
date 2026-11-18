@@ -9,6 +9,8 @@ dist
 !.env.*.example
 # local file storage
 public/uploads
+# test excel files for recce 
+Signage_Backend\signage-recce-backend\src\Vendor_Recce_Excel
 
 # cPanel signage mail API secrets
 src/Signage_Emails/signage_email_api/config.local.php
