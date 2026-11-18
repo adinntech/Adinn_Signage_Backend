@@ -217,10 +217,11 @@ export async function adoptZohoVendor(zohoContactId: string, actor: Actor) {
   const z = await VendorPrice.findOne({ zohoContactId }).lean();
   if (!z || z.ratePerShop == null) throw AppError.notFound('This vendor has no cost in Vendor master');
   const mobile = String(z.mobile ?? '').replace(/\D/g, '').slice(-10);
-  if (mobile.length !== 10) throw AppError.conflict(`${z.name ?? 'This vendor'} has no valid 10-digit mobile number in Zoho. Add it in Zoho, or onboard the vendor in Vendors`);
+  // A missing or invalid number does not block giving shops: vendors sign in with their vendor ID. The number can be added later in Vendors.
+  const validMobile = mobile.length === 10 ? mobile : '';
   const code = `VND-${String(await nextSeq('vendor')).padStart(4, '0')}`;
   const v = await Vendor.create({
-    code, name: z.name ?? 'Zoho vendor', nameKey: normKey(z.name ?? 'zoho vendor'), type: 'ORGANIZATION', mobile,
+    code, name: z.name ?? 'Zoho vendor', nameKey: normKey(z.name ?? 'zoho vendor'), type: 'ORGANIZATION', mobile: validMobile,
     ...(z.email ? { email: z.email } : {}), ...(z.gstin ? { gstin: z.gstin } : {}), ...(z.pan ? { pan: z.pan } : {}),
     ...(z.address ? { address: z.address } : {}), ...(z.city ? { district: z.city } : {}),
     ratePerShop: z.ratePerShop, ...(z.farRatePerShop != null ? { farRatePerShop: z.farRatePerShop } : {}), skills: z.skills ?? [],

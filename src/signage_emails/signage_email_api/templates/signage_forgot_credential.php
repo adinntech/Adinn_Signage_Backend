@@ -12,13 +12,14 @@ para('Hi '.esc($name).',<br>Use the verification code below in the Signage app t
 
 /* One box per digit (table cells, so it holds in Outlook too). user-select:all makes one click / long-press select the whole code. */
 $cells='';
-foreach(str_split($code) as $d)$cells.='<td align="center" width="38" style="width:38px;height:46px;background:#ffffff;border:1px solid #d1d5db;font-family:Consolas,\'Courier New\',monospace;font-size:26px;color:#111827;-webkit-user-select:all;user-select:all">'.esc($d).'</td><td width="6" style="width:6px;font-size:0">&nbsp;</td>';
-echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px"><tr><td align="center" style="background:#f9fafb;border:1px solid '.MAIL_LINE.';padding:18px 10px">';
-echo '<div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:'.MAIL_MUTED.';margin-bottom:10px">Verification code</div>';
+foreach(str_split($code) as $d)$cells.='<td align="center" width="38" style="width:38px;height:46px;background:#ffffff;border:1px solid #d6e0f0;border-radius:8px;font-weight:700;font-family:Consolas,\'Courier New\',monospace;font-size:26px;color:'.MAIL_NAVY.';-webkit-user-select:all;user-select:all">'.esc($d).'</td><td width="6" style="width:6px;font-size:0">&nbsp;</td>';
+echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px"><tr><td align="center" style="background:#f8faff;border:1.5px dashed #b9c7e3;border-radius:12px;padding:20px 10px">';
+echo '<div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:'.MAIL_MUTED.';margin-bottom:10px">Verification code</div>';
 echo '<table role="presentation" align="center" cellpadding="0" cellspacing="0" style="margin:0 auto"><tr>'.$cells.'</tr></table>';
 /* No script in mail clients: the link opens copy.html, which copies the code from the #fragment (never sent to a server) and closes itself. */
 $copyUrl=rtrim((string)($config['copy_url']??''),'#').'#'.$code;
-echo '<div style="margin-top:14px"><a href="'.esc($copyUrl).'" target="_blank" rel="noopener" style="display:inline-block;background:'.MAIL_ACCENT.';color:#ffffff;font-size:13px;text-decoration:none;padding:9px 20px">Copy code</a></div>';
+echo '<div style="font-size:11.5px;color:'.MAIL_MUTED.';margin-top:12px">Click the code to select it, then copy</div>';
+echo '<div style="margin-top:10px"><a href="'.esc($copyUrl).'" target="_blank" rel="noopener" style="display:inline-block;background-color:#7c3aed;background-image:linear-gradient(90deg,#7c3aed,#f97316);color:#ffffff;font-size:13px;font-weight:700;text-decoration:none;border-radius:8px;padding:10px 24px">Copy code</a></div>';
 echo '<div style="font-size:12px;color:'.MAIL_MUTED.';margin-top:10px">Valid for '.esc((string)$mins).' minutes. Can be used once.</div>';
 echo '</td></tr></table>';
 

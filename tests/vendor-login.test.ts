@@ -105,3 +105,84 @@ describe('vendor login: create once, reset by operations', () => {
     expect(u!.resetCodeHash).toBeUndefined();
   });
 });
+
+describe('vendor card: sign in with the vendor ID digits', () => {
+  const vendorLogin = (identifier: string, mpin: string) => api().post('/api/v1/auth/login').send({ identifier, mpin, loginRole: 'VENDOR', platform: 'mobile' });
+
+  it('asks for the full vendor ID when two vendors share the last 4 digits and both still use the default MPIN', async () => {
+    const r = await vendorLogin('1001', '1001');
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe('VENDOR_ID_AMBIGUOUS');
+  });
+
+  it('signs in with the full vendor ID and returns the vendor profile as held in the master', async () => {
+    const r = await vendorLogin('21001', '1001');
+    expect(r.status).toBe(200);
+    expect(r.body.data.user.vendor).toMatchObject({ name: 'S R Glass', vendorNo: '21001', phone: '9876521001', email: 'glass2@v.example' });
+    const me = await api().get('/api/v1/auth/me').set({ Authorization: `Bearer ${r.body.data.accessToken}` });
+    expect(me.body.data.vendor.vendorNo).toBe('21001');
+  });
+
+  it('once one vendor changes the MPIN, the 4 digits + MPIN pick the right vendor', async () => {
+    const first = await vendorLogin('21001', '1001');
+    const change = await api().post('/api/v1/users/me/change-credential').set({ Authorization: `Bearer ${first.body.data.accessToken}` }).send({ currentSecret: '1001', authMethod: 'MPIN', mpin: '5528' });
+    expect([200, 204]).toContain(change.status);
+    const two = await vendorLogin('1001', '5528');
+    expect(two.status).toBe(200);
+    expect(two.body.data.user.vendor.vendorNo).toBe('21001');
+    const one = await vendorLogin('1001', '1001');
+    expect(one.status).toBe(200);
+    expect(one.body.data.user.vendor.vendorNo).toBe('11001');
+    expect((await vendorLogin('1001', '9264')).status).toBe(401);
+  });
+});
+
+describe('vendor login backfill', () => {
+  it('dry run reports without writing; apply creates only the missing logins; a second run changes nothing', async () => {
+    const { User } = await import('../src/modules/users/user.model');
+    const { Vendor } = await import('../src/modules/vendors/vendor.model');
+    await Vendor.create({ code: 'VND-31', name: 'Late Vendor', nameKey: 'late vendor', type: 'ORGANIZATION', mobile: '9876531001', zohoVendorNo: '31001', status: 'ACTIVE' });
+    const before = await User.countDocuments({ role: 'VENDOR' });
+
+    const dry = await api().post('/api/v1/vendors/logins/backfill').set(ops()).send({});
+    expect(dry.status).toBe(200);
+    expect(dry.body.data.applied).toBe(false);
+    expect(dry.body.data.summary.wouldCreate).toBe(1);
+    expect(dry.body.data.summary.noVendorId).toBe(1);
+    expect(dry.body.data.summary.sharedTail).toBe(3);
+    expect(await User.countDocuments({ role: 'VENDOR' })).toBe(before);
+
+    const run = await api().post('/api/v1/vendors/logins/backfill').set(ops()).send({ apply: true });
+    expect(run.body.data.summary.created).toBe(1);
+    expect(await User.countDocuments({ role: 'VENDOR' })).toBe(before + 1);
+
+    const again = await api().post('/api/v1/vendors/logins/backfill').set(ops()).send({ apply: true });
+    expect(again.body.data.summary.created).toBe(0);
+    expect(again.body.data.summary.wouldCreate).toBe(0);
+  });
+});
+
+describe('vendor sign-in with the vendor ID only', () => {
+  const byId = (vendorId: string) => api().post('/api/v1/auth/vendor-login').send({ vendorId });
+
+  it('signs in without an MPIN, returns the vendor profile and never asks for an MPIN change', async () => {
+    const r = await byId('31001');
+    expect(r.status).toBe(200);
+    expect(r.body.data.user.role).toBe('VENDOR');
+    expect(r.body.data.user.mustChangeMpin).toBe(false);
+    expect(r.body.data.user.vendor.name).toBe('Late Vendor');
+  });
+
+  it('asks for the full vendor ID when the last 4 digits belong to two vendors, then accepts the full ID', async () => {
+    const r = await byId('1001');
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe('VENDOR_ID_AMBIGUOUS');
+    expect((await byId('21001')).status).toBe(200);
+  });
+
+  it('rejects an unknown or malformed vendor ID', async () => {
+    expect((await byId('9999')).status).toBe(404);
+    expect((await byId('12')).status).toBe(422);
+    expect((await byId('abcd')).status).toBe(422);
+  });
+});

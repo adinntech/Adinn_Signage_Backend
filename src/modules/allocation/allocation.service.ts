@@ -153,6 +153,15 @@ export async function assign(projectId: string, body: z.infer<typeof assignBody>
   const set = body.channel === 'NONE'
     ? { $unset: { channel: 1, vendor: 1, allocatedAt: 1, allocatedBy: 1 } }
     : { $set: { channel: body.channel, allocatedAt: new Date(), allocatedBy: actor.id, ...(vendor ? { vendor: body.vendorId } : {}) }, ...(body.channel === 'IN_HOUSE' ? { $unset: { vendor: 1 } } : {}) };
+  // A shop that changes hands starts afresh: the login it was given to before (recce person or the old vendor's login) must not
+  // keep it, or the new team's login (which sees shops given to it or to no one yet) never shows it.
+  const changesHands: Record<string, unknown> =
+    body.channel === 'NONE'
+      ? {}
+      : body.channel === 'VENDOR'
+        ? { $or: [{ channel: { $ne: 'VENDOR' } }, { vendor: { $ne: new Types.ObjectId(body.vendorId as string) } }] }
+        : { channel: { $ne: 'IN_HOUSE' } };
+  await Site.updateMany({ ...filter, ...changesHands }, { $unset: { assignedTo: 1, assignedToAt: 1, assignedToBy: 1 }, $set: { status: 'PENDING' } });
   const r = await Site.updateMany(filter, set);
   if (body.channel === 'VENDOR') await notifyNewShops(projectId, { kind: 'VENDOR', vendorId: body.vendorId as string }, fresh, actor);
   else if (body.channel === 'IN_HOUSE') await notifyNewShops(projectId, { kind: 'IN_HOUSE' }, fresh, actor);

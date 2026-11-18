@@ -16,7 +16,7 @@ import { addVendorSkill, changeRateApprovalStatus, listVendorSkills, priceHistor
 import { companyRates } from './vendorRateApproval.service';
 import { createUser, listVendorLogins } from '../users/user.service';
 import { createUserSchema } from '../users/user.validators';
-import { ensureVendorLogin, resetVendorLoginMpin } from '../users/vendorLogin.service';
+import { backfillVendorLogins, ensureVendorLogin, resetVendorLoginMpin } from '../users/vendorLogin.service';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -79,6 +79,8 @@ vendorRouter.post('/:id/kyc-files', ...write, receive, asyncHandler(async (req, 
   const files = ((req.files as Express.Multer.File[] | undefined) ?? []).map((f) => ({ originalname: f.originalname, mimetype: f.mimetype, size: f.size, buffer: f.buffer }));
   ok(res, await svc.addKycFiles(objectId.parse(req.params.id), svc.kycFileBody.parse(req.body).docType, files, actorOf(req)), undefined, 201);
 }));
+// Checks every active vendor and creates the missing default mobile logins. { apply: false } (default) only reports.
+vendorRouter.post('/logins/backfill', ...write, asyncHandler(async (req, res) => ok(res, await backfillVendorLogins(req.body?.apply === true, actorOf(req)))));
 vendorRouter.get('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await registrationMailDraft(objectId.parse(req.params.id)))));
 vendorRouter.post('/:id/registration-mail', ...write, asyncHandler(async (req, res) => ok(res, await sendRegistrationMail(objectId.parse(req.params.id), registrationMailBody.parse(req.body), actorOf(req)), undefined, 201)));
 vendorRouter.put('/:id/registration-mail/draft', ...write, asyncHandler(async (req, res) => ok(res, await saveRegistrationDraft(objectId.parse(req.params.id), registrationDraftBody.parse(req.body), actorOf(req)))));

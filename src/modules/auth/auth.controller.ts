@@ -3,7 +3,7 @@ import { env } from '../../config/env';
 import { asyncHandler, ok } from '../../common/http';
 import { AppError } from '../../common/errors';
 import * as service from './auth.service';
-import { forgotConfirmSchema, forgotRequestSchema, loginSchema, logoutSchema, refreshSchema, registerSchema } from './auth.validators';
+import { vendorIdLoginSchema, forgotConfirmSchema, forgotRequestSchema, loginSchema, logoutSchema, refreshSchema, registerSchema } from './auth.validators';
 
 const COOKIE = 'refresh_token';
 const baseCookie = {
@@ -25,6 +25,13 @@ const tokenFrom = (req: Request, body?: string) => body ?? (req.cookies?.[COOKIE
 export const login = asyncHandler(async (req: Request, res: Response) => {
   const body = loginSchema.parse(req.body);
   const session = await service.login(body, meta(req, body.device));
+  res.cookie(COOKIE, session.refreshToken, cookieOpts(session.remember));
+  ok(res, session);
+});
+
+export const vendorLogin = asyncHandler(async (req: Request, res: Response) => {
+  const body = vendorIdLoginSchema.parse(req.body);
+  const session = await service.vendorIdLogin(body, meta(req, body.device));
   res.cookie(COOKIE, session.refreshToken, cookieOpts(session.remember));
   ok(res, session);
 });

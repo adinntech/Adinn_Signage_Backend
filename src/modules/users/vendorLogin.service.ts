@@ -112,3 +112,53 @@ export async function resetVendorLoginMpin(vendorId: string, userId: string, act
   await recordAudit({ actor, action: 'RESET_CREDENTIAL', entity: 'User', entityId: user._id, reason: 'Vendor MPIN reset to the default by Recce Operations' });
   return { user: toPublicUser(user as unknown as UserDoc), defaultMpinHint: 'Last 4 digits of the vendor ID' };
 }
+
+export interface BackfillRow {
+  vendorId: string;
+  code: string;
+  name: string;
+  vendorNo: string | null;
+  status: 'HAS_LOGIN' | 'NO_VENDOR_ID' | 'WOULD_CREATE' | 'CREATED' | 'FAILED';
+  username?: string | undefined;
+  /** Another vendor ends with the same 4 digits: both start on the same default MPIN, so they sign in with the full vendor ID until one changes it. */
+  sharedTail?: boolean | undefined;
+}
+
+/**
+ * Checks every ACTIVE vendor and, when `apply` is true, creates the default login for each one that has a vendor ID but no login.
+ * Without `apply` nothing is written: the report shows what would happen. Safe to run again: vendors with a login are skipped.
+ */
+export async function backfillVendorLogins(apply: boolean, actor: Actor) {
+  const vendors = await Vendor.find({ status: 'ACTIVE', ...ALIVE }).select('code name zohoVendorNo').sort({ code: 1 }).lean();
+  const have = new Set((await User.find({ role: 'VENDOR', vendorId: { $in: vendors.map((v) => v._id) }, ...ALIVE }).select('vendorId').lean()).map((u) => String(u.vendorId)));
+  const tailCount = new Map<string, number>();
+  for (const v of vendors) {
+    const t = vendorIdTail(v.zohoVendorNo);
+    if (t) tailCount.set(t, (tailCount.get(t) ?? 0) + 1);
+  }
+  const rows: BackfillRow[] = [];
+  for (const v of vendors) {
+    const tail = vendorIdTail(v.zohoVendorNo);
+    const base: BackfillRow = { vendorId: String(v._id), code: v.code, name: v.name, vendorNo: v.zohoVendorNo ?? null, status: 'HAS_LOGIN', ...(tail && (tailCount.get(tail) ?? 0) > 1 ? { sharedTail: true } : {}) };
+    if (have.has(base.vendorId)) {
+      rows.push(base);
+    } else if (!tail) {
+      rows.push({ ...base, status: 'NO_VENDOR_ID' });
+    } else if (!apply) {
+      rows.push({ ...base, status: 'WOULD_CREATE', username: vendorUsernameBase(v.name, tail).toUpperCase() });
+    } else {
+      try {
+        const r = await ensureVendorLogin(v._id, actor);
+        rows.push({ ...base, status: r.created ? 'CREATED' : 'HAS_LOGIN', username: r.username });
+      } catch {
+        rows.push({ ...base, status: 'FAILED' });
+      }
+    }
+  }
+  const count = (s: BackfillRow['status']) => rows.filter((r) => r.status === s).length;
+  return {
+    applied: apply,
+    summary: { vendors: rows.length, hasLogin: count('HAS_LOGIN'), noVendorId: count('NO_VENDOR_ID'), wouldCreate: count('WOULD_CREATE'), created: count('CREATED'), failed: count('FAILED'), sharedTail: rows.filter((r) => r.sharedTail).length },
+    rows,
+  };
+}

@@ -1,9 +1,9 @@
 <?php
 /* Shared building blocks for the signage mails. Table-based, inline CSS (safe in Gmail / Outlook / Apple Mail).
    Design: full-width banner image, title + one-line subtitle, four summary tiles, rounded cards with a coloured title bar
-   and fields laid out side by side (3 per line, each with a small icon), file chips, a light info bar, logo sign-off.
+   and fields laid out side by side (3 per line, bold label above a lighter value; no icons), file chips, a light info bar, logo sign-off.
    Fonts are light (400/500; only the title and card headings are 600). Banner and icons are PNGs on the web server
-   (config asset_url -> templates/Images/ and icons/); icon fonts do not work in Gmail/Outlook, so icons are images. */
+   (config asset_url -> templates/Images/ and icons/); no icons are used. */
 
 function esc($v):string{return htmlspecialchars(is_scalar($v)?(string)$v:'',ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
 
@@ -39,15 +39,15 @@ function fileBadge(string $name):array{
 function pageStart(string $title,string $subtitle,array $config,string $icon=''):void{
  $f=MAIL_FONT;$GLOBALS['signage_asset']=$config['asset_url']??'';
  $banner=rtrim($config['asset_url']??'','/').'/Signage_Email_Header.png';
- echo '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600&display=swap" rel="stylesheet"><title>'.esc($title).'</title></head>';
+ echo '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet"><title>'.esc($title).'</title></head>';
  echo '<body style="margin:0;padding:0;background:#eef2f8;font-family:'.$f.';color:'.MAIL_INK.'">';
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f8"><tr><td align="center" style="padding:20px 8px">';
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:700px;background:#ffffff;border:1px solid #dfe7f3;border-radius:10px;overflow:hidden">';
  echo '<tr><td style="padding:0;line-height:0;font-size:0"><img src="'.esc($banner).'" alt="Adinn Signage Solutions" width="700" style="display:block;width:100%;max-width:700px;height:auto;border:0"></td></tr>';
- echo '<tr><td style="background:'.MAIL_NAVY.';padding:11px 24px;font-family:'.$f.'"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="font-size:12px;font-weight:600;letter-spacing:.6px;color:#ffffff">&#9881;&nbsp; SYSTEM GENERATED EMAIL</td><td align="right" style="font-size:11.5px;font-weight:400;color:#d6e0f5">ADINN CRM &nbsp;|&nbsp; Operations Workflow</td></tr></table></td></tr>';
- echo '<tr><td style="padding:22px 24px 6px;font-family:'.$f.'"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px"><tr><td width="54" valign="middle"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td align="center" valign="middle" style="width:48px;height:48px;background:#fdecee;border:1px solid #f8cdd3;border-radius:11px">'.ic($icon!==''?$icon:'note',24).'</td></tr></table></td>';
- echo '<td valign="middle" style="padding-left:14px;border-left:2px solid '.MAIL_ACCENT.'"><div style="font-size:21px;line-height:1.3;font-weight:600;letter-spacing:-.2px;color:'.MAIL_NAVY.';padding-left:12px">'.esc($title).'</div>';
- if($subtitle!=='')echo '<div style="font-size:13px;font-weight:400;line-height:1.6;color:'.MAIL_MUTED.';padding:3px 0 0 12px">'.esc($subtitle).'</div>';
+ echo '<tr><td style="background:'.MAIL_NAVY.';padding:11px 24px;font-family:'.$f.'"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td style="font-size:12px;font-weight:600;letter-spacing:.6px;color:#ffffff">SYSTEM GENERATED EMAIL</td><td align="right" style="font-size:11.5px;font-weight:400;color:#d6e0f5">ADINN CRM &nbsp;|&nbsp; Operations Workflow</td></tr></table></td></tr>';
+ echo '<tr><td style="padding:22px 24px 6px;font-family:'.$f.'"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px"><tr>';
+ echo '<td valign="middle" style="border-left:3px solid '.MAIL_ACCENT.'"><div style="font-size:21px;line-height:1.3;font-weight:700;letter-spacing:-.2px;color:'.MAIL_NAVY.';padding-left:14px">'.esc($title).'</div>';
+ if($subtitle!=='')echo '<div style="font-size:13px;font-weight:400;line-height:1.6;color:'.MAIL_MUTED.';padding:3px 0 0 14px">'.esc($subtitle).'</div>';
  echo '</td></tr></table>';
 }
 
@@ -55,8 +55,8 @@ function pageStart(string $title,string $subtitle,array $config,string $icon='')
 function chips(array $data,string $typeLabel):void{
  $cells=[['id','Request ID',$data['requestId']??''],['date','Request Date',mailDate($data['requestDate']??'')],['type','Request Type',$typeLabel],['source','Requested By',$data['source']??'Operations Team']];
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="6" style="margin:0 -6px 10px;width:calc(100% + 12px)"><tr>';
- foreach($cells as [$ic,$label,$val]){
-  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="width:30px">'.ic($ic,28,'chip-').'</td><td valign="middle" style="padding-left:8px"><div style="font-size:10px;font-weight:400;color:'.MAIL_MUTED.'">'.esc($label).'</div><div style="font-size:12px;font-weight:500;color:'.MAIL_NAVY.';word-break:break-word">'.esc($val).'</div></td></tr></table></td>';
+ foreach($cells as [,$label,$val]){
+  echo '<td width="25%" valign="top" style="background:#f4f8fd;border:1px solid #e1e9f5;border-radius:8px;padding:10px"><div style="font-size:11px;font-weight:700;color:'.MAIL_NAVY.'">'.esc($label).'</div><div style="font-size:11.5px;font-weight:400;color:'.MAIL_INK.';margin-top:2px;word-break:break-word">'.esc($val).'</div></td>';
  }
  echo '</tr></table>';
 }
@@ -73,7 +73,7 @@ function rowIcon(string $label):string{
  return 'desc';
 }
 function rowCell(array $it,int $span,int $pct,bool $divider):string{
- return '<td colspan="'.$span.'" width="'.$pct.'%" valign="top" style="padding:10px;border-bottom:1px solid #edf1f7;'.($divider?'border-left:1px solid #edf1f7;':'').'"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="top" style="width:24px;padding-top:2px">'.ic($it[0],16).'</td><td valign="top" style="padding-left:4px"><div style="font-size:11px;font-weight:400;color:'.MAIL_MUTED.'">'.esc($it[1]).'</div><div style="font-size:12.5px;font-weight:500;color:'.MAIL_NAVY.';line-height:1.5;word-break:break-word">'.nl2br(esc($it[2])).'</div></td></tr></table></td>';
+ return '<td colspan="'.$span.'" width="'.$pct.'%" valign="top" style="padding:10px;border-bottom:1px solid #edf1f7;'.($divider?'border-left:1px solid #edf1f7;':'').'"><div style="font-size:12px;font-weight:700;color:'.MAIL_NAVY.'">'.esc($it[1]).'</div><div style="font-size:11.5px;font-weight:400;color:'.MAIL_INK.';line-height:1.5;margin-top:2px;word-break:break-word">'.nl2br(esc($it[2])).'</div></td>';
 }
 /* [icon, label, value] rows laid out side by side, 3 per line, each with an icon. Long values (address, scope, notes)
    take a full line. An empty icon slot picks the icon from the label; empty values are skipped. */
@@ -108,7 +108,7 @@ function card(string $title,string $bodyHtml,string $headBg='',string $accent=''
  if($headBg==='')[$headBg,$a,$b]=$themes[$n++%count($themes)];
  else[,$a,$b]=$themes[$by[$headBg]??0];
  $accent=$accent!==''?$accent:$a;$border=$border!==''?$border:$b;
- return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid '.$border.';border-radius:9px;overflow:hidden;margin:0 0 14px"><tr><td style="padding:11px 14px;background:'.$headBg.'"><table role="presentation" cellpadding="0" cellspacing="0"><tr>'.($icon!==null?'<td width="26" valign="middle">'.ic($icon,18).'</td>':'').'<td valign="middle" style="color:'.$accent.';font-size:13px;font-weight:600;letter-spacing:.2px">'.esc($title).'</td></tr></table></td></tr><tr><td style="padding:2px 6px 6px;background:#ffffff">'.$bodyHtml.'</td></tr></table>';
+ return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid '.$border.';border-radius:9px;overflow:hidden;margin:0 0 14px"><tr><td style="padding:11px 14px;background:'.$headBg.'"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td valign="middle" style="color:'.$accent.';font-size:13px;font-weight:700;letter-spacing:.2px">'.esc($title).'</td></tr></table></td></tr><tr><td style="padding:2px 6px 6px;background:#ffffff">'.$bodyHtml.'</td></tr></table>';
 }
 
 /* Attached files as small chips: coloured type badge, name, size (and the label the CRM gave it). */
@@ -128,17 +128,17 @@ function attachmentsCard(array $data,string $title,string $headBg='',string $acc
 /* The reply instruction: light blue info bar. $title (optional) is a short semi-bold line above the text;
    $button is a small visual cue of the reply asked for (not a link). */
 function actionBox(string $text,string $button='',string $title='Action Required'):void{
- $head=$title!==''?'<div style="font-size:13px;font-weight:600;color:#1d4f91;margin:0 0 2px">'.esc($title).'</div>':'';
- $btn=$button!==''?'<td align="right" valign="middle" style="padding:0 14px 0 0"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="background:'.MAIL_NAVY.';color:#ffffff;font-size:12px;font-weight:500;border-radius:6px;padding:9px 14px;white-space:nowrap">&#8617;&nbsp; '.esc($button).'</td></tr></table></td>':'';
- echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px;background:#eaf3ff;border:1px solid #cfe2fb;border-radius:8px"><tr><td width="28" valign="top" style="padding:13px 0 13px 14px">'.ic('info',16).'</td><td valign="middle" style="padding:11px 14px 11px 8px;font-size:12px;font-weight:400;line-height:1.6;color:#1d4f91">'.$head.esc($text).'</td>'.$btn.'</tr></table>';
+ $head=$title!==''?'<div style="font-size:13px;font-weight:700;color:#1d4f91;margin:0 0 2px">'.esc($title).'</div>':'';
+ $btn=$button!==''?'<td align="right" valign="middle" style="padding:0 14px 0 0"><table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="background:'.MAIL_NAVY.';color:#ffffff;font-size:12px;font-weight:500;border-radius:6px;padding:9px 14px;white-space:nowrap">'.esc($button).'</td></tr></table></td>':'';
+ echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px;background:#eaf3ff;border:1px solid #cfe2fb;border-radius:8px"><tr><td valign="middle" style="padding:11px 14px;font-size:12px;font-weight:400;line-height:1.6;color:#1d4f91">'.$head.esc($text).'</td>'.$btn.'</tr></table>';
 }
 function noteBar(string $text):void{actionBox($text,'','Please note');}
 
 /* Two reply choices for the approval mail. */
 function replyChoices(string $text='Please reply to this email with exactly one of the following:'):void{
  echo '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 10px;background:#fdf5f6;border:1px solid #f8cdd3;border-radius:9px"><tr><td style="padding:14px 16px"><div style="font-size:12.5px;font-weight:500;color:'.MAIL_NAVY.';margin:0 0 10px">'.esc($text).'</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-  .'<td width="49%" align="center" style="background:#e6f7ee;border:1px solid #b6e5c9;border-radius:8px;padding:11px;font-size:14px;font-weight:600;color:#15803d">&#10004;&nbsp; APPROVED</td><td width="2%">&nbsp;</td>'
-  .'<td width="49%" align="center" style="background:#fdeaec;border:1px solid #f5b8c0;border-radius:8px;padding:11px;font-size:14px;font-weight:600;color:#be123c">&#10006;&nbsp; NOT APPROVED</td>'
+  .'<td width="49%" align="center" style="background:#e6f7ee;border:1px solid #b6e5c9;border-radius:8px;padding:11px;font-size:14px;font-weight:600;color:#15803d">APPROVED</td><td width="2%">&nbsp;</td>'
+  .'<td width="49%" align="center" style="background:#fdeaec;border:1px solid #f5b8c0;border-radius:8px;padding:11px;font-size:14px;font-weight:600;color:#be123c">NOT APPROVED</td>'
   .'</tr></table></td></tr></table>';
 }
 
@@ -159,9 +159,9 @@ function detailsCards(array $data):void{
   if($rows){$list=[];foreach($rows as $r){if(is_array($r))$list[]=['',(string)($r['label']??''),(string)($r['value']??'')];}$body.=rowsHtml($list);}
   if($t&&is_array($t['columns']??null)&&is_array($t['rows']??null)){
    $body.='<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse"><tr>';
-   foreach($t['columns'] as $c)$body.='<td style="padding:8px 10px;background:#f3f6fb;border-bottom:1px solid #dfe6f1;font-size:10.5px;font-weight:500;color:#4a5b74;text-transform:uppercase;letter-spacing:.3px">'.esc($c).'</td>';
+   foreach($t['columns'] as $c)$body.='<td style="padding:8px 10px;background:#f3f6fb;border-bottom:1px solid #dfe6f1;font-size:10.5px;font-weight:700;color:#4a5b74;text-transform:uppercase;letter-spacing:.3px">'.esc($c).'</td>';
    $body.='</tr>';
-   foreach($t['rows'] as $r){if(!is_array($r))continue;$body.='<tr>';foreach($r as $cell)$body.='<td valign="top" style="padding:8px 10px;border-bottom:1px solid #edf1f7;font-size:12.5px;font-weight:500;color:'.MAIL_NAVY.';word-break:break-word">'.esc($cell).'</td>';$body.='</tr>';}
+   foreach($t['rows'] as $r){if(!is_array($r))continue;$body.='<tr>';foreach($r as $cell)$body.='<td valign="top" style="padding:8px 10px;border-bottom:1px solid #edf1f7;font-size:11.5px;font-weight:400;color:'.MAIL_INK.';word-break:break-word">'.esc($cell).'</td>';$body.='</tr>';}
    $body.='</table>';
   }
   if($body===''||$title==='')continue;

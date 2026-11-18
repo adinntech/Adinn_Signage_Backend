@@ -26,7 +26,9 @@ const vendorSchema = new Schema(
     typeName: String,
     contactPerson: String,
     designation: String,
-    mobile: { type: String, required: true },
+    // Required when a person registers a vendor (see vendorBody). A vendor taken from Zoho without a valid number is kept with an empty one:
+    // vendors sign in with their vendor ID, so the phone is not needed to give them shops.
+    mobile: { type: String, default: '' },
     mobileAlt: String,
     email: { type: String, lowercase: true, trim: true },
     gstin: String,
