@@ -36,7 +36,7 @@ afterAll(async () => {
 
 describe('Client Servicing (handed-over orders only)', () => {
   it('reads sales orders and clients, creates projects with the BD wizard (plus Adinn Connect), and lands on its own page', () => {
-    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read', 'clients:write', 'projects:read', 'projects:write', 'connect:use']);
+    expect(ROLE_PERMISSIONS.CLIENT_SERVICING).toEqual(['sales:read', 'clients:read', 'ratecards:create', 'clients:write', 'projects:read', 'projects:write', 'connect:use', 'recce:review-cs']);
     expect(ROLE_HOME.CLIENT_SERVICING).toBe('/client-servicing/dashboard');
   });
 

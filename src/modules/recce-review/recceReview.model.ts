@@ -1,0 +1,234 @@
+import { Schema, model, type InferSchemaType } from 'mongoose';
+import { storedFileSchema } from '../files/storedFile.schema';
+
+/**
+ * Shop-wise recce evidence and its two-stage review.
+ *
+ *   RecceSubmission  one per shop (Site): the working record of the person who visits it. Holds the media items,
+ *                    notes, the current status and the number of the latest submitted version.
+ *   ReccePhoto       one photo. Original file is never changed; an annotated copy is a separate file.
+ *   RecceVersion     IMMUTABLE snapshot made at every submit (which photos, which measurements). Never edited.
+ *   RecceReview      one decision per (version, stage). A reviewer can decide only his own stage, only once.
+ *   RecceRework      what a reviewer asked to fix, item by item, with resolved / open state.
+ * Every event is also written to the existing AuditLog (entity "RecceSubmission") and read back as the timeline.
+ */
+
+export const REVIEW_STAGES = ['OPS', 'CS'] as const;
+export type ReviewStage = (typeof REVIEW_STAGES)[number];
+export const STAGE_LABEL: Record<ReviewStage, string> = { OPS: 'Recce Operations', CS: 'Client Servicing' };
+
+export const RECCE_STATUSES = ['IN_PROGRESS', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REWORK_REQUIRED', 'REJECTED'] as const;
+export type RecceStatus = (typeof RECCE_STATUSES)[number];
+
+export const PHOTO_CATEGORIES = [
+  'SHOP_FRONT', 'NAME_BOARD', 'LEFT_SIDE', 'RIGHT_SIDE', 'MEASUREMENT', 'MOUNTING_AREA', 'ELECTRICAL', 'EXISTING_BOARD', 'OBSTRUCTION', 'ADDITIONAL',
+] as const;
+export type PhotoCategory = (typeof PHOTO_CATEGORIES)[number];
+export const CATEGORY_LABEL: Record<PhotoCategory, string> = {
+  SHOP_FRONT: 'Full Shop Front View', NAME_BOARD: 'Shop Name Board', LEFT_SIDE: 'Left Side View', RIGHT_SIDE: 'Right Side View',
+  MEASUREMENT: 'Measurement View', MOUNTING_AREA: 'Mounting Area', ELECTRICAL: 'Electrical Connection', EXISTING_BOARD: 'Existing Board',
+  OBSTRUCTION: 'Obstruction / Site Issue', ADDITIONAL: 'Additional Photo',
+};
+
+/** DRAFT: only the uploader sees it. SUBMITTED: part of a version. SUPERSEDED: replaced by a newer photo. REMOVED: soft-deleted with a reason. */
+export const PHOTO_STATES = ['DRAFT', 'SUBMITTED', 'SUPERSEDED', 'REMOVED'] as const;
+export type PhotoState = (typeof PHOTO_STATES)[number];
+
+export const DECISIONS = ['PENDING', 'APPROVED', 'REJECTED', 'REWORK', 'VOID'] as const;
+export type Decision = (typeof DECISIONS)[number];
+
+const mediaItemSchema = new Schema(
+  {
+    key: { type: String, required: true },
+    name: { type: String, required: true, maxlength: 80 },
+    quantity: { type: Number, default: 1, min: 1, max: 999 },
+    width: { type: Number, min: 0, max: 100000 },
+    height: { type: Number, min: 0, max: 100000 },
+    unit: { type: String, enum: ['FT', 'IN', 'M', 'CM', 'MM'], default: 'FT' },
+    notes: { type: String, maxlength: 500 },
+  },
+  { _id: false },
+);
+
+const flagSchema = new Schema({ code: String, message: String }, { _id: false });
+
+const submissionSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true, unique: true },
+    /** The mobile login doing this shop. A shop given to another person later is a recorded reassignment. */
+    assignee: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    channel: { type: String, enum: ['VENDOR', 'IN_HOUSE'] },
+    vendor: { type: Schema.Types.ObjectId, ref: 'Vendor', index: true },
+    status: { type: String, enum: RECCE_STATUSES, default: 'IN_PROGRESS', index: true },
+    /** Number of the latest submitted version (0 = never submitted). */
+    currentVersion: { type: Number, default: 0 },
+    mediaItems: { type: [mediaItemSchema], default: [] },
+    notes: { type: String, default: '', maxlength: 2000 },
+    startedAt: Date,
+    submittedAt: Date,
+    /** Optional named reviewers per stage (set by Operations / Admin). */
+    reviewers: { OPS: { type: Schema.Types.ObjectId, ref: 'User' }, CS: { type: Schema.Types.ObjectId, ref: 'User' } },
+    priority: { type: String, enum: ['LOW', 'NORMAL', 'HIGH'], default: 'NORMAL' },
+    attempts: { type: Number, default: 0 },
+    finalApprovedAt: Date,
+    /** The review stage waiting for a decision right now (null when nobody has to act), and when the review is due. */
+    pendingStage: { type: String, enum: [...REVIEW_STAGES, null], default: null, index: true },
+    dueAt: { type: Date, index: true },
+    /** Bumped on every state change: the compare-and-set guard that makes the workflow transitions atomic. */
+    rev: { type: Number, default: 0 },
+  },
+  { timestamps: true },
+);
+submissionSchema.index({ project: 1, status: 1 });
+export const RecceSubmission = model('RecceSubmission', submissionSchema);
+export type SubmissionDoc = InferSchemaType<typeof submissionSchema>;
+
+const photoSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true },
+    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
+    mediaKey: { type: String, default: '' },
+    category: { type: String, enum: PHOTO_CATEGORIES, required: true },
+    caption: { type: String, default: '', maxlength: 300 },
+    order: { type: Number, default: 0 },
+    state: { type: String, enum: PHOTO_STATES, default: 'DRAFT' },
+    /** The original file as captured. Never replaced. */
+    original: { type: storedFileSchema, required: true },
+    /** A marked-up copy (annotations burnt in by the phone / web). The original stays untouched. */
+    edited: { type: storedFileSchema },
+    annotations: { type: Schema.Types.Mixed },
+    /** What the device reported. Never trusted on its own: see flags. */
+    capturedAt: Date,
+    lat: Number,
+    lng: Number,
+    gpsAccuracy: Number,
+    width: Number,
+    height: Number,
+    flags: { type: [flagSchema], default: [] },
+    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    /** Phone-made id: the same photo sent twice (retry, resumed upload) is stored once. */
+    clientId: { type: String, maxlength: 80 },
+    /** Which version first contained it. */
+    version: Number,
+    replaces: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
+    supersededBy: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
+    removedAt: Date,
+    removedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    removeReason: String,
+  },
+  { timestamps: true },
+);
+photoSchema.index({ submission: 1, state: 1, order: 1 });
+photoSchema.index({ submission: 1, clientId: 1 }, { unique: true, partialFilterExpression: { clientId: { $type: 'string' } } });
+export const ReccePhoto = model('ReccePhoto', photoSchema);
+
+const versionSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true },
+    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true },
+    version: { type: Number, required: true },
+    submittedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    submittedAt: { type: Date, default: Date.now },
+    /** The exact photos of this version. Later removals do not change this list; they are read from the photo state. */
+    photos: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
+    added: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
+    removed: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
+    mediaItems: { type: [mediaItemSchema], default: [] },
+    notes: { type: String, default: '' },
+    /** The stages that must approve this version (from the configuration at the time of submit). */
+    stages: [{ type: String, enum: REVIEW_STAGES }],
+    sequential: { type: Boolean, default: true },
+    dueAt: Date,
+    idempotencyKey: { type: String, maxlength: 80 },
+  },
+  { timestamps: true },
+);
+versionSchema.index({ submission: 1, version: 1 }, { unique: true });
+versionSchema.index({ submission: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
+export const RecceVersion = model('RecceVersion', versionSchema);
+
+const reviewSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
+    version: { type: Schema.Types.ObjectId, ref: 'RecceVersion', required: true },
+    versionNo: { type: Number, required: true },
+    stage: { type: String, enum: REVIEW_STAGES, required: true },
+    decision: { type: String, enum: DECISIONS, default: 'PENDING' },
+    reviewer: { type: Schema.Types.ObjectId, ref: 'User' },
+    reviewerRole: String,
+    decidedAt: Date,
+    comment: { type: String, default: '', maxlength: 2000 },
+    checklist: [{ _id: false, key: String, label: String, passed: Boolean }],
+    /** An Admin decided for this stage: who and why are kept. */
+    override: { type: new Schema({ by: { type: Schema.Types.ObjectId, ref: 'User' }, reason: String }, { _id: false }) },
+  },
+  { timestamps: true },
+);
+reviewSchema.index({ version: 1, stage: 1 }, { unique: true });
+export const RecceReview = model('RecceReview', reviewSchema);
+
+const reworkSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
+    version: { type: Schema.Types.ObjectId, ref: 'RecceVersion', required: true },
+    versionNo: Number,
+    stage: { type: String, enum: REVIEW_STAGES, required: true },
+    kind: { type: String, enum: ['REWORK', 'ADDITIONAL'], required: true },
+    instructions: { type: String, required: true, maxlength: 2000 },
+    items: [
+      {
+        _id: { type: Schema.Types.ObjectId, auto: true },
+        type: { type: String, enum: ['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER'], required: true },
+        category: { type: String, enum: PHOTO_CATEGORIES },
+        mediaKey: String,
+        photo: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
+        note: { type: String, maxlength: 500 },
+        resolved: { type: Boolean, default: false },
+        resolvedInVersion: Number,
+      },
+    ],
+    status: { type: String, enum: ['OPEN', 'RESOLVED', 'CLOSED'], default: 'OPEN' },
+    requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    resolvedAt: Date,
+  },
+  { timestamps: true },
+);
+reworkSchema.index({ submission: 1, status: 1 });
+export const RecceRework = model('RecceRework', reworkSchema);
+
+/** Single configuration document: review order, checklist, required photos per media type, SLA. Edited by Admin. */
+const configSchema = new Schema(
+  {
+    key: { type: String, unique: true, default: 'default' },
+    stages: { type: [{ type: String, enum: REVIEW_STAGES }], default: ['OPS', 'CS'] },
+    sequential: { type: Boolean, default: true },
+    allowRetryAfterReject: { type: Boolean, default: false },
+    slaHours: { type: Number, default: 24 },
+    maxPhotos: { type: Number, default: 40 },
+    requireGps: { type: Boolean, default: false },
+    checklist: {
+      type: [{ _id: false, key: String, label: String, stage: { type: String, enum: [...REVIEW_STAGES, 'ALL'], default: 'ALL' }, gps: Boolean }],
+      default: [
+        { key: 'correct_shop', label: 'Correct shop', stage: 'ALL' },
+        { key: 'shop_front', label: 'Shop front visible', stage: 'ALL' },
+        { key: 'board_area', label: 'Board area visible', stage: 'ALL' },
+        { key: 'angles', label: 'Required angles captured', stage: 'OPS' },
+        { key: 'measurements', label: 'Measurements available', stage: 'OPS' },
+        { key: 'media_type', label: 'Media type correct', stage: 'ALL' },
+        { key: 'quantity', label: 'Required quantity verified', stage: 'ALL' },
+        { key: 'quality', label: 'Photo quality acceptable', stage: 'OPS' },
+        { key: 'gps', label: 'GPS evidence available', stage: 'OPS', gps: true },
+        { key: 'client_req', label: 'Client requirement matched', stage: 'CS' },
+      ],
+    },
+    /** Required photo categories. `default` applies to every media type; a key matching a media name (lower case, contains) overrides it. */
+    requiredPhotos: { type: Schema.Types.Mixed, default: { default: ['SHOP_FRONT', 'NAME_BOARD'], measurement: ['SHOP_FRONT', 'NAME_BOARD', 'MEASUREMENT'] } },
+  },
+  { timestamps: true },
+);
+export const RecceConfig = model('RecceConfig', configSchema);

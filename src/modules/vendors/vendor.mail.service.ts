@@ -56,7 +56,7 @@ function defaultContent(v: Awaited<ReturnType<typeof getVendor>>) {
     `</ul>` +
     `<p>The KYC documents are attached. Thank you.</p>` +
     `<p>Regards,<br>Operations Team</p>`;
-  return { subject: `Vendor Registration Request - ${v.name}`, body };
+  return { subject: `Action Required - Vendor Registration Request - ${v.name}`, body };
 }
 
 /** The vendor's data for the PHP mail template (data only: the template decides the wording and layout). */

@@ -90,17 +90,17 @@ function defaultDrafts(o: Doc, client: { name?: string | null; clientNo?: string
     const note = (what: string, example: string) => `<p>Kindly create the ${what} and reply to this mail with it, for example <strong>${example}</strong>.</p>`;
     const s = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
     return {
-      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
-      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code', 'Client Code: ABC123') },
-      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code', 'Project Code: 12345678') },
+      COMBINED: { subject: s('Action Required - Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
+      CLIENT_CODE: { subject: s('Action Required - Client Code Request'), body: note('client code', 'Client Code: ABC123') },
+      PROJECT_CODE: { subject: s('Action Required - Project Code Request'), body: note('project code', 'Project Code: 12345678') },
     };
   }
   const subj = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
   const wrap = (blocks: string) => `<p>Dear Team,</p>${blocks}${sig}`;
   return {
-    COMBINED: { subject: subj('Client Code & Project Code Request'), body: wrap(clientBlock + projectBlock) },
-    CLIENT_CODE: { subject: subj('Client Code Request'), body: wrap(clientBlock) },
-    PROJECT_CODE: { subject: subj('Project Code Request'), body: wrap(projectBlock) },
+    COMBINED: { subject: subj('Action Required - Client Code & Project Code Request'), body: wrap(clientBlock + projectBlock) },
+    CLIENT_CODE: { subject: subj('Action Required - Client Code Request'), body: wrap(clientBlock) },
+    PROJECT_CODE: { subject: subj('Action Required - Project Code Request'), body: wrap(projectBlock) },
   };
 }
 

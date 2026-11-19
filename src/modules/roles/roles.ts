@@ -51,6 +51,8 @@ export const PERMISSIONS = [
   'recce-cost:review',
   // Admin panel: who each kind of request email goes to (To / CC / BCC / reply mailbox). SUPER_ADMIN only.
   'mail:manage',
+  // Review recce photo submissions as Client Servicing (client requirement stage). Recce Operations uses verification:manage.
+  'recce:review-cs',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -59,7 +61,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   // Client Servicing: the orders BD hands over to them (scoped to their own orders in the sales module) and the clients.
   // Add more permissions here as its modules are built.
   // projects:* and clients:write let Client Servicing use the same Create & Assign Project wizard BD has (new client, project, assignment).
-  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:create', 'clients:write', 'projects:read', 'projects:write', 'connect:use'],
+  CLIENT_SERVICING: ['sales:read', 'clients:read', 'ratecards:create', 'clients:write', 'projects:read', 'projects:write', 'connect:use', 'recce:review-cs'],
   BD: ['dashboard:view', 'projects:read', 'projects:write', 'clients:read', 'clients:write', 'communications:read', 'communications:write', 'sites:read', 'sites:write', 'reports:read', 'sales:read', 'sales:write', 'templates:manage', 'ratecards:manage', 'approvals:client', 'connect:use'],
   RECCE_COORDINATOR: [
     'dashboard:view', 'projects:read', 'clients:read', 'communications:read', 'communications:write', 'sites:read', 'sites:write',

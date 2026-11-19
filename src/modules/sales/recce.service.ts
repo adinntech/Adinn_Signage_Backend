@@ -363,7 +363,7 @@ export async function getRecce(id: string, actor: Actor) {
       /** The details the mail template prints on its own (client, project, contacts); the editor text only goes out when it was changed. */
       facts,
       // New client: its CRM Client ID is only a local reference, so the client code is requested with the project code.
-      subject: existing ? `Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
+      subject: existing ? `Action Required - Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})` : `Action Required - Client Code & Project Code Request - ${client?.name ?? 'Client'} (${o.orderNo})`,
       // Heading, greeting and request, client details, project details, contacts (SO contacts for SO), attachments,
       // closing and sign-off. Empty sections and fields are left out.
       body: signageMailAvailable()

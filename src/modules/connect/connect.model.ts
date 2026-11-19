@@ -58,6 +58,10 @@ const messageSchema = new Schema(
     mentions: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     attachments: { type: [attachmentSchema], default: [] },
     reactions: { type: [new Schema({ emoji: String, users: [{ type: Schema.Types.ObjectId, ref: 'User' }] }, { _id: false })], default: [] },
+    /** A structured card posted by the system (recce submitted / reviewed): title, label-value lines and a web path to open. */
+    card: { type: new Schema({ title: String, lines: [{ _id: false, label: String, value: String }], path: String, tone: String }, { _id: false }) },
+    /** Shop this message is about (a shop-specific thread inside the project channel). */
+    shop: { type: Schema.Types.ObjectId, ref: 'Site' },
     replyCount: { type: Number, default: 0 },
     lastReplyAt: Date,
     editedAt: Date,

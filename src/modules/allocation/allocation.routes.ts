@@ -35,4 +35,5 @@ allocationRouter.post(`${P}/split/preview`, ...write, asyncHandler(async (req, r
 allocationRouter.post(`${P}/split/apply`, ...write, asyncHandler(async (req, res) => ok(res, await svc.applySplit(pid(req), svc.applySplitBody.parse(req.body), actorOf(req)))));
 allocationRouter.post(`${P}/geocode`, ...write, asyncHandler(async (req, res) => ok(res, await svc.geocodeSites(pid(req), svc.geocodeBody.parse(req.body ?? {}), actorOf(req)))));
 allocationRouter.get(`${P}/itinerary`, ...read, asyncHandler(async (req, res) => ok(res, await svc.itinerary(pid(req), svc.itineraryQuery.parse(req.query)))));
+allocationRouter.post('/sites/:id/geocode', authenticate, requirePermission('sites:write', 'verification:manage'), scopeSite, asyncHandler(async (req, res) => ok(res, await svc.geocodeSite(String(req.params.id), actorOf(req)))));
 allocationRouter.put('/sites/:id/coords', authenticate, requirePermission('sites:write', 'verification:manage'), scopeSite, asyncHandler(async (req, res) => ok(res, await svc.setSiteCoords(String(req.params.id), svc.coordsBody.parse(req.body), actorOf(req)))));

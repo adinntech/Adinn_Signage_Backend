@@ -5,8 +5,8 @@ $hasDetails=is_array($data['details']['sections']??null)&&count($data['details']
 if($hasDetails){
  $d=$data['details'];
  $line=!empty($d['existing'])
-  ?'Please create the project code and estimation code for the order below under Client ID '.(($d['clientId']??'')!==''?$d['clientId']:'-').'.'
-  :'This is a new client. Please create the client ID in Zoho, then the project code and estimation code for the order below.';
+  ?'Please create the project code and estimation code for the order below.'
+  :'This is a new client. Please create the client in Zoho, then the project code and estimation code for the order below.';
 }else $line='Please create a project code for the following project and share the generated code by replying to this email.';
 
 pageStart('Project Code Creation Request',$line,$config,'folder');
@@ -27,12 +27,12 @@ if($hasDetails){
   ['','Business Unit',$p['businessUnit']??''],
   ['','Description',$p['description']??''],
   ['','Remarks',$p['remarks']??''],
- ]),'#eaf2ff','','#d6e4fa',null,'building');
+ ]),'','','',null,'building');
 }
 
 if($hasDetails)noteBlock($data,'Note from '.(($data['source']??'')!==''?$data['source']:'Client Servicing'));
 else messageBlock($data);
 attachmentsCard($data,'Project Documents');
 
-actionBox('');
-pageEnd('Regards,','Client Servicing Team',$config);
+actionBox('Please reply to this email with the generated code.','','');
+pageEnd('Regards,','Client Service Team – Signage',$config,false);

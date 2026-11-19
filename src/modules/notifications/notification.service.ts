@@ -210,6 +210,8 @@ const WEB_KIND: Record<NotificationKind, string> = {
   SHOPS_ADDED: 'imported',
   ACTIVITY: 'activity',
   ADMIN_ACTIVITY: 'activity',
+  RECCE_SUBMITTED: 'activity',
+  RECCE_REVIEWED: 'activity',
 };
 
 type NotificationRow = {
