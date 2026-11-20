@@ -91,8 +91,8 @@ const AUTO_REUSE_MS = 20_000;
 const recent = new Map<string, { at: number; result: Promise<CheckResult> }>();
 
 async function readRequests(ids: string[]): Promise<CheckResult> {
-  const bySubject = await readBoxes({ ids, where: 'subject' });
-  return bySubject.found ? bySubject : readBoxes({ ids, where: 'body', inboxOnly: true });
+  // The request ID is in the body of every request mail (the subject no longer carries it), so look in both, in Inbox and Sent (a reply sent from the same account lands in Sent).
+  return readBoxes({ ids, where: 'both' });
 }
 
 /**
@@ -100,7 +100,7 @@ async function readRequests(ids: string[]): Promise<CheckResult> {
  * reply to processReply. Only the envelope is fetched first: our own sent requests (not answers), automatic subjects and
  * mails already read are skipped without downloading them (sent requests carry the attachments).
  */
-async function readBoxes(q: { subject?: string; ids?: string[]; where?: 'subject' | 'body'; inboxOnly?: boolean }): Promise<CheckResult> {
+async function readBoxes(q: { subject?: string; ids?: string[]; where?: 'subject' | 'body' | 'both'; inboxOnly?: boolean }): Promise<CheckResult> {
   if (!env.imapEnabled)
     throw AppError.conflict(
       'The reply mailbox is not configured on the server (IMAP_HOST, IMAP_USER, IMAP_PASS).',
@@ -127,7 +127,7 @@ async function readBoxes(q: { subject?: string; ids?: string[]; where?: 'subject
       try {
         // Not only unread: a person may open the reply in Gmail first. Repeats are safe, processReply skips a mail it already read.
         const since = new Date(Date.now() - LOOKBACK_DAYS * 86_400_000);
-        const searches = q.ids?.length ? q.ids.map((id) => (q.where === 'body' ? { since, body: id } : { since, subject: id })) : [{ since, subject: q.subject ?? '-Signage-' }];
+        const searches = q.ids?.length ? q.ids.flatMap((id) => (q.where === 'body' ? [{ since, body: id }] : q.where === 'both' ? [{ since, subject: id }, { since, body: id }] : [{ since, subject: id }])) : [{ since, subject: q.subject ?? '-Signage-' }];
         const uids = new Set<number>();
         for (const s of searches) for (const u of (await client.search(s, { uid: true })) || []) uids.add(u);
         result.found = (result.found ?? 0) + uids.size;
