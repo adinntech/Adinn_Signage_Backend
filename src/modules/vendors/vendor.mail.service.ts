@@ -168,7 +168,7 @@ export async function sendRegistrationMail(id: string, input: z.infer<typeof reg
   const body = sanitizeHtml(input.body);
   const routing = await routingOf('VENDOR_REGISTRATION');
   const requestId = await newRequestId('VENDOR_REGISTRATION');
-  const subject = subjectWithId(input.subject, requestId);
+  const subject = signageMailAvailable() ? input.subject : subjectWithId(input.subject, requestId); // the PHP mail shows the request ID in its body
   // The PHP mail service (same as the code requests) is used when it is configured, otherwise plain SMTP.
   const viaPhp = signageMailAvailable();
   if (viaPhp) {

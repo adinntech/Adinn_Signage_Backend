@@ -4,7 +4,8 @@ import type { Actor } from '../../common/query';
 import { DEFAULT_RATES } from '../costing/costing.calc';
 import { CostPolicy } from '../costing/costing.model';
 import { postSignageMail } from '../codeRequests/signageCodeMail';
-import { newRequestId, subjectWithId } from '../mailSettings/requestId';
+import { newRequestId } from '../mailSettings/requestId';
+import { showMobile } from '../../common/validators/contact';
 import { routingOf } from '../mailSettings/mailRouting.service';
 import { User } from '../users/user.model';
 import { VendorRateApproval } from './vendorRateApproval.model';
@@ -79,12 +80,12 @@ export async function requestRateApproval(input: RequestInput, actor: Actor) {
       toEmail: routing.to,
       ccEmail: routing.cc,
       ...(routing.bcc.length ? { bccEmail: routing.bcc } : {}),
-      subject: subjectWithId(`Action Required - Vendor Rate Approval Request - ${input.vendorName}`, requestId),
+      subject: `Action Required - Vendor Rate Approval Request - ${input.vendorName}`, // the request ID is shown in the mail body, not the subject
       requestId,
       requestDate: now.toISOString(),
       source: 'Operations Team',
       ...(routing.replyTo ? { replyTo: routing.replyTo } : {}),
-      vendor: { vendorName: input.vendorName, vendorNo: input.vendorNo ?? '', ...compact(input.info) },
+      vendor: { vendorName: input.vendorName, vendorNo: input.vendorNo ?? '', ...compact({ ...input.info, mobile: showMobile(input.info?.mobile) }) },
       amounts: {
         requestedRate: rupees(input.requested.ratePerShop),
         requestedFar: rupees(input.requested.farRatePerShop),
