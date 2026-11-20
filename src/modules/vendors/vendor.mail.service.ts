@@ -15,6 +15,7 @@ import { User } from '../users/user.model';
 import { Vendor } from './vendor.model';
 import { sendSignageVendorMail, signageAttachmentProblem } from './signageVendorMail';
 import { getVendor, missingKycDocs, requiredKycDocs } from './vendor.service';
+import { showMobile } from '../../common/validators/contact';
 
 const EMAIL = z.string().trim().toLowerCase().email();
 export const registrationDraftBody = z.object({
@@ -51,7 +52,7 @@ function defaultContent(v: Awaited<ReturnType<typeof getVendor>>) {
     `<p>Kindly register the vendor below in Zoho Books and reply to this mail with the <strong>Vendor ID</strong> (5 or more digits), for example <em>Vendor ID: 12345</em>.</p>` +
     `<ul>` +
     row('Vendor / firm', v.name) + row('Type', v.typeName ?? (v.type === 'ORGANIZATION' ? 'Organization' : 'One-man / Freelancer')) + row('Contact person', [v.contactPerson, v.designation].filter(Boolean).join(', ')) +
-    row('Mobile', [v.mobile, v.mobileAlt].filter(Boolean).join(' / ')) + row('Email', v.email) + row('Address', [v.address, v.district, v.state, v.pincode].filter(Boolean).join(', ')) +
+    row('Mobile', [v.mobile, v.mobileAlt].map(showMobile).filter(Boolean).join(' / ')) + row('Email', v.email) + row('Address', [v.address, v.district, v.state, v.pincode].filter(Boolean).join(', ')) +
     row('PAN', v.pan) + row('GST', v.gstin ?? (v.hasGst === false ? 'Not registered for GST' : null)) + row('Aadhaar', maskAadhaar(v.aadhaar)) + row('Bank', bank) + row('Service area', (v.serviceAreas ?? []).join(', ')) +
     `</ul>` +
     `<p>The KYC documents are attached. Thank you.</p>` +
@@ -67,7 +68,7 @@ function signageVendorData(v: Awaited<ReturnType<typeof getVendor>>) {
     vendorCode: v.code,
     contactPerson: v.contactPerson ?? undefined,
     designation: v.designation ?? undefined,
-    mobile: [v.mobile, v.mobileAlt].filter(Boolean).join(' / ') || undefined,
+    mobile: [v.mobile, v.mobileAlt].map(showMobile).filter(Boolean).join(' / ') || undefined,
     email: v.email ?? undefined,
     address: v.address ?? undefined,
     district: v.district ?? undefined,

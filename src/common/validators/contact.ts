@@ -45,3 +45,9 @@ export function rejectDuplicateContacts(
     }
   });
 }
+
+/** A stored mobile shown with its country code, for mails and PDFs: "+91 9876543210". Blank stays blank, +91 is never doubled. */
+export function showMobile(raw: string | null | undefined): string {
+  const d = normalizeMobile(String(raw ?? ''));
+  return d ? `+91 ${d}` : '';
+}
