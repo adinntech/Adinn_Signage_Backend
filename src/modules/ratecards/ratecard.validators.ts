@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { listQuery, objectId } from '../../common/query';
+import { checkDateRanges, dateRangeFields, listQuery, objectId } from '../../common/query';
 import { mobileRule, optionalEmail } from '../../common/validators/contact';
 import { RATE_UNITS } from './ratecard.model';
 
@@ -66,4 +66,4 @@ export const rateCardCreationBody = csQuotationBody.extend({
   zohoId: z.string({ message: 'Select the client company' }).trim().min(1, 'Select the client company').max(64),
   requestKey: z.string().trim().max(100).optional(),
 });
-export const rateCardCreationListQuery = listQuery;
+export const rateCardCreationListQuery = listQuery.extend(dateRangeFields).superRefine(checkDateRanges);
