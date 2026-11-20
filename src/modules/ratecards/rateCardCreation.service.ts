@@ -3,7 +3,7 @@ import type { z } from 'zod';
 import { COMPANY } from '../../config/company';
 import { nextSeq } from '../../common/counter.model';
 import { AppError } from '../../common/errors';
-import { escapeRegex, pageMeta, type Actor } from '../../common/query';
+import { dateRangeFilter, escapeRegex, pageMeta, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { clientDetailsFromZoho, latestClient, type ClientDetails } from '../clients/clientDetails';
 import { discardStoredFiles, storeEmbeddedFile, storedFileUrl } from '../files/file.service';
@@ -28,7 +28,7 @@ type Card = { _id: Types.ObjectId; quotationRef: string; clientDetails?: unknown
 const clientOfCard = (c: { clientDetails?: unknown }) => latestClient(c.clientDetails as ClientDetails[] | null | undefined);
 
 export async function listRateCards(q: z.infer<typeof rateCardCreationListQuery>, actor: Actor) {
-  const filter: Record<string, unknown> = { deletedAt: null, ...scope(actor) };
+  const filter: Record<string, unknown> = { deletedAt: null, ...scope(actor), ...dateRangeFilter(q) };
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
     filter.$or = [{ quotationRef: re }, { 'clientDetails.name': re }, { 'clientDetails.zohoCustomerNo': re }, { 'clientDetails.gstin': re }];

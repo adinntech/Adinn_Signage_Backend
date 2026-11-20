@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { listQuery, objectId } from '../../common/query';
+import { checkDateRanges, dateRangeFields, listQuery, objectId } from '../../common/query';
 import { mobileRule, optionalEmail, rejectDuplicateContacts } from '../../common/validators/contact';
 import { CLIENT_TYPES, ORGANISATION_TYPES } from '../clients/client.model';
 import { clientRegistration } from '../clients/client.validators';
@@ -257,7 +257,8 @@ export const leadListQuery = listQuery.extend({
   stage: z.enum(LEAD_STAGES).optional().or(z.literal('').transform(() => undefined)),
   status: z.enum(['OPEN', 'CLOSED', 'COMPLETED']).optional().or(z.literal('').transform(() => undefined)),
   clientType: z.enum(CLIENT_TYPES).optional().or(z.literal('').transform(() => undefined)),
-});
+  ...dateRangeFields,
+}).superRefine(checkDateRanges);
 export const leadCandidatesQuery = z.object({ q: z.string().trim().max(100).optional() });
 export const startLeadBody = z.object({ orderId: objectId, initialNotes: notesText });
 /** `stage` is the stage the person is looking at, so a stale screen cannot move the lead twice. */

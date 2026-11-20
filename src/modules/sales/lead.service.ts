@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors';
-import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
+import { dateRangeFilter, escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { recordAudit } from '../audit/audit.service';
 import { Client } from '../clients/client.model';
 import { User } from '../users/user.model';
@@ -152,6 +152,7 @@ export async function listLeads(q: z.infer<typeof leadListQuery>, actor?: Actor)
     else filter['lead.status'] = { $nin: ['CLOSED', 'COMPLETED'] };
   }
   if (q.clientType) filter.clientType = q.clientType;
+  Object.assign(filter, dateRangeFilter(q));
   if (q.q) {
     const re = new RegExp(escapeRegex(q.q), 'i');
     // Client Servicing: their orders keep the client on the order (clientDetails), so only the orders are searched.
