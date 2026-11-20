@@ -18,6 +18,9 @@ export const NOTIFICATION_KINDS = [
   'SHOPS_ADDED',
   /** Any other create / edit / delete on a project, sent to the people working on it. */
   'ACTIVITY',
+  /** Shop recce evidence: submitted (for reviewers), a review decision or rework request (for the recce person). */
+  'RECCE_SUBMITTED',
+  'RECCE_REVIEWED',
   /** The same, for Super Admin: everything everyone does, in the app only. */
   'ADMIN_ACTIVITY',
 ] as const;

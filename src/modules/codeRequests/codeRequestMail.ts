@@ -1,3 +1,4 @@
+import { showMobile } from '../../common/validators/contact';
 import { htmlToText, sanitizeHtml } from '../../common/html';
 import type { CodeKind } from './codeRequest.model';
 import type { SignageCodeMailInput, SignageMailType } from './signageCodeMail';
@@ -48,7 +49,7 @@ export function buildCodeMail(src: CodeMailSource, kinds: CodeKind[], requestId:
       clientCode: clean(client.approvedCode),
       contactPerson: clean(primary?.name),
       email: clean(primary?.email) ?? clean(client.email),
-      phone: clean(primary?.phone) ?? clean(client.phone),
+      phone: clean(showMobile(primary?.phone)) ?? clean(showMobile(client.phone)),
       gstNumber: clean(client.gstin),
       panNumber: clean(client.onboarding?.pan),
       address: clean(client.address),

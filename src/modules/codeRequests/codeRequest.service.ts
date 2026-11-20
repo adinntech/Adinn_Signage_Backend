@@ -88,19 +88,19 @@ function defaultDrafts(o: Doc, client: { name?: string | null; clientNo?: string
   if (signageMailAvailable()) {
     // The PHP template prints every detail; this text only goes out as "Additional Notes".
     const note = (what: string, example: string) => `<p>Kindly create the ${what} and reply to this mail with it, for example <strong>${example}</strong>.</p>`;
-    const s = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
+    const s = (what: string) => `${what} - ${client.name ?? 'Client'}`;
     return {
-      COMBINED: { subject: s('Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
-      CLIENT_CODE: { subject: s('Client Code Request'), body: note('client code', 'Client Code: ABC123') },
-      PROJECT_CODE: { subject: s('Project Code Request'), body: note('project code', 'Project Code: 12345678') },
+      COMBINED: { subject: s('Action Required - Client Code & Project Code Request'), body: note('client code and project code', 'Client Code: ABC123, Project Code: 12345678') },
+      CLIENT_CODE: { subject: s('Action Required - Client Code Request'), body: note('client code', 'Client Code: ABC123') },
+      PROJECT_CODE: { subject: s('Action Required - Project Code Request'), body: note('project code', 'Project Code: 12345678') },
     };
   }
   const subj = (what: string) => `${what} - ${client.name ?? 'Client'} (${o.orderNo})`;
   const wrap = (blocks: string) => `<p>Dear Team,</p>${blocks}${sig}`;
   return {
-    COMBINED: { subject: subj('Client Code & Project Code Request'), body: wrap(clientBlock + projectBlock) },
-    CLIENT_CODE: { subject: subj('Client Code Request'), body: wrap(clientBlock) },
-    PROJECT_CODE: { subject: subj('Project Code Request'), body: wrap(projectBlock) },
+    COMBINED: { subject: subj('Action Required - Client Code & Project Code Request'), body: wrap(clientBlock + projectBlock) },
+    CLIENT_CODE: { subject: subj('Action Required - Client Code Request'), body: wrap(clientBlock) },
+    PROJECT_CODE: { subject: subj('Action Required - Project Code Request'), body: wrap(projectBlock) },
   };
 }
 
@@ -292,7 +292,7 @@ export async function sendRequests(orderId: string, input: z.infer<typeof sendBo
       cc: m.cc,
       bcc: m.bcc,
       from: m.from,
-      subject: subjectWithId(m.subject, requestId),
+      subject: signageMailAvailable() ? m.subject : subjectWithId(m.subject, requestId),
       body: signageMailAvailable() ? sanitizeHtml(m.body) : sanitizeHtml(m.body) + footer(),
       attachments: stored,
       ...(signageMailAvailable() ? { signage: { ...buildCodeMail({ order: o, client }, m.kinds, requestId, m.body), ...(routing.replyTo ? { replyTo: routing.replyTo } : {}) } } : {}),
@@ -351,7 +351,7 @@ export async function retryBatch(orderId: string, mailBatchId: string, actor: Ac
     to: prior.to,
     cc: prior.cc,
     bcc: rows[0]!.bcc,
-    subject: subjectWithId(prior.subject ?? '', requestId),
+    subject: signageMailAvailable() ? (prior.subject ?? '') : subjectWithId(prior.subject ?? '', requestId),
     body: prior.body ?? '',
     attachments: (prior.attachments ?? []).filter((a) => a.fileId) as StoredFile[],
     resentFrom: prior._id,

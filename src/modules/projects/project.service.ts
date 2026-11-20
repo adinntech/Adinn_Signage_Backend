@@ -5,6 +5,7 @@ import { nextSeq } from '../../common/counter.model';
 import { projectScope } from '../../common/project-access';
 import { escapeRegex, pageMeta, parseSort, type Actor } from '../../common/query';
 import { diff, listAudit, recordAudit } from '../audit/audit.service';
+import { removeProjectRecceFiles } from '../recce-review/recceReview.cleanup';
 import { removeProjectFiles } from '../files/file.service';
 import { purgeProjectData } from './project.cascade';
 import { notify, type NotifySpec } from '../notifications/notification.service';
@@ -278,8 +279,9 @@ export async function deleteProject(id: string, actor: Actor) {
   // Files first: if one cannot be erased from storage, nothing is deleted and the person can simply try again.
   const { failed: connectFailed } = await removeProjectConnectData(id);
   const { failed: workspaceFailed } = await removeProjectWorkspaceData(id);
+  const { failed: recceFailed } = await removeProjectRecceFiles(id);
   const { failed: projectFailed } = await removeProjectFiles(id);
-  const failed = [...connectFailed, ...workspaceFailed, ...projectFailed];
+  const failed = [...connectFailed, ...workspaceFailed, ...recceFailed, ...projectFailed];
   if (failed.length) throw AppError.conflict(`Could not remove these files from storage, so the project was not deleted: ${failed.join(', ')}. Try again.`);
   return { id, removed: await purgeProjectData(id) };
 }

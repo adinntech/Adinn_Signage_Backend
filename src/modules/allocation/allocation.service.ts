@@ -74,6 +74,24 @@ export async function setSiteCoords(siteId: string, body: z.infer<typeof coordsB
   return { _id: s._id, lat: s.lat ?? null, lng: s.lng ?? null };
 }
 
+/** Finds one shop's map position from its own address, area and pincode and saves it. A shop's position is never blanked. */
+export async function geocodeSite(siteId: string, actor: Actor) {
+  const s = await Site.findOne({ _id: siteId, deletedAt: null });
+  if (!s) throw AppError.notFound('Shop not found');
+  await assertNotCancelled(s.project);
+  let hit = null;
+  try {
+    hit = await geocode({ address: [s.address1, s.address2].filter(Boolean).join(', '), area: s.location || s.address3 || s.address2 || undefined, district: s.district ?? undefined, pincode: s.pincode ?? undefined }, async () => {});
+  } catch {
+    throw AppError.badRequest('The map service is not reachable right now. Try again in a minute.');
+  }
+  if (!hit) throw AppError.notFound('The map could not find this address. Type the latitude and longitude instead.');
+  s.set({ lat: hit.lat, lng: hit.lng, geoQuality: hit.quality });
+  await s.save();
+  await recordAudit({ actor, action: 'GEOCODE', entity: 'Site', entityId: s._id, project: s.project, changes: [{ field: 'location', oldValue: null, newValue: `${hit.lat}, ${hit.lng}` }] });
+  return { _id: s._id, lat: hit.lat, lng: hit.lng };
+}
+
 /** Counts per team, districts and how many shops still have no map position. */
 export async function getOverview(projectId: string) {
   const project = await requireProject(projectId);

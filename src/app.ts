@@ -18,6 +18,7 @@ import { expenseRouter } from './modules/expenses/expense.routes';
 import { recceCostRouter } from './modules/recce-cost/recceCost.routes';
 import { vendorRouter } from './modules/vendors/vendor.routes';
 import { vendorJobsRouter } from './modules/vendor-jobs/vendorJobs.routes';
+import { recceFieldRouter, recceReviewRouter } from './modules/recce-review/recceReview.routes';
 import { allocationRouter } from './modules/allocation/allocation.routes';
 import { notificationRouter } from './modules/notifications/notification.routes';
 import { fileRouter } from './modules/files/file.routes';
@@ -82,6 +83,8 @@ export function createApp() {
   app.use('/api/v1', recceCostRouter);
   app.use('/api/v1/vendors', vendorRouter);
   app.use('/api/v1/vendor', vendorJobsRouter);
+  app.use('/api/v1/recce', recceFieldRouter);
+  app.use('/api/v1/recce-review', recceReviewRouter);
   app.use('/api/v1', allocationRouter);
   app.use('/api/v1', fileRouter);
 

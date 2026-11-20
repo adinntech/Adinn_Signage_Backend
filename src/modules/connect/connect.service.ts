@@ -285,6 +285,8 @@ type MsgDoc = {
   mentions?: unknown[];
   attachments?: (StoredFile & { voice?: boolean | null; durationSec?: number | null; peaks?: number[] | null })[];
   reactions?: { emoji?: string | null; users?: unknown[] }[];
+  card?: { title?: string | null; lines?: { label?: string | null; value?: string | null }[]; path?: string | null; tone?: string | null } | null;
+  shop?: unknown;
   replyCount?: number | null;
   lastReplyAt?: Date | null;
   editedAt?: Date | null;
@@ -304,6 +306,8 @@ function present(m: MsgDoc, authors: Map<string, { name?: string; role?: string 
     mentions: gone ? [] : (m.mentions ?? []).map(String),
     attachments: gone ? [] : (m.attachments ?? []).map((f) => ({ fileId: String(f.fileId), name: f.name ?? 'file', size: f.size ?? 0, mimeType: f.mimeType ?? '', kind: f.kind ?? 'document', voice: !!f.voice, durationSec: f.durationSec ?? null, peaks: f.voice ? (f.peaks ?? []) : [] })),
     reactions: gone ? [] : (m.reactions ?? []).filter((r) => (r.users?.length ?? 0) > 0).map((r) => ({ emoji: r.emoji ?? '', count: r.users!.length, mine: r.users!.some((u) => String(u) === me) })),
+    card: gone || !m.card ? null : { title: m.card.title ?? '', lines: (m.card.lines ?? []).map((l) => ({ label: l.label ?? '', value: l.value ?? '' })), path: m.card.path ?? null, tone: m.card.tone ?? null },
+    shop: m.shop ? String(m.shop) : null,
     replyCount: m.replyCount ?? 0,
     lastReplyAt: m.lastReplyAt ?? null,
     edited: !!m.editedAt,
@@ -567,6 +571,37 @@ export async function channelHistory(channelId: string, a: Actor) {
 }
 
 /** Everything Connect keeps for one project: channels, messages and their stored files. Run before the project is purged. */
+/**
+ * Posts into the project channel for one shop: a structured system card (recce submitted / reviewed) or a plain reply from the
+ * recce person. The author is added to the channel members so the thread stays readable. Never throws: chat must not fail a workflow step.
+ */
+export async function postShopMessage(projectId: string | Types.ObjectId, shopId: string | Types.ObjectId, author: Actor, input: { body?: string; card?: { title: string; lines: { label: string; value: string }[]; path?: string; tone?: string } }) {
+  try {
+    const ch = await ensureProjectChannel(projectId);
+    const now = new Date();
+    if (!memberOf(ch, author.id)) await ConnectChannel.updateOne({ _id: ch._id, 'members.user': { $ne: new Types.ObjectId(author.id) } }, { $push: { members: { user: author.id, role: 'MEMBER', joinedAt: now, lastReadAt: now } } });
+    const body = (input.body ?? '').trim().slice(0, 2000);
+    const msg = await ConnectMessage.create({ channel: ch._id, author: author.id, body, shop: shopId, ...(input.card ? { card: input.card } : {}) });
+    const preview = input.card ? input.card.title : body.slice(0, 90);
+    await ConnectChannel.updateOne({ _id: ch._id }, { $set: { lastMessageAt: now, lastMessagePreview: preview } });
+    const out = (await presentMany([msg.toObject() as MsgDoc], ch, author.id))[0]!;
+    emitChannel(String(ch._id), 'message:new', out);
+    for (const m of ch.members) if (String(m.user) !== author.id) emitUser(String(m.user), 'connect:activity', { channelId: String(ch._id), messageId: out.id, mention: false, dm: false, preview, from: out.author.name, channelName: ch.name, voice: null });
+    return out;
+  } catch (e) {
+    console.error('shop message failed', e);
+    return null;
+  }
+}
+
+/** The messages of one shop's thread (system cards and replies), oldest first. */
+export async function shopMessages(projectId: string | Types.ObjectId, shopId: string | Types.ObjectId, me: string, limit = 100) {
+  const ch = await ConnectChannel.findOne({ project: projectId, kind: 'PROJECT' });
+  if (!ch) return [];
+  const rows = await ConnectMessage.find({ channel: ch._id, shop: shopId, deletedAt: null }).sort({ _id: -1 }).limit(limit).lean();
+  return presentMany(rows.reverse() as MsgDoc[], ch, me);
+}
+
 export async function removeProjectConnectData(projectId: string): Promise<{ failed: string[] }> {
   const channels = await ConnectChannel.find({ project: projectId }).select('_id').lean();
   const ids = channels.map((c) => c._id);

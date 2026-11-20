@@ -31,6 +31,7 @@ export const FILE_CATEGORIES = [
   'VENDOR_KYC_DOCUMENT',
   'TEMPLATE_COMPANY_PROFILE',
   'VENDOR_SHOP_IMAGE',
+  'RECCE_SHOP_PHOTO',
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
 
@@ -93,6 +94,9 @@ export const CATEGORY_RULES: Record<FileCategory, CategoryRule> = {
   VENDOR_KYC_DOCUMENT: { folder: (c, p) => `Vendors/${c}/${p}/KYC`, write: 'vendors:manage', read: ['vendors:manage', 'finance:manage'], kinds: ['document', 'image'], evidence: false, standalone: true },
   // Vendor mobile app: photos of one shop (max 10 per shop), kept on the shop (`p` is <project code>_<site code>). Removing one erases it.
   VENDOR_SHOP_IMAGE: { folder: (c, p) => `Vendor_Work/${c}/${p}/Shop_Images`, write: 'field:execute', read: ['sites:read'], kinds: IMAGES, evidence: false, standalone: true },
+  // Shop-wise recce evidence (original photo and its marked copy), kept on the photo record. Draft photos can be erased; submitted ones never are.
+  RECCE_SHOP_PHOTO: { folder: (c, p) => `Recce_Review/${c}/${p}/Photos`, write: 'field:execute', read: ['sites:read', 'recce:review-cs'], kinds: IMAGES, evidence: true, standalone: true },
+  // Shop-wise recce evidence (original photo and its marked copy), kept on the photo record. Draft photos can be erased; submitted ones never are.
   TEMPLATE_COMPANY_PROFILE: { folder: () => 'BD/Templates/Company_Profile', write: 'templates:manage', read: ['sales:read', 'templates:manage'], kinds: ['document'], evidence: false, standalone: true },
 };
 
@@ -119,6 +123,7 @@ export const SECTION_LABEL: Record<FileCategory, string> = {
   VENDOR_KYC_DOCUMENT: 'Vendor - KYC Documents',
   TEMPLATE_COMPANY_PROFILE: 'Templates - Company Profile',
   VENDOR_SHOP_IMAGE: 'Vendor - Shop Images',
+  RECCE_SHOP_PHOTO: 'Recce - Shop Photos',
 };
 
 const EXT_KIND: Record<string, FileKind> = {

@@ -9,6 +9,7 @@ const auditSchema = new Schema({
   project: { type: Schema.Types.ObjectId, index: true },
   changes: [{ _id: false, field: String, oldValue: Schema.Types.Mixed, newValue: Schema.Types.Mixed }],
   reason: String,
+  meta: Schema.Types.Mixed, // extra context (recce timeline: shop, media type, photo, version, visibility)
   at: { type: Date, default: Date.now, index: true },
 });
 auditSchema.index({ entity: 1, entityId: 1, at: -1 });
@@ -22,4 +23,5 @@ export interface AuditInput {
   project?: Types.ObjectId | string | undefined;
   changes?: { field: string; oldValue: unknown; newValue: unknown }[];
   reason?: string | undefined;
+  meta?: Record<string, unknown> | undefined;
 }
