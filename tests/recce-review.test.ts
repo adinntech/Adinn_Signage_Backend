@@ -27,7 +27,12 @@ const upload = (who: string, siteId: string, metas: Record<string, unknown>[], b
 const fillRequired = async (who: string, siteId: string) => {
   await upload(who, siteId, [meta('SHOP_FRONT'), meta('NAME_BOARD')]).expect(201);
 };
-const submit = (who: string, siteId: string, key = `key-${Math.random().toString(36).slice(2)}-12345`) => api().post(`/api/v1/recce/shops/${siteId}/submit`).set(as(who)).send({ idempotencyKey: key });
+// Installation feasibility is required at submit (2026-11-21): answer it first so these older flows still submit. Ignored when the shop is not this login's or is locked.
+const answered = { ladderRequired: 'NO', scaffoldingRequired: 'NO', craneRequired: 'NO', hydraRequired: 'NO', manualInstallationPossible: 'YES' };
+const submit = async (who: string, siteId: string, key = `key-${Math.random().toString(36).slice(2)}-12345`) => {
+  await api().put(`/api/v1/recce/shops/${siteId}/draft`).set(as(who)).send({ installation: answered });
+  return api().post(`/api/v1/recce/shops/${siteId}/submit`).set(as(who)).send({ idempotencyKey: key });
+};
 const detail = async (who: string, siteId: string) => (await api().get(`/api/v1/recce/shops/${siteId}`).set(as(who))).body.data;
 const ws = async (who: string, subId: string) => (await api().get(`/api/v1/recce-review/submissions/${subId}`).set(as(who))).body.data;
 const allChecked = async (who: string, subId: string) => (await ws(who, subId)).checklist.map((c: { key: string }) => ({ key: c.key, passed: true }));

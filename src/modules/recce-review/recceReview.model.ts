@@ -22,13 +22,25 @@ export type RecceStatus = (typeof RECCE_STATUSES)[number];
 
 export const PHOTO_CATEGORIES = [
   'SHOP_FRONT', 'NAME_BOARD', 'LEFT_SIDE', 'RIGHT_SIDE', 'MEASUREMENT', 'MOUNTING_AREA', 'ELECTRICAL', 'EXISTING_BOARD', 'OBSTRUCTION', 'ADDITIONAL',
+  // Mobile field flow (2026-11-21): the six GPS-tagged photos. SHOP_FRONT stays the "Front View" photo.
+  'SIDE_VIEW', 'LONG_SHOT', 'ANNOTATED_VIEW', 'LOCATION_VIEW', 'ACCESS_PATH',
 ] as const;
 export type PhotoCategory = (typeof PHOTO_CATEGORIES)[number];
 export const CATEGORY_LABEL: Record<PhotoCategory, string> = {
   SHOP_FRONT: 'Full Shop Front View', NAME_BOARD: 'Shop Name Board', LEFT_SIDE: 'Left Side View', RIGHT_SIDE: 'Right Side View',
   MEASUREMENT: 'Measurement View', MOUNTING_AREA: 'Mounting Area', ELECTRICAL: 'Electrical Connection', EXISTING_BOARD: 'Existing Board',
   OBSTRUCTION: 'Obstruction / Site Issue', ADDITIONAL: 'Additional Photo',
+  SIDE_VIEW: 'Side View', LONG_SHOT: 'Long Shot', ANNOTATED_VIEW: 'Annotated View', LOCATION_VIEW: 'Location View', ACCESS_PATH: 'Access Path',
 };
+export const PHOTO_SOURCES = ['LIVE_CAMERA', 'GALLERY'] as const;
+export type PhotoSource = (typeof PHOTO_SOURCES)[number];
+
+/** Installation feasibility. An unanswered field is NOT_ASSESSED, never NO. */
+export const TRI_STATES = ['YES', 'NO', 'NOT_ASSESSED'] as const;
+export type TriState = (typeof TRI_STATES)[number];
+export const ELECTRICAL_ACCESS = ['AVAILABLE', 'NOT_AVAILABLE', 'NOT_ASSESSED'] as const;
+/** The five answers the field person must give before submit. */
+export const INSTALLATION_REQUIRED = ['ladderRequired', 'scaffoldingRequired', 'craneRequired', 'hydraRequired', 'manualInstallationPossible'] as const;
 
 /** DRAFT: only the uploader sees it. SUBMITTED: part of a version. SUPERSEDED: replaced by a newer photo. REMOVED: soft-deleted with a reason. */
 export const PHOTO_STATES = ['DRAFT', 'SUBMITTED', 'SUPERSEDED', 'REMOVED'] as const;
@@ -45,6 +57,31 @@ const mediaItemSchema = new Schema(
     width: { type: Number, min: 0, max: 100000 },
     height: { type: Number, min: 0, max: 100000 },
     unit: { type: String, enum: ['FT', 'IN', 'M', 'CM', 'MM'], default: 'FT' },
+    notes: { type: String, maxlength: 500 },
+    /** One physical board per item: boards of different sizes are separate items with their own key. */
+    sided: { type: String, enum: ['SINGLE', 'DOUBLE'] },
+    condition: { type: String, enum: ['EXISTING', 'PROPOSED'] },
+    position: { type: String, maxlength: 120 },
+    installationNotes: { type: String, maxlength: 500 },
+  },
+  { _id: false },
+);
+
+const tri = { type: String, enum: TRI_STATES, default: 'NOT_ASSESSED' };
+export const installationSchema = new Schema(
+  {
+    ladderRequired: tri,
+    scaffoldingRequired: tri,
+    craneRequired: tri,
+    hydraRequired: tri,
+    manualInstallationPossible: tri,
+    electricalAccess: { type: String, enum: ELECTRICAL_ACCESS, default: 'NOT_ASSESSED' },
+    installationHeightFt: { type: Number, min: 0, max: 500 },
+    accessRestrictions: { type: [{ type: String, maxlength: 100 }], default: [] },
+    obstruction: { type: String, maxlength: 300 },
+    roadsideConstraints: { type: String, maxlength: 300 },
+    safetyNotes: { type: String, maxlength: 500 },
+    additionalEquipment: { type: [{ type: String, maxlength: 100 }], default: [] },
     notes: { type: String, maxlength: 500 },
   },
   { _id: false },
@@ -65,6 +102,8 @@ const submissionSchema = new Schema(
     currentVersion: { type: Number, default: 0 },
     mediaItems: { type: [mediaItemSchema], default: [] },
     notes: { type: String, default: '', maxlength: 2000 },
+    /** Installation feasibility (draft, editable while the shop is open). Copied into each RecceVersion at submit. */
+    installation: { type: installationSchema },
     startedAt: Date,
     submittedAt: Date,
     /** Optional named reviewers per stage (set by Operations / Admin). */
@@ -104,6 +143,9 @@ const photoSchema = new Schema(
     lat: Number,
     lng: Number,
     gpsAccuracy: Number,
+    /** Where the picture came from. Unset on older photos. */
+    source: { type: String, enum: PHOTO_SOURCES },
+    device: { type: String, maxlength: 120 },
     width: Number,
     height: Number,
     flags: { type: [flagSchema], default: [] },
@@ -138,6 +180,8 @@ const versionSchema = new Schema(
     removed: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
     mediaItems: { type: [mediaItemSchema], default: [] },
     notes: { type: String, default: '' },
+    /** Immutable installation feasibility snapshot made at submit (absent on versions made before 2026-11-21). */
+    installation: { type: installationSchema },
     /** The stages that must approve this version (from the configuration at the time of submit). */
     stages: [{ type: String, enum: REVIEW_STAGES }],
     sequential: { type: Boolean, default: true },
@@ -232,3 +276,16 @@ const configSchema = new Schema(
   { timestamps: true },
 );
 export const RecceConfig = model('RecceConfig', configSchema);
+
+/** When a person last opened one shop's thread: messages from others after this moment are unread. One row per (shop, person). */
+const threadReadSchema = new Schema(
+  {
+    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true },
+    user: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    lastReadAt: { type: Date, required: true },
+  },
+  { timestamps: true },
+);
+threadReadSchema.index({ site: 1, user: 1 }, { unique: true });
+export const RecceThreadRead = model('RecceThreadRead', threadReadSchema);

@@ -3,7 +3,7 @@ import { Types } from 'mongoose';
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { escapeRegex, objectId, pageMeta, type Actor } from '../../common/query';
-import { postShopMessage, shopMessages } from '../connect/connect.service';
+import { postShopMessage } from '../connect/connect.service';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, validateFiles, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
 import { notify } from '../notifications/notification.service';
@@ -11,9 +11,11 @@ import { Project } from '../projects/project.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import {
-  assertProjectOpen, clientNameFor, CLOSED_PROJECT, displayStatus, EDITABLE, FIELD_ROLES, getConfig, logEvent, missingFor, nameMap, oid, presentPhoto, seedItems, siteLabel, stageRecipients, type Config, type MediaItem,
+  assertProjectOpen, clientNameFor, CLOSED_PROJECT, displayStatus, EDITABLE, FIELD_ROLES, getConfig, hasUsableGps, installationPending, logEvent, missingFor, nameMap, oid, presentInstallation, presentPhoto, requiredCategories, reviewPath, roleMap, seedItems, siteLabel, stageRecipients, type Config, type MediaItem,
 } from './recceReview.common';
-import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, ReccePhoto, RecceReview, RecceRework, RecceSubmission, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
+import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
+import { photoHistory, photoReviews, presentItem, versionHistory, compareVersions, compareQuery } from './recceReview.versions';
+import { CATEGORY_LABEL, ELECTRICAL_ACCESS, PHOTO_CATEGORIES, PHOTO_SOURCES, REVIEW_STAGES, TRI_STATES, ReccePhoto, RecceReview, RecceRework, RecceSubmission, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
 
@@ -28,8 +30,23 @@ export const mediaItemBody = z.object({
   height: z.coerce.number().min(0).max(100000).optional(),
   unit: z.enum(['FT', 'IN', 'M', 'CM', 'MM']).default('FT'),
   notes: text(500).optional(),
+  // One physical board per item. Boards of different sizes are separate items, each with its own key (max 20 characters).
+  sided: z.enum(['SINGLE', 'DOUBLE']).optional(),
+  condition: z.enum(['EXISTING', 'PROPOSED']).optional(),
+  position: text(120).optional(),
+  installationNotes: text(500).optional(),
 });
-export const draftBody = z.object({ mediaItems: z.array(mediaItemBody).min(1).max(12).optional(), notes: text(2000).optional() }).refine((b) => b.mediaItems || b.notes !== undefined, 'Nothing to save');
+const tri = z.enum(TRI_STATES);
+const list = (n: number, each: number) => z.array(z.string().trim().min(1).max(each)).max(n);
+/** Every field optional: a save only changes the fields it sends. Arrays are replaced as a whole. */
+export const installationBody = z.object({
+  ladderRequired: tri.optional(), scaffoldingRequired: tri.optional(), craneRequired: tri.optional(), hydraRequired: tri.optional(), manualInstallationPossible: tri.optional(),
+  electricalAccess: z.enum(ELECTRICAL_ACCESS).optional(),
+  installationHeightFt: z.number().min(0).max(500).nullable().optional(),
+  accessRestrictions: list(10, 100).optional(), obstruction: text(300).optional(), roadsideConstraints: text(300).optional(), safetyNotes: text(500).optional(),
+  additionalEquipment: list(20, 100).optional(), notes: text(500).optional(),
+});
+export const draftBody = z.object({ mediaItems: z.array(mediaItemBody).min(1).max(12).optional(), notes: text(2000).optional(), installation: installationBody.optional() }).refine((b) => b.mediaItems || b.notes !== undefined || b.installation, 'Nothing to save');
 export const photoMeta = z.object({
   clientId: z.string().trim().min(8).max(80).optional(),
   category: z.enum(PHOTO_CATEGORIES),
@@ -39,6 +56,8 @@ export const photoMeta = z.object({
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
   gpsAccuracy: z.coerce.number().min(0).max(100000).optional(),
+  source: z.enum(PHOTO_SOURCES).optional(),
+  device: text(120).optional(),
   width: z.coerce.number().int().min(1).max(100000).optional(),
   height: z.coerce.number().int().min(1).max(100000).optional(),
   replaces: objectId.optional(),
@@ -62,7 +81,7 @@ export const myShopsQuery = z.object({
 /* ------------------------------------------------ assignment ------------------------------------------------ */
 
 /** The site filter for the shops this login may work on. A vendor never sees another vendor's shops. */
-async function mineFilter(actor: Actor): Promise<Record<string, unknown>> {
+export async function mineFilter(actor: Actor): Promise<Record<string, unknown>> {
   if (!FIELD_ROLES.includes(actor.role)) throw AppError.forbidden();
   const me = oid(actor.id);
   if (actor.role === 'VENDOR') {
@@ -73,7 +92,7 @@ async function mineFilter(actor: Actor): Promise<Record<string, unknown>> {
   return { channel: 'IN_HOUSE', assignedTo: me, deletedAt: null };
 }
 
-async function mySite(actor: Actor, siteId: string) {
+export async function mySite(actor: Actor, siteId: string) {
   const site = await Site.findOne({ ...(await mineFilter(actor)), _id: siteId }).lean();
   if (!site) throw AppError.notFound('Shop not found'); // also what another vendor's shop looks like
   return site;
@@ -172,7 +191,7 @@ export async function shopDetail(actor: Actor, siteId: string) {
   const [project, cfg, sub] = await Promise.all([projectOf(site.project), getConfig(), RecceSubmission.findOne({ site: site._id }).lean()]);
   const items = (sub?.mediaItems?.length ? sub.mediaItems : seedItems(site)) as unknown as MediaItem[];
   const photos = sub ? await ReccePhoto.find({ submission: sub._id, state: { $in: ['DRAFT', 'SUBMITTED'] } }).sort({ order: 1, createdAt: 1 }).lean() : [];
-  const names = await nameMap(photos.map((p) => p.uploadedBy));
+  const [names, roles] = await Promise.all([nameMap(photos.map((p) => p.uploadedBy)), roleMap(photos.map((p) => p.uploadedBy))]);
   const m = missingFor(cfg, items, photos.map((p) => ({ _id: p._id, category: p.category, mediaKey: p.mediaKey, state: p.state })), project.requirementType);
   const draftCount = photos.filter((p) => p.state === 'DRAFT').length;
   const versions = sub ? await RecceVersion.find({ submission: sub._id }).sort({ version: -1 }).lean() : [];
@@ -180,15 +199,17 @@ export async function shopDetail(actor: Actor, siteId: string) {
   const reviewers = await nameMap(reviews.map((r) => r.reviewer));
   const reworks = sub ? await RecceRework.find({ submission: sub._id }).sort({ createdAt: -1 }).lean() : [];
   const requestedBy = await nameMap(reworks.map((r) => r.requestedBy));
+  const reviewOf = photoReviews(photos, reworks as never, sub?.status, requestedBy);
   const status = displayStatus(sub, draftCount, m.missing.length === 0);
   return {
     siteId: String(site._id), siteCode: site.siteCode, shopName: site.shopName ?? null, dealerName: site.dealerName ?? null, district: site.district ?? null, contactPerson: site.contactPerson ?? null, mobile: site.mobile ?? null,
     address: [site.address1, site.address2, site.address3, site.pincode].filter(Boolean).join(', '), lat: site.lat ?? null, lng: site.lng ?? null, remarks: site.remarks ?? null,
     project: { id: String(project._id), code: project.code, name: project.name, client: await clientNameFor(project), expectedBy: project.targetDate ?? null, closed: CLOSED_PROJECT.includes(String(project.status)) },
     submissionId: sub ? String(sub._id) : null, status, rawStatus: sub?.status ?? 'NOT_STARTED', editable: !sub || (EDITABLE as string[]).includes(sub.status), version: sub?.currentVersion ?? 0, attempts: sub?.attempts ?? 0,
-    mediaItems: items.map((i) => ({ ...i, required: requiredCatsOf(cfg, i, project.requirementType) })), notes: sub?.notes ?? '',
+    mediaItems: items.map((i) => ({ ...presentItem(i), required: requiredCatsOf(cfg, i, project.requirementType) })), notes: sub?.notes ?? '',
+    installation: presentInstallation(sub?.installation as never), installationPending: installationPending(sub?.installation as never),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
-    photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: false }))),
+    photos: await Promise.all(photos.map(async (p) => ({ ...(await presentPhoto(p as never, names, { withHistory: false, roles })), review: reviewOf.get(String(p._id))! }))),
     progress: { percent: status === 'APPROVED' ? 100 : m.percent, required: m.required, done: m.done, missing: m.missing.map((x) => ({ ...x, label: x.category === 'DIMENSIONS' ? 'Width, height and quantity' : CATEGORY_LABEL[x.category as keyof typeof CATEGORY_LABEL] })) },
     versions: versions.map((v) => ({ version: v.version, submittedAt: v.submittedAt, photoCount: v.photos.length })),
     reviews: reviews.map((r) => ({ versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, comment: r.comment, reviewer: r.reviewer ? (reviewers.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null })),
@@ -198,20 +219,16 @@ export async function shopDetail(actor: Actor, siteId: string) {
 }
 const requiredCatsOf = (cfg: Config, item: MediaItem, rt?: string | null) => missingFor(cfg, [item], [], rt).missing.filter((x) => x.category !== 'DIMENSIONS').map((x) => x.category);
 
-/** Messages of this shop's thread (submission and review cards, and replies). Only this shop's thread, nothing else of the channel. */
-export async function shopThread(actor: Actor, siteId: string) {
+/** The shop thread of one of this login's shops (system cards and replies). Only this shop's thread, nothing else of the channel. */
+async function threadCtx(actor: Actor, siteId: string) {
   const site = await mySite(actor, siteId);
-  return shopMessages(site.project, site._id, actor.id);
+  const sub = await RecceSubmission.findOne({ site: site._id }).select('_id assignee mediaItems.key reviewers pendingStage').lean();
+  return { site, sub, side: 'FIELD' } as ThreadCtx;
 }
-export async function sendShopMessage(actor: Actor, siteId: string, body: string) {
-  const site = await mySite(actor, siteId);
-  await assertProjectOpen(site.project);
-  const out = await postShopMessage(site.project, site._id, actor, { body });
-  if (!out) throw AppError.conflict('The message could not be sent. Try again.');
-  const sub = await RecceSubmission.findOne({ site: site._id }).select('_id').lean();
-  if (sub) await logEvent(actor, { submission: sub._id, project: site.project, site: site._id, type: 'COMMENT_ADDED', reason: body.slice(0, 200) });
-  return out;
-}
+export const shopThread = async (actor: Actor, siteId: string, q: z.infer<typeof threadQuery>) => listThread(actor, await threadCtx(actor, siteId), q);
+export const sendShopMessage = async (actor: Actor, siteId: string, raw: Record<string, unknown> | undefined, file?: UploadedFile) => postThread(actor, await threadCtx(actor, siteId), parsePost(raw), file);
+export const shopUnread = async (actor: Actor, siteId: string) => unreadCount(actor, await threadCtx(actor, siteId));
+export const shopMarkRead = async (actor: Actor, siteId: string) => markThreadRead(actor, await threadCtx(actor, siteId));
 
 /* ------------------------------------------------ draft: measurements, notes ------------------------------------------------ */
 
@@ -221,6 +238,7 @@ export async function saveDraft(actor: Actor, siteId: string, input: z.infer<typ
   const sub = await ensureSubmission(actor, site);
   assertEditable(sub.status);
   const before = { mediaItems: sub.mediaItems.map((i) => i.toObject()), notes: sub.notes };
+  const installBefore = presentInstallation(sub.installation as never);
   if (input.mediaItems) {
     const keys = input.mediaItems.map((i) => i.key);
     if (new Set(keys).size !== keys.length) throw AppError.badRequest('Each media type needs its own key');
@@ -231,8 +249,20 @@ export async function saveDraft(actor: Actor, siteId: string, input: z.infer<typ
     sub.set('mediaItems', input.mediaItems);
   }
   if (input.notes !== undefined) sub.notes = input.notes;
+  if (input.installation) {
+    const patch = Object.fromEntries(Object.entries(input.installation).filter(([, v]) => v !== undefined));
+    const merged: Record<string, unknown> = { ...presentInstallation(sub.installation as never), ...patch };
+    if (merged.installationHeightFt === null) delete merged.installationHeightFt;
+    sub.set('installation', merged);
+  }
   await sub.save();
-  await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: input.mediaItems ? 'MEASUREMENT_UPDATED' : 'DRAFT_SAVED', changes: [{ field: 'draft', oldValue: before, newValue: { mediaItems: sub.mediaItems.map((i) => i.toObject()), notes: sub.notes } }] });
+  if (input.mediaItems || input.notes !== undefined) await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: input.mediaItems ? 'MEASUREMENT_UPDATED' : 'DRAFT_SAVED', changes: [{ field: 'draft', oldValue: before, newValue: { mediaItems: sub.mediaItems.map((i) => i.toObject()), notes: sub.notes } }] });
+  if (input.installation) {
+    const after = presentInstallation(sub.installation as never) as Record<string, unknown>;
+    const was = installBefore as Record<string, unknown>;
+    const changes = Object.keys(after).filter((k) => JSON.stringify(after[k]) !== JSON.stringify(was[k])).map((k) => ({ field: `installation.${k}`, oldValue: was[k], newValue: after[k] }));
+    if (changes.length) await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'INSTALLATION_UPDATED', changes });
+  }
   return shopDetail(actor, siteId);
 }
 
@@ -312,7 +342,7 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
       stored.push(file);
       const doc = await ReccePhoto.create({
         project: site.project, site: site._id, submission: sub._id, mediaKey: x.m.mediaKey, category: x.m.category, caption: x.m.caption, order: base + i, state: 'DRAFT', original: file as never,
-        capturedAt: x.m.capturedAt, lat: x.m.lat, lng: x.m.lng, gpsAccuracy: x.m.gpsAccuracy, width: x.m.width, height: x.m.height, flags: flagsFor(x.m, site, cfg, now),
+        capturedAt: x.m.capturedAt, lat: x.m.lat, lng: x.m.lng, gpsAccuracy: x.m.gpsAccuracy, source: x.m.source, device: x.m.device, width: x.m.width, height: x.m.height, flags: flagsFor(x.m, site, cfg, now),
         uploadedBy: actor.id, clientId: x.m.clientId, replaces: x.m.replaces,
       });
       created.push(doc as unknown as InstanceType<typeof ReccePhoto>);
@@ -435,6 +465,13 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   if (!photos.length) throw AppError.badRequest('Add at least one photo before submitting');
   if (m.missing.length) throw new AppError(422, 'MISSING_EVIDENCE', 'Required photos or measurements are missing', m.missing.map((x) => ({ path: `${x.mediaName}.${x.category}`, message: x.category === 'DIMENSIONS' ? `${x.mediaName}: add width, height and quantity` : `${x.mediaName}: ${CATEGORY_LABEL[x.category as keyof typeof CATEGORY_LABEL]} is required` })));
 
+  // With GPS required by the configuration, every live photo of a required category needs usable coordinates.
+  if (cfg.requireGps) {
+    const need = new Set(items.flatMap((i) => requiredCategories(cfg, i, project.requirementType)));
+    const noGps = photos.filter((p) => need.has(p.category as never) && !hasUsableGps(p));
+    if (noGps.length) throw new AppError(422, 'GPS_REQUIRED', 'Required photos need a usable GPS location', noGps.map((p) => ({ path: `${p.mediaKey || 'photo'}.${p.category}`, message: `${CATEGORY_LABEL[p.category as keyof typeof CATEGORY_LABEL] ?? p.category}: GPS location is missing or unusable` })));
+  }
+
   // Open rework must be answered: every replacement / extra photo it asked for needs a new draft photo.
   const reworks = await RecceRework.find({ submission: sub._id, status: 'OPEN' });
   const drafts = photos.filter((p) => p.state === 'DRAFT');
@@ -446,6 +483,10 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
     }
   }
   if (unresolved.length) throw new AppError(422, 'REWORK_UNRESOLVED', 'The rework request is not answered yet', unresolved.map((message) => ({ path: 'rework', message })));
+
+  // Installation feasibility: the five yes / no answers must be given. An unanswered field is never treated as NO.
+  const pending = installationPending(sub.installation as never);
+  if (pending.length) throw AppError.badRequest(`Installation feasibility is incomplete. Answer: ${pending.join(', ')}`, pending.map((f) => ({ path: `installation.${f}`, message: `${f} is not assessed` })));
 
   const prev = await RecceVersion.findOne({ submission: sub._id }).sort({ version: -1 }).lean();
   const versionNo = (prev?.version ?? 0) + 1;
@@ -460,7 +501,7 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   try {
     version = await RecceVersion.create({
       project: sub.project, site: site._id, submission: sub._id, version: versionNo, submittedBy: actor.id, submittedAt: now, photos: keep.map((p) => p._id), added: drafts.map((p) => p._id),
-      removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems, notes: sub.notes, stages, sequential: cfg.sequential, dueAt, idempotencyKey: input.idempotencyKey,
+      removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems, notes: sub.notes, installation: presentInstallation(sub.installation as never) as never, stages, sequential: cfg.sequential, dueAt, idempotencyKey: input.idempotencyKey,
     });
   } catch (e) {
     if ((e as { code?: number }).code === 11000) throw AppError.conflict('This shop was just submitted. Reload to see its status.');
@@ -490,25 +531,48 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   return { duplicate: false, version: versionNo, detail: await shopDetail(actor, siteId) };
 }
 
-export const reviewPath = (submissionId: Types.ObjectId | string) => `/recce-review/${String(submissionId)}`;
+/* ------------------------------------------------ version history (field user's own shops) ------------------------------------------------ */
+
+export async function myVersions(actor: Actor, siteId: string) {
+  const site = await mySite(actor, siteId);
+  const sub = await RecceSubmission.findOne({ site: site._id }).select('_id').lean();
+  return sub ? versionHistory(sub._id) : [];
+}
+export async function myCompare(actor: Actor, siteId: string, q: z.infer<typeof compareQuery>) {
+  const site = await mySite(actor, siteId);
+  const sub = await RecceSubmission.findOne({ site: site._id }).select('_id').lean();
+  if (!sub) throw AppError.notFound('Version not found');
+  return compareVersions(sub._id, q.from, q.to);
+}
+/** Revisions, timeline events and rework requests of one photo. The field person sees only events visible to them. */
+export async function myPhotoHistory(actor: Actor, siteId: string, photoId: string) {
+  const { sub } = await myPhoto(actor, siteId, photoId);
+  return photoHistory(sub._id, photoId, ['ALL']);
+}
+
+export { reviewPath };
 
 /** Tells the reviewers whose turn it is, and posts the structured card into the project channel (shop thread). */
 export async function announceSubmitted(
   actor: Actor,
-  i: { submissionId: Types.ObjectId; projectId: Types.ObjectId; siteId: Types.ObjectId; siteName: string; project: { code: string; client?: unknown }; versionNo: number; photoCount: number; mediaNames: string[]; stage: ReviewStage; resubmitted?: boolean },
+  i: { submissionId: Types.ObjectId; projectId: Types.ObjectId; siteId: Types.ObjectId; siteName: string; project: { code: string; client?: unknown }; versionNo: number; photoCount: number; mediaNames: string[]; stage: ReviewStage; resubmitted?: boolean; /** submitted = the version was just submitted; turn = a stage hands over to the next one; none = notify only */ card?: 'submitted' | 'turn' | 'none' },
 ) {
   const who = (await User.findById(actor.id).select('name').lean())?.name ?? 'Recce team';
   const sub = await RecceSubmission.findById(i.submissionId).select('reviewers').lean();
   const recipients = await stageRecipients(i.stage, i.projectId, sub?.reviewers?.[i.stage] ?? null);
   const clientName = await clientNameFor(i.project as never);
   await notify({
-    recipients, kind: 'RECCE_SUBMITTED', path: reviewPath(i.submissionId), actorId: actor.id, project: { _id: i.projectId, code: i.project.code, clientName: clientName ?? undefined },
+    recipients, kind: 'RECCE_SUBMITTED', path: reviewPath(i.submissionId), site: i.siteId, actorId: actor.id, project: { _id: i.projectId, code: i.project.code, clientName: clientName ?? undefined },
     title: i.resubmitted ? `Shop recce resubmitted (v${i.versionNo})` : 'Shop recce submitted',
     body: `${who} submitted ${i.siteName} (${i.photoCount} photos, version ${i.versionNo}) for ${STAGE_LABEL[i.stage]} review.`,
     dedupe: (r) => `recce-submit:${String(i.submissionId)}:${i.versionNo}:${i.stage}:${r}`,
   });
+  if (i.card === 'none') return;
+  const turn = i.card === 'turn';
   await postShopMessage(i.projectId, i.siteId, actor, {
-    card: { title: i.resubmitted ? 'Shop Recce Resubmitted' : 'Shop Recce Submitted', tone: 'info', path: reviewPath(i.submissionId), lines: [
+    // One card per (version, stage): a retry or a second call for the same event never posts it again.
+    eventKey: `${turn ? 'turn' : 'submit'}:${String(i.submissionId)}:${i.versionNo}:${i.stage}`, refs: [{ type: 'VERSION', id: String(i.versionNo) }],
+    card: { title: turn ? `${STAGE_LABEL[i.stage]} Review Due` : i.resubmitted ? 'Shop Recce Resubmitted' : 'Shop Recce Submitted', tone: 'info', path: reviewPath(i.submissionId), lines: [
       { label: 'Project', value: i.project.code }, { label: 'Shop', value: i.siteName }, { label: 'Submitted By', value: who },
       { label: 'Media Types', value: i.mediaNames.join(', ') }, { label: 'Photos', value: String(i.photoCount) }, { label: 'Submission Version', value: `v${i.versionNo}` },
     ] },

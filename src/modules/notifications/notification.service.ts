@@ -25,6 +25,8 @@ export interface NotifySpec {
   order?: { _id: Types.ObjectId | string; orderNo: string; clientName?: string | undefined };
   /** A web path to open instead of the project / order (e.g. a vendor): the bell, the pop-up, push and mail all follow it. */
   path?: string | undefined;
+  /** The shop this is about (recce events), so the mobile app can open it. */
+  site?: Types.ObjectId | string | undefined;
   actorId?: string | undefined;
   /** Stable key per recipient for this event; the same key never creates a second notification. */
   dedupe: (recipientId: string) => string;
@@ -67,6 +69,7 @@ export async function notify(spec: NotifySpec): Promise<void> {
           projectCode: spec.project?.code,
           salesOrder: spec.order?._id,
           path: spec.path,
+          site: spec.site,
           orderNo: spec.order?.orderNo,
           clientName: spec.project?.clientName ?? spec.order?.clientName,
           dedupeKey: spec.dedupe(String(u._id)),
@@ -212,6 +215,7 @@ const WEB_KIND: Record<NotificationKind, string> = {
   ADMIN_ACTIVITY: 'activity',
   RECCE_SUBMITTED: 'activity',
   RECCE_REVIEWED: 'activity',
+  RECCE_MESSAGE: 'activity',
 };
 
 type NotificationRow = {
@@ -225,6 +229,7 @@ type NotificationRow = {
   salesOrder?: unknown;
   orderNo?: string | null | undefined;
   path?: string | null | undefined;
+  site?: unknown;
   clientName?: string | null | undefined;
   readAt?: Date | null | undefined;
 };
@@ -234,6 +239,8 @@ export function toItem(n: NotificationRow) {
   return {
     id: String(n._id),
     kind: WEB_KIND[n.kind as NotificationKind],
+    /** The stored kind (RECCE_SUBMITTED, RECCE_MESSAGE ...) for apps that need more than the web grouping. */
+    type: n.kind,
     title: n.title,
     text: n.body,
     at: n.createdAt.toISOString(),
@@ -241,6 +248,7 @@ export function toItem(n: NotificationRow) {
     projectCode: n.projectCode ?? n.orderNo ?? '',
     orderId: n.salesOrder ? String(n.salesOrder) : null,
     path: n.path ?? null,
+    siteId: n.site ? String(n.site) : null,
     client: n.clientName ?? '',
     read: !!n.readAt,
   };

@@ -1,3 +1,4 @@
+import { type Types } from 'mongoose';
 import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { assertNotCancelled } from '../../common/project-access';
@@ -372,5 +373,41 @@ export async function costReport(f: { client?: string; project?: string; from?: 
     categories: Object.fromEntries(Object.entries(cat).map(([k, v]) => [k, r2(v)])),
     byClient: byClient.out(), byProject: byProject.out(), byEmployee: byEmployee.out(), byDate: byDate.out(),
     byVendor: [...byVendor].map(([key, total]) => ({ key, total: r2(total) })).sort((a, b) => b.total - a.total),
+  };
+}
+
+// ---------- Verified cost for the recce performance view (never estimated) ----------
+/**
+ * Only values the cost module already stores as final, per project:
+ *   in-house = `approved.total` of trip claims a reviewer APPROVED (or that are SETTLED), by trip start date;
+ *   vendor   = `total` of the vendor rate applied to the project (VendorRecceCost, frozen snapshot), by the date it was applied.
+ * Nothing is derived or estimated: a project with no such record has no entry, and a side with no record is null. Shops are
+ * not costed here (no verified per-shop value exists), so `perShop` is always empty. Returns null when nothing is verified at all.
+ */
+export async function verifiedRecceCost(projectIds: Types.ObjectId[] | null, f: { from?: Date | undefined; to?: Date | undefined } = {}) {
+  const range = f.from || f.to ? { ...(f.from ? { $gte: f.from } : {}), ...(f.to ? { $lte: f.to } : {}) } : undefined;
+  const scope = projectIds ? { project: { $in: projectIds } } : {};
+  const [trips, vendors] = await Promise.all([
+    RecceTrip.aggregate<{ _id: Types.ObjectId; total: number }>([
+      { $match: { ...scope, status: { $in: ['APPROVED', 'SETTLED'] }, 'approved.total': { $type: 'number' }, ...(range ? { startAt: range } : {}) } },
+      { $group: { _id: '$project', total: { $sum: '$approved.total' } } },
+    ]),
+    VendorRecceCost.aggregate<{ _id: Types.ObjectId; total: number }>([
+      { $match: { ...scope, total: { $type: 'number' }, ...(range ? { createdAt: range } : {}) } },
+      { $group: { _id: '$project', total: { $sum: '$total' } } },
+    ]),
+  ]);
+  if (!trips.length && !vendors.length) return null;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const per = new Map<string, { inHouse: number | null; vendor: number | null }>();
+  for (const t of trips) per.set(String(t._id), { inHouse: r2(t.total), vendor: null });
+  for (const v of vendors) per.set(String(v._id), { inHouse: per.get(String(v._id))?.inHouse ?? null, vendor: r2(v.total) });
+  const sum = (k: 'inHouse' | 'vendor') => { const xs = [...per.values()].map((p) => p[k]).filter((x): x is number => x !== null); return xs.length ? r2(xs.reduce((a, b) => a + b, 0)) : null; };
+  const inHouse = sum('inHouse');
+  const vendor = sum('vendor');
+  return {
+    inHouse, vendor, total: r2((inHouse ?? 0) + (vendor ?? 0)),
+    perProject: [...per.entries()].map(([projectId, p]) => ({ projectId, inHouse: p.inHouse, vendor: p.vendor, total: r2((p.inHouse ?? 0) + (p.vendor ?? 0)) })),
+    perShop: [] as { siteId: string; total: number }[],
   };
 }

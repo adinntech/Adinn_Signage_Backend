@@ -10,7 +10,7 @@ import { Project } from '../projects/project.model';
 import { SalesOrder } from '../sales/sales.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
-import { RecceConfig, type PhotoCategory, type RecceStatus, type ReviewStage } from './recceReview.model';
+import { INSTALLATION_REQUIRED, RecceConfig, type PhotoCategory, type RecceStatus, type ReviewStage } from './recceReview.model';
 
 export const FIELD_ROLES = ['VENDOR', 'RECCE_EXECUTIVE'];
 export const OPS_ROLES = ['OPERATIONS', 'RECCE_COORDINATOR'];
@@ -36,7 +36,7 @@ export const EVENT_LABEL: Record<string, string> = {
   MEASUREMENT_UPDATED: 'Measurement updated', DRAFT_SAVED: 'Draft saved', SUBMISSION_CREATED: 'Submission created', REWORK_SUBMITTED: 'Rework submitted',
   REVIEW_APPROVED: 'Review approved', REVIEW_REJECTED: 'Review rejected', REWORK_REQUESTED: 'Rework requested', ADDITIONAL_PHOTOS_REQUESTED: 'Additional photos requested',
   FINAL_APPROVAL: 'Final approval', ADMIN_OVERRIDE: 'Admin override', REOPENED: 'Reopened', COMMENT_ADDED: 'Comment added', REVIEWER_ASSIGNED: 'Reviewer assigned',
-  REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added',
+  REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added', INSTALLATION_UPDATED: 'Installation feasibility updated',
 };
 
 export type Visibility = 'ALL' | 'REVIEW' | 'ADMIN';
@@ -98,7 +98,7 @@ export async function assertProjectOpen(projectId: Types.ObjectId | string) {
 
 /* ------------------------------------------------ requirements & progress ------------------------------------------------ */
 
-export type MediaItem = { key: string; name: string; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined };
+export type MediaItem = { key: string; name: string; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined };
 
 /** Photo categories this media item needs. Configurable: the first config key contained in the media name wins, else the project rule, else default. */
 export function requiredCategories(cfg: Config, item: MediaItem, requirementType?: string | null): PhotoCategory[] {
@@ -133,6 +133,31 @@ export function missingFor(cfg: Config, items: MediaItem[], photos: PhotoLite[],
   return { missing, required, done, percent: required ? Math.round((done / required) * 100) : live.length ? 100 : 0 };
 }
 
+/* ------------------------------------------------ installation feasibility ------------------------------------------------ */
+
+export type Installation = {
+  ladderRequired?: string | null; scaffoldingRequired?: string | null; craneRequired?: string | null; hydraRequired?: string | null; manualInstallationPossible?: string | null; electricalAccess?: string | null;
+  installationHeightFt?: number | null; accessRestrictions?: string[] | null; obstruction?: string | null; roadsideConstraints?: string | null; safetyNotes?: string | null; additionalEquipment?: string[] | null; notes?: string | null;
+};
+
+/** Always the full shape. A missing field is NOT_ASSESSED (never NO), so older records and unanswered questions read the same way. */
+export function presentInstallation(i?: Installation | null) {
+  const t = (v?: string | null) => v ?? 'NOT_ASSESSED';
+  return {
+    ladderRequired: t(i?.ladderRequired), scaffoldingRequired: t(i?.scaffoldingRequired), craneRequired: t(i?.craneRequired), hydraRequired: t(i?.hydraRequired), manualInstallationPossible: t(i?.manualInstallationPossible),
+    electricalAccess: t(i?.electricalAccess), installationHeightFt: i?.installationHeightFt ?? null, accessRestrictions: [...(i?.accessRestrictions ?? [])], obstruction: i?.obstruction ?? '', roadsideConstraints: i?.roadsideConstraints ?? '',
+    safetyNotes: i?.safetyNotes ?? '', additionalEquipment: [...(i?.additionalEquipment ?? [])], notes: i?.notes ?? '',
+  };
+}
+export type InstallationView = ReturnType<typeof presentInstallation>;
+
+/** The required installation answers that are still NOT_ASSESSED. */
+export const installationPending = (i?: Installation | null): string[] => INSTALLATION_REQUIRED.filter((k) => (i?.[k] ?? 'NOT_ASSESSED') === 'NOT_ASSESSED');
+
+/** Coordinates usable as evidence: present, not 0,0, accuracy no worse than 200 m. */
+export const hasUsableGps = (p: { lat?: number | null; lng?: number | null; gpsAccuracy?: number | null }) =>
+  p.lat != null && p.lng != null && !(p.lat === 0 && p.lng === 0) && (p.gpsAccuracy == null || p.gpsAccuracy <= 200);
+
 /** The status the person sees: DRAFT and READY_TO_SUBMIT are derived from what is stored. */
 export function displayStatus(s: { status: string } | null, draftCount: number, ready: boolean) {
   if (!s) return 'NOT_STARTED';
@@ -153,15 +178,17 @@ const link = async (f: StoredFile | null | undefined) => {
   return l ? { url: l.url, expiresAt: l.expiresAt } : null;
 };
 
-type PhotoRow = { _id: Types.ObjectId; category: string; mediaKey?: string | null; caption?: string | null; order?: number | null; state: string; original: StoredFile; edited?: StoredFile | null; annotations?: unknown; capturedAt?: Date | null; lat?: number | null; lng?: number | null; gpsAccuracy?: number | null; width?: number | null; height?: number | null; flags?: { code?: string | null; message?: string | null }[]; uploadedBy?: Types.ObjectId; createdAt?: Date; version?: number | null; replaces?: Types.ObjectId | null; supersededBy?: Types.ObjectId | null; removedAt?: Date | null; removedBy?: Types.ObjectId | null; removeReason?: string | null };
+type PhotoRow = { _id: Types.ObjectId; category: string; mediaKey?: string | null; caption?: string | null; order?: number | null; state: string; original: StoredFile; edited?: StoredFile | null; annotations?: unknown; capturedAt?: Date | null; lat?: number | null; lng?: number | null; gpsAccuracy?: number | null; width?: number | null; height?: number | null; flags?: { code?: string | null; message?: string | null }[]; uploadedBy?: Types.ObjectId; createdAt?: Date; version?: number | null; replaces?: Types.ObjectId | null; supersededBy?: Types.ObjectId | null; removedAt?: Date | null; removedBy?: Types.ObjectId | null; removeReason?: string | null; source?: string | null; device?: string | null };
 
 /** `withHistory` is for reviewers and admin: removal reason and flags. Field users get only the live photo data. */
-export async function presentPhoto(p: PhotoRow, names: Map<string, string>, opts: { withHistory: boolean }) {
+export async function presentPhoto(p: PhotoRow, names: Map<string, string>, opts: { withHistory: boolean; roles?: Map<string, string> }) {
   const [o, e] = await Promise.all([link(p.original), link(p.edited)]);
   return {
     id: String(p._id), category: p.category, mediaKey: p.mediaKey ?? '', caption: p.caption ?? '', order: p.order ?? 0, state: p.state, version: p.version ?? null,
     url: o?.url ?? null, editedUrl: e?.url ?? null, hasEdited: !!p.edited, annotations: p.annotations ?? null,
     capturedAt: p.capturedAt ?? null, uploadedAt: p.createdAt ?? null, uploadedBy: p.uploadedBy ? (names.get(String(p.uploadedBy)) ?? null) : null,
+    capturedByRole: p.uploadedBy ? (opts.roles?.get(String(p.uploadedBy)) ?? null) : null, source: p.source ?? null, device: p.device ?? null,
+    gpsVerified: hasUsableGps(p) && !(p.flags ?? []).some((f) => String(f.code ?? '').startsWith('GPS_')),
     lat: p.lat ?? null, lng: p.lng ?? null, gpsAccuracy: p.gpsAccuracy ?? null, width: p.width ?? null, height: p.height ?? null, size: p.original.size ?? null,
     replaces: p.replaces ? String(p.replaces) : null, supersededBy: p.supersededBy ? String(p.supersededBy) : null,
     ...(opts.withHistory ? { flags: (p.flags ?? []).map((f) => ({ code: f.code ?? '', message: f.message ?? '' })), removedAt: p.removedAt ?? null, removedBy: p.removedBy ? (names.get(String(p.removedBy)) ?? null) : null, removeReason: p.removeReason ?? null } : {}),
@@ -172,6 +199,13 @@ export async function nameMap(ids: (Types.ObjectId | string | null | undefined)[
   const list = [...new Set(ids.filter(Boolean).map(String))];
   const users = list.length ? await User.find({ _id: { $in: list } }).select('name role').lean() : [];
   return new Map(users.map((u) => [String(u._id), u.name as string]));
+}
+
+/** User id to role, for presenting who captured a photo. */
+export async function roleMap(ids: (Types.ObjectId | string | null | undefined)[]) {
+  const list = [...new Set(ids.filter(Boolean).map(String))];
+  const users = list.length ? await User.find({ _id: { $in: list } }).select('role').lean() : [];
+  return new Map(users.map((u) => [String(u._id), String(u.role)]));
 }
 
 export async function clientNameFor(p: { client?: Types.ObjectId | null; clientDetails?: { name?: string | null }[] | null }) {
@@ -199,3 +233,6 @@ export async function siteOrFail(siteId: string) {
   return s;
 }
 export { isScoped };
+
+/** The web page of one shop's review (a notification or card opens it). */
+export const reviewPath = (submissionId: Types.ObjectId | string) => `/recce-review/${String(submissionId)}`;

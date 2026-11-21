@@ -287,6 +287,7 @@ type MsgDoc = {
   reactions?: { emoji?: string | null; users?: unknown[] }[];
   card?: { title?: string | null; lines?: { label?: string | null; value?: string | null }[]; path?: string | null; tone?: string | null } | null;
   shop?: unknown;
+  refs?: { type?: string | null; id?: string | null }[] | null;
   replyCount?: number | null;
   lastReplyAt?: Date | null;
   editedAt?: Date | null;
@@ -308,6 +309,7 @@ function present(m: MsgDoc, authors: Map<string, { name?: string; role?: string 
     reactions: gone ? [] : (m.reactions ?? []).filter((r) => (r.users?.length ?? 0) > 0).map((r) => ({ emoji: r.emoji ?? '', count: r.users!.length, mine: r.users!.some((u) => String(u) === me) })),
     card: gone || !m.card ? null : { title: m.card.title ?? '', lines: (m.card.lines ?? []).map((l) => ({ label: l.label ?? '', value: l.value ?? '' })), path: m.card.path ?? null, tone: m.card.tone ?? null },
     shop: m.shop ? String(m.shop) : null,
+    refs: gone ? [] : (m.refs ?? []).map((r) => ({ type: r.type ?? '', id: r.id ?? '' })),
     replyCount: m.replyCount ?? 0,
     lastReplyAt: m.lastReplyAt ?? null,
     edited: !!m.editedAt,
@@ -572,34 +574,80 @@ export async function channelHistory(channelId: string, a: Actor) {
 
 /** Everything Connect keeps for one project: channels, messages and their stored files. Run before the project is purged. */
 /**
- * Posts into the project channel for one shop: a structured system card (recce submitted / reviewed) or a plain reply from the
- * recce person. The author is added to the channel members so the thread stays readable. Never throws: chat must not fail a workflow step.
+ * Posts into the project channel for one shop: a structured system card (recce submitted / reviewed), or a reply with optional
+ * refs (photo / board / version of that shop, already validated by the caller) and one optional image. The author is added to
+ * the channel members so the thread stays readable. Never throws: chat must not fail a workflow step (returns null instead).
+ * `eventKey` makes a system card idempotent: the same event never posts a second card.
  */
-export async function postShopMessage(projectId: string | Types.ObjectId, shopId: string | Types.ObjectId, author: Actor, input: { body?: string; card?: { title: string; lines: { label: string; value: string }[]; path?: string; tone?: string } }) {
+export async function postShopMessage(
+  projectId: string | Types.ObjectId,
+  shopId: string | Types.ObjectId,
+  author: Actor,
+  input: { body?: string; card?: { title: string; lines: { label: string; value: string }[]; path?: string; tone?: string }; refs?: { type: string; id: string }[]; file?: UploadedFile; eventKey?: string },
+) {
+  let stored: StoredFile[] = [];
   try {
     const ch = await ensureProjectChannel(projectId);
     const now = new Date();
     if (!memberOf(ch, author.id)) await ConnectChannel.updateOne({ _id: ch._id, 'members.user': { $ne: new Types.ObjectId(author.id) } }, { $push: { members: { user: author.id, role: 'MEMBER', joinedAt: now, lastReadAt: now } } });
     const body = (input.body ?? '').trim().slice(0, 2000);
-    const msg = await ConnectMessage.create({ channel: ch._id, author: author.id, body, shop: shopId, ...(input.card ? { card: input.card } : {}) });
-    const preview = input.card ? input.card.title : body.slice(0, 90);
+    // The image is stored by the files service under the project (Connect/<client>/<project code>), so deleting the project erases it.
+    // Access to the thread was already checked by the caller, hence workflowAuthorized.
+    if (input.file) stored = [await storeEmbeddedFile({ category: 'CONNECT_ATTACHMENT', ...(await folderOf(ch)), file: input.file, actor: author, owner: { entity: 'ConnectChannel', id: ch._id }, workflowAuthorized: true })];
+    const msg = await ConnectMessage.create({
+      channel: ch._id, author: author.id, body, shop: shopId, ...(input.card ? { card: input.card } : {}), ...(input.refs?.length ? { refs: input.refs } : {}), ...(stored.length ? { attachments: stored } : {}), ...(input.eventKey ? { eventKey: input.eventKey } : {}),
+    });
+    const preview = input.card ? input.card.title : previewOf(body, stored as { voice?: boolean }[]);
     await ConnectChannel.updateOne({ _id: ch._id }, { $set: { lastMessageAt: now, lastMessagePreview: preview } });
     const out = (await presentMany([msg.toObject() as MsgDoc], ch, author.id))[0]!;
     emitChannel(String(ch._id), 'message:new', out);
     for (const m of ch.members) if (String(m.user) !== author.id) emitUser(String(m.user), 'connect:activity', { channelId: String(ch._id), messageId: out.id, mention: false, dm: false, preview, from: out.author.name, channelName: ch.name, voice: null });
-    return out;
+    return (await withLinks([msg.toObject() as MsgDoc], [out]))[0]!;
   } catch (e) {
+    await discardStoredFiles(stored);
+    if ((e as { code?: number }).code === 11000 && input.eventKey) return null; // this event already has its card
     console.error('shop message failed', e);
     return null;
   }
 }
 
-/** The messages of one shop's thread (system cards and replies), oldest first. */
+/** Adds a short-lived link to every attachment of a presented message (shop threads only; the generic Connect view fetches links on demand). */
+async function withLinks(rows: MsgDoc[], out: ReturnType<typeof present>[]) {
+  const byFile = new Map<string, StoredFile>();
+  for (const r of rows) for (const f of r.attachments ?? []) byFile.set(String(f.fileId), f);
+  return Promise.all(out.map(async (m) => ({
+    ...m,
+    attachments: await Promise.all(m.attachments.map(async (a) => {
+      const f = byFile.get(a.fileId);
+      const l = f ? await storedFileUrl(f).catch(() => null) : null;
+      return { ...a, url: l?.url ?? null, expiresAt: l?.expiresAt ?? null };
+    })),
+  })));
+}
+
+/** The messages of one shop's thread (system cards and replies), oldest first (the original shape: the last `limit` messages). */
 export async function shopMessages(projectId: string | Types.ObjectId, shopId: string | Types.ObjectId, me: string, limit = 100) {
   const ch = await ConnectChannel.findOne({ project: projectId, kind: 'PROJECT' });
   if (!ch) return [];
   const rows = await ConnectMessage.find({ channel: ch._id, shop: shopId, deletedAt: null }).sort({ _id: -1 }).limit(limit).lean();
-  return presentMany(rows.reverse() as MsgDoc[], ch, me);
+  const ordered = rows.reverse() as MsgDoc[];
+  return withLinks(ordered, await presentMany(ordered, ch, me));
+}
+
+/**
+ * One page of a shop's thread, NEWEST first. `before` is a message id or an ISO time: only older messages are returned.
+ * `nextBefore` is the id to pass for the next (older) page, or null when there is nothing older.
+ */
+export async function shopMessagePage(projectId: string | Types.ObjectId, shopId: string | Types.ObjectId, me: string, q: { limit: number; before?: { id: string } | { date: Date } | undefined }) {
+  const ch = await ConnectChannel.findOne({ project: projectId, kind: 'PROJECT' });
+  if (!ch) return { items: [], nextBefore: null as string | null };
+  const filter: Record<string, unknown> = { channel: ch._id, shop: shopId, deletedAt: null };
+  if (q.before && 'id' in q.before) filter._id = { $lt: new Types.ObjectId(q.before.id) };
+  else if (q.before) filter.createdAt = { $lt: q.before.date };
+  const rows = (await ConnectMessage.find(filter).sort({ _id: -1 }).limit(q.limit + 1).lean()) as MsgDoc[];
+  const more = rows.length > q.limit;
+  const page = rows.slice(0, q.limit);
+  return { items: await withLinks(page, await presentMany(page, ch, me)), nextBefore: more ? String(page[page.length - 1]!._id) : null };
 }
 
 export async function removeProjectConnectData(projectId: string): Promise<{ failed: string[] }> {

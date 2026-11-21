@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { escapeRegex, objectId, pageMeta, type Actor } from '../../common/query';
 import { AuditLog } from '../audit/auditLog.model';
-import { postShopMessage, shopMessages } from '../connect/connect.service';
+import { postShopMessage } from '../connect/connect.service';
+import type { UploadedFile } from '../files/file.service';
 import { notify } from '../notifications/notification.service';
 import { Client } from '../clients/client.model';
 import { Project } from '../projects/project.model';
@@ -11,9 +12,11 @@ import { Vendor } from '../vendors/vendor.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import {
-  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentPhoto, REVIEWABLE, reviewProjectIds, siteLabel, stageOf, stageRecipients, type Config, type MediaItem,
+  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, type Config, type MediaItem,
 } from './recceReview.common';
-import { OPEN_STAGE, announceSubmitted, reviewPath } from './recceReview.field';
+import { OPEN_STAGE, announceSubmitted } from './recceReview.field';
+import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
+import { compareVersions, versionHistory, compareQuery } from './recceReview.versions';
 import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, RECCE_STATUSES, ReccePhoto, RecceConfig, RecceReview, RecceRework, RecceSubmission, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
@@ -61,7 +64,7 @@ function assertStageRights(actor: Actor, stage: ReviewStage) {
   if (mine !== stage) throw AppError.forbidden(`Only ${STAGE_LABEL[stage]} can decide this review stage`);
 }
 
-async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[] }) {
+async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[]; refs?: { type: string; id: string }[] }) {
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
   const who = (await User.findById(actor.id).select('name').lean())?.name ?? STAGE_LABEL[info.stage];
@@ -70,11 +73,11 @@ async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmiss
   const other = REVIEW_STAGES.filter((s) => s !== info.stage);
   const reviewerIds = (await Promise.all(other.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat();
   await notify({
-    recipients: [sub.assignee, ...reviewerIds.filter(() => info.decision !== 'APPROVE')], kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
+    recipients: [sub.assignee, ...reviewerIds.filter(() => info.decision !== 'APPROVE')], kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
     title: info.title, body: `${name}: ${who} (${STAGE_LABEL[info.stage]}) — ${info.decision.toLowerCase().replace('_', ' ')}${info.comment ? `. ${info.comment.slice(0, 160)}` : ''}`,
     dedupe: (r) => `recce-review:${String(sub._id)}:${info.versionNo}:${info.stage}:${info.decision}:${r}`,
   });
-  await postShopMessage(sub.project, sub.site, actor, { card: { title: 'Recce Review Update', tone: info.tone, path: reviewPath(sub._id), lines: [{ label: 'Shop', value: name }, { label: 'Decision', value: info.title }, { label: 'Reviewer', value: `${who} (${STAGE_LABEL[info.stage]})` }, ...(info.extra ?? []), { label: 'Comments', value: info.comment || '-' }] } });
+  await postShopMessage(sub.project, sub.site, actor, { eventKey: `review:${String(sub._id)}:${info.versionNo}:${info.stage}:${info.decision}:${info.title}`.slice(0, 160), refs: [{ type: 'VERSION', id: String(info.versionNo) }, ...(info.refs ?? [])], card: { title: 'Recce Review Update', tone: info.tone, path: reviewPath(sub._id), lines: [{ label: 'Shop', value: name }, { label: 'Decision', value: info.title }, { label: 'Reviewer', value: `${who} (${STAGE_LABEL[info.stage]})` }, ...(info.extra ?? []), { label: 'Comments', value: info.comment || '-' }] } });
 }
 
 /** Tells the next stage that it is its turn (sequential flow). */
@@ -83,9 +86,24 @@ async function notifyNextStage(actor: Actor, sub: InstanceType<typeof RecceSubmi
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
   if (!site || !p) return;
   const items = (sub.mediaItems as unknown as MediaItem[]).map((i) => i.name);
-  const photos = await RecceVersion.findOne({ submission: sub._id, version: versionNo }).select('photos').lean();
-  await announceSubmitted({ id: String(sub.assignee), role: 'VENDOR' }, { submissionId: sub._id, projectId: sub.project, siteId: sub.site, siteName: siteLabel(site), project: p, versionNo, photoCount: photos?.photos.length ?? 0, mediaNames: items, stage, resubmitted: versionNo > 1 }).catch(() => undefined);
+  const photos = await RecceVersion.findOne({ submission: sub._id, version: versionNo }).select('photos stages').lean();
+  await announceSubmitted({ id: String(sub.assignee), role: 'VENDOR' }, { submissionId: sub._id, projectId: sub.project, siteId: sub.site, siteName: siteLabel(site), project: p, versionNo, photoCount: photos?.photos.length ?? 0, mediaNames: items, stage, resubmitted: versionNo > 1, card: photos?.stages?.[0] === stage ? 'none' : 'turn' }).catch(() => undefined);
   void actor;
+}
+
+/**
+ * Every required stage has approved: besides the recce person (told by afterDecision), the people of every stage hear that the shop is
+ * complete. The person who made the last decision is never notified (notify skips the actor).
+ */
+async function notifyFinalApproval(actor: Actor, sub: InstanceType<typeof RecceSubmission>, versionNo: number, stages: ReviewStage[]) {
+  const [site, p] = await Promise.all([Site.findById(sub.site).select('shopName siteCode').lean(), Project.findById(sub.project).select('code client clientDetails').lean()]);
+  const people = (await Promise.all(REVIEW_STAGES.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat().filter((id) => String(id) !== String(sub.assignee));
+  const clientName = p ? await clientNameFor(p) : null;
+  await notify({
+    recipients: people, kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
+    title: 'Shop approved by all stages', body: `${site ? siteLabel(site) : 'Shop'}: version ${versionNo} is approved by ${stages.map((s) => STAGE_LABEL[s]).join(' and ')}.`,
+    dedupe: (r) => `recce-final:${String(sub._id)}:${versionNo}:${r}`,
+  });
 }
 
 /* ------------------------------------------------ inbox ------------------------------------------------ */
@@ -184,6 +202,7 @@ export async function workspace(actor: Actor, id: string) {
   // Reviewers never see another person's drafts, only what was submitted (including photos later superseded or removed, with history).
   const photos = await ReccePhoto.find({ submission: sub._id, state: { $ne: 'DRAFT' } }).sort({ order: 1, createdAt: 1 }).lean();
   const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
+  const roles = await roleMap(photos.map((p) => p.uploadedBy));
   const mine = stageOf(actor.role);
   const cur = versions.at(-1);
   const curReviews = cur ? reviews.filter((r) => String(r.version) === String(cur._id)) : [];
@@ -192,21 +211,31 @@ export async function workspace(actor: Actor, id: string) {
   return {
     id: String(sub._id), status: sub.status, currentVersion: sub.currentVersion, attempts: sub.attempts, priority: sub.priority, submittedAt: sub.submittedAt ?? null, dueAt: sub.dueAt ?? null,
     overdue: (REVIEWABLE as string[]).includes(sub.status) && !!sub.dueAt && sub.dueAt.getTime() < Date.now(), pendingStage: (REVIEWABLE as string[]).includes(sub.status) ? (sub.pendingStage ?? null) : null,
-    assignee: names.get(String(sub.assignee)) ?? null, channel: sub.channel ?? null, notes: sub.notes, mediaItems: sub.mediaItems,
+    assignee: names.get(String(sub.assignee)) ?? null, channel: sub.channel ?? null, notes: sub.notes, mediaItems: sub.mediaItems, installation: presentInstallation(sub.installation as never),
     reviewers: { OPS: sub.reviewers?.OPS ? { id: String(sub.reviewers.OPS), name: names.get(String(sub.reviewers.OPS)) ?? '' } : null, CS: sub.reviewers?.CS ? { id: String(sub.reviewers.CS), name: names.get(String(sub.reviewers.CS)) ?? '' } : null },
     shop: { id: String(site._id), code: site.siteCode, name: site.shopName ?? null, dealer: site.dealerName ?? null, district: site.district ?? null, contactPerson: site.contactPerson ?? null, mobile: site.mobile ?? null, address: [site.address1, site.address2, site.address3, site.pincode].filter(Boolean).join(', '), lat: site.lat ?? null, lng: site.lng ?? null, boardType: site.boardType ?? null },
     project: { id: String(project._id), code: project.code, name: project.name, client: await clientNameFor(project), requirementType: project.requirementType ?? null, closed: CLOSED_PROJECT.includes(String(project.status)) },
     versions: versions.map((v) => ({
-      id: String(v._id), version: v.version, submittedAt: v.submittedAt, submittedBy: names.get(String(v.submittedBy)) ?? null, photoIds: v.photos.map(String), addedIds: v.added.map(String), removedIds: v.removed.map(String), notes: v.notes, mediaItems: v.mediaItems, stages: v.stages, sequential: v.sequential, dueAt: v.dueAt ?? null,
+      id: String(v._id), version: v.version, submittedAt: v.submittedAt, submittedBy: names.get(String(v.submittedBy)) ?? null, photoIds: v.photos.map(String), addedIds: v.added.map(String), removedIds: v.removed.map(String), notes: v.notes, mediaItems: v.mediaItems, installation: presentInstallation(v.installation as never), installationRecorded: !!v.installation, stages: v.stages, sequential: v.sequential, dueAt: v.dueAt ?? null,
       reviews: reviews.filter((r) => String(r.version) === String(v._id)).map(dec),
     })),
-    photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true }))),
+    photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
     reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
     checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps })),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
     me: { stage: mine, canDecide: !!mine && open === mine && !CLOSED_PROJECT.includes(String(project.status)), openStage: open, isAdmin: actor.role === 'SUPER_ADMIN', canReopen: (sub.status === 'REJECTED' && (cfg.allowRetryAfterReject ? !!mine || actor.role === 'SUPER_ADMIN' : actor.role === 'SUPER_ADMIN')) || (sub.status === 'APPROVED' && actor.role === 'SUPER_ADMIN') },
     viewedAt: new Date(),
   };
+}
+
+/** Immutable version snapshots and a compare of any two, for the reviewer (same data the field person sees). */
+export async function reviewVersions(actor: Actor, id: string) {
+  const sub = await loadSubmission(actor, id);
+  return versionHistory(sub._id);
+}
+export async function reviewCompare(actor: Actor, id: string, q: z.infer<typeof compareQuery>) {
+  const sub = await loadSubmission(actor, id);
+  return compareVersions(sub._id, q.from, q.to);
 }
 
 export async function markReviewStarted(actor: Actor, id: string) {
@@ -279,8 +308,16 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type, version: version.version, reason: comment || undefined, changes: [{ field: 'status', oldValue: sub.status, newValue: status }, { field: `review.${input.stage}`, oldValue: 'PENDING', newValue: decision }] });
   if (status === 'APPROVED') await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'FINAL_APPROVAL', version: version.version });
   const fresh = (await RecceSubmission.findById(sub._id))!;
+  // What the reviewer pointed at, for the thread card: the photo's category (or the item's own) and a ref the app can open.
+  const catOf = new Map((photoIds.length ? await ReccePhoto.find({ _id: { $in: photoIds } }).select('category').lean() : []).map((x) => [String(x._id), x.category as keyof typeof CATEGORY_LABEL]));
+  const pointed = input.items.map((i) => { const c = i.category ?? (i.photo ? catOf.get(i.photo) : undefined); return c ? `${CATEGORY_LABEL[c]}${i.note ? ` (${i.note})` : ''}` : null; }).filter((x): x is string => !!x);
+  const cardRefs = [
+    ...photoIds.map((id) => ({ type: 'PHOTO', id })),
+    ...[...new Set(input.items.filter((i) => !i.photo && i.mediaKey && sub.mediaItems.some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
+  ];
   const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: 'Rework required', ADDITIONAL: 'Additional photos requested' };
-  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : [] });
+  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: 'Rework items', value: pointed.join(', ') }] : [] });
+  if (status === 'APPROVED') await notifyFinalApproval(actor, fresh, version.version, stages);
   if (status === 'UNDER_REVIEW' && pendingStage) await notifyNextStage(actor, fresh, pendingStage, version.version);
   return workspace(actor, id);
 }
@@ -299,7 +336,9 @@ export async function override(actor: Actor, id: string, input: z.infer<typeof o
   const moved = await RecceSubmission.updateOne({ _id: sub._id, currentVersion: version.version, status: { $in: REVIEWABLE } }, { $set: { status, pendingStage: null, ...(status === 'APPROVED' ? { finalApprovedAt: new Date() } : {}) }, $inc: { rev: 1 } });
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'ADMIN_OVERRIDE', version: version.version, reason: input.reason, visibility: 'REVIEW', changes: [{ field: 'status', oldValue: sub.status, newValue: status }] });
-  await afterDecision(actor, (await RecceSubmission.findById(sub._id))!, { versionNo: version.version, stage: 'OPS', decision: input.action, comment: input.reason, title: `Admin override: ${status.toLowerCase()}`, tone: input.action === 'APPROVE' ? 'good' : 'bad' });
+  const after = (await RecceSubmission.findById(sub._id))!;
+  await afterDecision(actor, after, { versionNo: version.version, stage: 'OPS', decision: input.action, comment: input.reason, title: `Admin override: ${status.toLowerCase()}`, tone: input.action === 'APPROVE' ? 'good' : 'bad' });
+  if (status === 'APPROVED') await notifyFinalApproval(actor, after, version.version, version.stages as ReviewStage[]);
   return workspace(actor, id);
 }
 
@@ -319,7 +358,8 @@ export async function reopen(actor: Actor, id: string, input: z.infer<typeof reo
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'REOPENED', reason: input.reason, version: sub.currentVersion, changes: [{ field: 'status', oldValue: sub.status, newValue: 'IN_PROGRESS' }] });
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
-  await notify({ recipients: [sub.assignee], kind: 'RECCE_REVIEWED', path: undefined, actorId: actor.id, project: p ? { _id: sub.project, code: p.code } : undefined as never, title: 'Shop reopened', body: `${site ? siteLabel(site) : 'Shop'} was reopened for a new attempt: ${input.reason}`, dedupe: (r) => `recce-reopen:${String(sub._id)}:${sub.rev}:${r}` });
+  await notify({ recipients: [sub.assignee], kind: 'RECCE_REVIEWED', path: undefined, site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code } : undefined as never, title: 'Shop reopened', body: `${site ? siteLabel(site) : 'Shop'} was reopened for a new attempt: ${input.reason}`, dedupe: (r) => `recce-reopen:${String(sub._id)}:${sub.rev}:${r}` });
+  await postShopMessage(sub.project, sub.site, actor, { eventKey: `reopen:${String(sub._id)}:${sub.rev}`, refs: sub.currentVersion ? [{ type: 'VERSION', id: String(sub.currentVersion) }] : [], card: { title: 'Shop Reopened', tone: 'warn', path: reviewPath(sub._id), lines: [{ label: 'Shop', value: site ? siteLabel(site) : 'Shop' }, { label: 'Reason', value: input.reason }, { label: 'Previous status', value: sub.status }] } });
   return workspace(actor, id);
 }
 
@@ -374,18 +414,17 @@ export async function reviewTimeline(actor: Actor, id: string, q: z.infer<typeof
   await loadSubmission(actor, id);
   return timeline(actor, id, q);
 }
-export async function reviewThread(actor: Actor, id: string) {
+/** The shop thread as a reviewer sees it (same messages the field person sees). Access follows the review rules of the project. */
+async function threadCtx(actor: Actor, id: string): Promise<ThreadCtx> {
   const sub = await loadSubmission(actor, id);
-  return shopMessages(sub.project, sub.site, actor.id);
+  const site = await Site.findById(sub.site).lean();
+  if (!site) throw AppError.notFound('Submission not found');
+  return { site, sub, side: 'REVIEW' } as unknown as ThreadCtx;
 }
-export async function reviewSendMessage(actor: Actor, id: string, body: string) {
-  const sub = await loadSubmission(actor, id);
-  await assertProjectOpen(sub.project);
-  const out = await postShopMessage(sub.project, sub.site, actor, { body });
-  if (!out) throw AppError.conflict('The message could not be sent. Try again.');
-  await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'COMMENT_ADDED', reason: body.slice(0, 200), visibility: 'ALL' });
-  return out;
-}
+export const reviewThread = async (actor: Actor, id: string, q: z.infer<typeof threadQuery>) => listThread(actor, await threadCtx(actor, id), q);
+export const reviewSendMessage = async (actor: Actor, id: string, raw: Record<string, unknown> | undefined, file?: UploadedFile) => postThread(actor, await threadCtx(actor, id), parsePost(raw), file);
+export const reviewUnread = async (actor: Actor, id: string) => unreadCount(actor, await threadCtx(actor, id));
+export const reviewMarkRead = async (actor: Actor, id: string) => markThreadRead(actor, await threadCtx(actor, id));
 
 /* ------------------------------------------------ progress & monitoring ------------------------------------------------ */
 

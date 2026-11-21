@@ -21,6 +21,8 @@ export const NOTIFICATION_KINDS = [
   /** Shop recce evidence: submitted (for reviewers), a review decision or rework request (for the recce person). */
   'RECCE_SUBMITTED',
   'RECCE_REVIEWED',
+  /** A new message in one shop's recce thread, for the other side of the conversation. */
+  'RECCE_MESSAGE',
   /** The same, for Super Admin: everything everyone does, in the app only. */
   'ADMIN_ACTIVITY',
 ] as const;
@@ -61,6 +63,8 @@ const notificationSchema = new Schema(
     orderNo: String,
     /** A web path the notification opens instead of the project / order. */
     path: String,
+    /** The shop a recce notification is about (lets the mobile app open the shop). */
+    site: { type: Schema.Types.ObjectId, ref: 'Site' },
     clientName: String,
     /** Same event for the same person is stored once, so retries and double clicks never notify twice. */
     dedupeKey: { type: String, required: true, unique: true },
