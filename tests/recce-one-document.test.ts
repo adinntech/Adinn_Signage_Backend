@@ -144,6 +144,17 @@ describe('recce data of a shop is one document', () => {
     expect(filesUnder(root).filter((f) => f.includes('P-ONE_P-ONE-S2'))).toHaveLength(1); // the loser's file was removed again
   });
 
+  it('refuses the same picture twice in one shop (the testing switch is off unless the .env turns it on)', async () => {
+    const { Site } = await import('../src/modules/sites/site.model');
+    const site = await Site.create({ project: ids.PA, seq: 3, siteCode: 'P-ONE-S3', scenario: 'MEASUREMENT_REQUIRED', shopName: 'Shop A3', boardType: 'GSB Single Side', quantity: 2, district: 'Madurai', lat: 9.9, lng: 78.1, channel: 'VENDOR', vendor: (await Site.findById(ids.SA1).lean())!.vendor });
+    const same = png();
+    const send = (category: string) => api().post(`/api/v1/recce/shops/${site._id}/photos`).set(as('VA')).attach('photos', same, 'same.png').field('meta', JSON.stringify([meta(category)]));
+    expect((await send('SHOP_FRONT')).status).toBe(201);
+    const again = await send('NAME_BOARD');
+    expect(again.status).toBe(409);
+    expect(again.body.error.message).toMatch(/already uploaded/);
+  });
+
   it('keeps a draft upload from landing in a shop that was just submitted', async () => {
     expect((await upload('VA', ids.SA1, [meta('ADDITIONAL')])).status).toBe(409);
     expect((await Models.RecceSubmission.findOne({ site: ids.SA1 }).lean())!.photos).toHaveLength(3);

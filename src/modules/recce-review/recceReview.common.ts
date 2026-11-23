@@ -40,7 +40,7 @@ export const EVENT_LABEL: Record<string, string> = {
   PHOTO_DELETED: 'Draft photo deleted', PHOTO_REMOVED: 'Submitted photo removed', PHOTO_RESTORED: 'Photo restored', PHOTO_ANNOTATED: 'Photo annotated',
   MEASUREMENT_UPDATED: 'Measurement updated', DRAFT_SAVED: 'Draft saved', SUBMISSION_CREATED: 'Submission created', REWORK_SUBMITTED: 'Rework submitted',
   REVIEW_APPROVED: 'Review approved', REVIEW_REJECTED: 'Review rejected', REWORK_REQUESTED: 'Rework requested', ADDITIONAL_PHOTOS_REQUESTED: 'Additional photos requested',
-  FINAL_APPROVAL: 'Final approval', ADMIN_OVERRIDE: 'Admin override', REOPENED: 'Reopened', COMMENT_ADDED: 'Comment added', REVIEWER_ASSIGNED: 'Reviewer assigned',
+  FINAL_APPROVAL: 'Final approval', DECISION_CHANGED: 'Decision changed', ADMIN_OVERRIDE: 'Admin override', REOPENED: 'Reopened', COMMENT_ADDED: 'Comment added', REVIEWER_ASSIGNED: 'Reviewer assigned',
   REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added', INSTALLATION_UPDATED: 'Installation feasibility updated',
 };
 
@@ -103,7 +103,7 @@ export async function assertProjectOpen(projectId: Types.ObjectId | string) {
 
 /* ------------------------------------------------ requirements & progress ------------------------------------------------ */
 
-export type MediaItem = { key: string; name: string; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined };
+export type MediaItem = { key: string; name: string; mediaType?: string | null | undefined; seq?: number | null | undefined; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined };
 
 /** Photo categories this media item needs. Configurable: the first config key contained in the media name wins, else the project rule, else default. */
 export function requiredCategories(cfg: Config, item: MediaItem, requirementType?: string | null): PhotoCategory[] {

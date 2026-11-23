@@ -15,9 +15,12 @@ export const compareQuery = z.object({ from: z.coerce.number().int().min(1), to:
 
 const ITEM_FIELDS = ['name', 'quantity', 'width', 'height', 'unit', 'sided', 'condition', 'position', 'installationNotes', 'notes'] as const;
 
+/** The readable number of a board: "GSB-01" from its media type and seq; a board made before numbers existed is shown by its name. */
+export const boardLabel = (i: MediaItem) => (i.mediaType && i.seq ? `${i.mediaType}-${String(i.seq).padStart(2, '0')}` : i.name);
+
 /** A board item with every field present (null / empty when never set), so the app can rely on the shape. */
 export const presentItem = (i: MediaItem) => ({
-  key: i.key, name: i.name, quantity: i.quantity ?? 1, width: i.width ?? null, height: i.height ?? null, unit: i.unit ?? 'FT', notes: i.notes ?? '',
+  key: i.key, name: i.name, mediaType: i.mediaType ?? null, seq: i.seq ?? null, label: boardLabel(i), quantity: i.quantity ?? 1, width: i.width ?? null, height: i.height ?? null, unit: i.unit ?? 'FT', notes: i.notes ?? '',
   sided: i.sided ?? null, condition: i.condition ?? null, position: i.position ?? '', installationNotes: i.installationNotes ?? '',
 });
 

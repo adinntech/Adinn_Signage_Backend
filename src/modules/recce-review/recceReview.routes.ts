@@ -76,6 +76,7 @@ recceReviewRouter.get('/submissions/:id/versions/compare', asyncHandler(async (r
 recceReviewRouter.get('/submissions/:id/versions', asyncHandler(async (req, res) => ok(res, await r.reviewVersions(A(req), r.idParam.parse(req.params).id))));
 recceReviewRouter.post('/submissions/:id/start', asyncHandler(async (req, res) => ok(res, await r.markReviewStarted(A(req), r.idParam.parse(req.params).id))));
 recceReviewRouter.post('/submissions/:id/decision', asyncHandler(async (req, res) => ok(res, await r.decide(A(req), r.idParam.parse(req.params).id, r.decideBody.parse(req.body)))));
+recceReviewRouter.post('/submissions/:id/change-decision', asyncHandler(async (req, res) => ok(res, await r.changeDecision(A(req), r.idParam.parse(req.params).id, r.changeDecisionBody.parse(req.body)))));
 recceReviewRouter.post('/submissions/:id/override', asyncHandler(async (req, res) => ok(res, await r.override(A(req), r.idParam.parse(req.params).id, r.overrideBody.parse(req.body)))));
 recceReviewRouter.post('/submissions/:id/reopen', asyncHandler(async (req, res) => ok(res, await r.reopen(A(req), r.idParam.parse(req.params).id, r.reopenBody.parse(req.body)))));
 recceReviewRouter.put('/submissions/:id/reviewer', asyncHandler(async (req, res) => ok(res, await r.assignReviewer(A(req), r.idParam.parse(req.params).id, r.reviewerBody.parse(req.body)))));

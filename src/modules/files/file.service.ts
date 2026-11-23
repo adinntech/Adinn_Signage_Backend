@@ -29,12 +29,23 @@ const readableCategories = (role: string) => FILE_CATEGORIES.filter((c) => !CATE
 const sizeLimit = (k: FileKind) => (k === 'image' ? env.MAX_IMAGE_SIZE : k === 'video' ? env.MAX_VIDEO_SIZE : env.MAX_FILE_SIZE);
 const mb = (n: number) => `${Math.round((n / 1048576) * 10) / 10} MB`;
 
-/** Cheap content sniffing so a renamed file (e.g. an .exe called photo.jpg) is rejected. */
+/** True when the first bytes belong to a picture format: JPEG, PNG, WebP, GIF, BMP, or HEIC / HEIF / AVIF. */
+export function isImageContent(b: Buffer): boolean {
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true;
+  if (b.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))) return true;
+  if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return true;
+  if (/^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1'))) return true;
+  if (b.length > 14 && b[0] === 0x42 && b[1] === 0x4d && b.readUInt32LE(6) === 0) return true; // BMP: "BM", file size, 4 reserved zero bytes
+  return b.subarray(4, 8).toString('latin1') === 'ftyp' && /^(heic|heix|hevc|hevx|heim|heis|mif1|msf1|avif)$/.test(b.subarray(8, 12).toString('latin1'));
+}
+
+/**
+ * Cheap content sniffing so a renamed file (e.g. an .exe called photo.jpg) is rejected.
+ * A picture is accepted under ANY picture extension: a PNG screenshot saved as photo.jpg is still a picture.
+ */
 function contentMatches(name: string, b: Buffer): boolean {
   const n = name.toLowerCase();
-  if (/\.jpe?g$/.test(n)) return b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
-  if (n.endsWith('.png')) return b.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-  if (n.endsWith('.webp')) return b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP';
+  if (kindOfFile(n) === 'image') return isImageContent(b);
   if (n.endsWith('.pdf')) return b.subarray(0, 4).toString('latin1') === '%PDF';
   if (/\.(xlsx|docx|pptx)$/.test(n)) return b[0] === 0x50 && b[1] === 0x4b;
   if (n.endsWith('.mp4')) return b.subarray(4, 8).toString('latin1') === 'ftyp';

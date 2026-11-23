@@ -43,6 +43,7 @@ describe('folder scheme', () => {
   it('maps extensions to kinds and rejects executables', () => {
     expect(kindOfFile('a.XLSX')).toBe('sheet');
     expect(kindOfFile('a.jpg')).toBe('image');
+    for (const ext of ['png', 'webp', 'gif', 'bmp', 'heic', 'heif']) expect(kindOfFile(`a.${ext}`)).toBe('image');
     expect(kindOfFile('a.exe')).toBeNull();
     expect(CATEGORY_RULES.RECCE_IMAGE_ORIGINAL.evidence).toBe(true);
     expect(CATEGORY_RULES.BD_CLIENT_DETAILS.evidence).toBe(false);

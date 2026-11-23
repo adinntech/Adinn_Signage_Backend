@@ -60,7 +60,14 @@ const mediaItemSchema = new Schema(
     height: { type: Number, min: 0, max: 100000 },
     unit: { type: String, enum: ['FT', 'IN', 'M', 'CM', 'MM'], default: 'FT' },
     notes: { type: String, maxlength: 500 },
-    /** One physical board per item: boards of different sizes are separate items with their own key. */
+    /**
+     * One physical board per item. `key` is its permanent id (photos, reviews and rework point at it through `mediaKey`).
+     * `mediaType` (the media type's short name as the person saw it, e.g. "GSB" or "ACP 2D") and `seq` give its readable number:
+     * GSB seq 1 = "GSB-01". The label is permanent: a later rename of the media type does not change boards already numbered. Both are optional:
+     * boards made before 2026-11-23 have neither and may carry a `quantity` above 1 (one line for several identical boards).
+     */
+    mediaType: { type: String, maxlength: 30 },
+    seq: { type: Number, min: 1, max: 99 },
     sided: { type: String, enum: ['SINGLE', 'DOUBLE'] },
     condition: { type: String, enum: ['EXISTING', 'PROPOSED'] },
     position: { type: String, maxlength: 120 },
@@ -159,6 +166,8 @@ const reviewSchema = new Schema({
   checklist: [{ _id: false, key: String, label: String, passed: Boolean }],
   /** An Admin decided for this stage: who and why are kept. */
   override: { type: new Schema({ by: { type: Schema.Types.ObjectId, ref: 'User' }, reason: String }, { _id: false }) },
+  /** Earlier answers of this stage, oldest first. A stage that approved may later change its decision (see `changeDecision`); the answer it replaced is kept here. */
+  history: [{ _id: false, decision: String, reviewer: { type: Schema.Types.ObjectId, ref: 'User' }, reviewerRole: String, decidedAt: Date, comment: { type: String, default: '' }, changedAt: Date }],
 });
 
 /** What a reviewer asked to fix, item by item. */

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Types } from 'mongoose';
 import { z } from 'zod';
+import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { escapeRegex, objectId, pageMeta, type Actor } from '../../common/query';
 import { postShopMessage } from '../connect/connect.service';
@@ -30,7 +31,9 @@ export const mediaItemBody = z.object({
   height: z.coerce.number().min(0).max(100000).optional(),
   unit: z.enum(['FT', 'IN', 'M', 'CM', 'MM']).default('FT'),
   notes: text(500).optional(),
-  // One physical board per item. Boards of different sizes are separate items, each with its own key (max 20 characters).
+  // One physical board per item. Each has its own key (max 20 characters); `mediaType` + `seq` make its number ("GSB-01"), unique per shop.
+  mediaType: z.string().trim().min(1).max(30).optional(),
+  seq: z.coerce.number().int().min(1).max(99).optional(),
   sided: z.enum(['SINGLE', 'DOUBLE']).optional(),
   condition: z.enum(['EXISTING', 'PROPOSED']).optional(),
   position: text(120).optional(),
@@ -239,6 +242,8 @@ export async function saveDraft(actor: Actor, siteId: string, input: z.infer<typ
   if (input.mediaItems) {
     const keys = input.mediaItems.map((i) => i.key);
     if (new Set(keys).size !== keys.length) throw AppError.badRequest('Each media type needs its own key');
+    const numbers = input.mediaItems.filter((i) => i.mediaType && i.seq).map((i) => `${i.mediaType!.toLowerCase()}-${i.seq}`);
+    if (new Set(numbers).size !== numbers.length) throw AppError.badRequest('Two boards have the same number');
     // A media type that already has photos cannot be dropped, or those photos would be orphaned.
     const used = new Set(sub.photos.filter((p) => isLivePhoto(p) && p.mediaKey).map((p) => p.mediaKey as string));
     const lost = [...used].filter((k) => !keys.includes(k));
@@ -320,7 +325,8 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
   const seen = new Set<string>();
   for (const x of fresh) {
     if (x.m.mediaKey && !keys.has(x.m.mediaKey)) throw AppError.badRequest('Unknown media type for a photo');
-    if (live.some((p) => p.original?.sha256 === x.h) || seen.has(x.h)) throw AppError.conflict(`${x.f.originalname} is already uploaded for this shop`);
+    // The same content twice in one shop is refused, except when the testing switch is on (one picture for every photo type).
+    if (!env.allowDuplicateRecce && (live.some((p) => p.original?.sha256 === x.h) || seen.has(x.h))) throw AppError.conflict(`${x.f.originalname} is already uploaded for this shop`);
     seen.add(x.h);
     if (x.m.replaces && !sub.photos.some((p) => String(p._id) === String(x.m.replaces) && p.state === 'SUBMITTED')) throw AppError.badRequest('The photo to replace was not found');
   }
