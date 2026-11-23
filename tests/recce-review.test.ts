@@ -58,6 +58,9 @@ beforeAll(async () => {
   ({ Notification } = await import('../src/modules/notifications/notification.model'));
   const { Site } = await import('../src/modules/sites/site.model');
   app = (await import('../src/app')).createApp();
+  // These tests cover the ordered review (Operations first, then Client Servicing). The default is parallel review since 2026-11-23, see tests/recce-19steps.test.ts.
+  const { RecceConfig } = await import('../src/modules/recce-review/recceReview.model');
+  await RecceConfig.updateOne({ key: 'default' }, { $set: { sequential: true } }, { upsert: true });
 
   const kyc = { pan: true, gst: true, bank: true, address: true };
   const mk = (code: string) => Vendor.create({ code, name: code, nameKey: code, type: 'ORGANIZATION', mobile: '9000000000', status: 'ACTIVE', kyc });

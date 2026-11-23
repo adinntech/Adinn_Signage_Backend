@@ -12,7 +12,7 @@ import { RecceTrip, VendorRecceCost } from '../recce-cost/recceCost.model';
 import { SurveyArea } from './surveyArea.model';
 import { ConnectChannel, ConnectMessage } from '../connect/connect.model';
 import { JourneyComment } from '../journey/journeyComment.model';
-import { RecceSubmission, ReccePhoto, RecceVersion, RecceReview, RecceRework, RecceThreadRead } from '../recce-review/recceReview.model';
+import { RecceSubmission, RecceThreadRead } from '../recce-review/recceReview.model';
 import { NoteDraft, ProjectNote, ProjectVoiceNote } from '../workspace/workspace.model';
 
 /**
@@ -40,11 +40,8 @@ export const PROJECT_OWNED: { name: string; model: Model<any>; field: string }[]
   { name: 'Note drafts', model: NoteDraft, field: 'project' },
   { name: 'Voice notes', model: ProjectVoiceNote, field: 'project' },
   { name: 'Journey comments', model: JourneyComment, field: 'project' },
+  // One document per shop: its photos, versions, reviews and rework requests are embedded, so this one line removes them all.
   { name: 'Recce submissions', model: RecceSubmission, field: 'project' },
-  { name: 'Recce photos', model: ReccePhoto, field: 'project' },
-  { name: 'Recce versions', model: RecceVersion, field: 'project' },
-  { name: 'Recce reviews', model: RecceReview, field: 'project' },
-  { name: 'Recce rework requests', model: RecceRework, field: 'project' },
   { name: 'Recce thread read markers', model: RecceThreadRead, field: 'project' },
   { name: 'Notifications', model: Notification, field: 'project' },
   { name: 'Audit history', model: AuditLog, field: 'project' },

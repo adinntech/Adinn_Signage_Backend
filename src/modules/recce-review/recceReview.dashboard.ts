@@ -9,11 +9,11 @@ import { Site } from '../sites/site.model';
 import { Vendor } from '../vendors/vendor.model';
 import { oid, reviewProjectIds } from './recceReview.common';
 import { mineFilter } from './recceReview.field';
-import { RecceReview, RecceRework, RecceSubmission, RecceVersion } from './recceReview.model';
+import { RecceSubmission } from './recceReview.model';
 
 /**
- * Dashboards, computed from the real submission, version, review and rework records with a handful of indexed queries ($in on the
- * shops in scope), never one query per shop. One set of definitions serves the field user and the staff view:
+ * Dashboards, computed from the real submission documents (each carries its versions, reviews and reworks) with one indexed query
+ * ($in on the shops in scope), never one query per shop. One set of definitions serves the field user and the staff view:
  *
  *   started        the shop has a recce record (the visit was started)
  *   submitted      the shop has been submitted at least once (any version)
@@ -28,35 +28,30 @@ import { RecceReview, RecceRework, RecceSubmission, RecceVersion } from './recce
  *   avgCompletionHours  mean of (finalApprovedAt - startedAt) over completed shops that have both dates, 1 decimal, null when none
  */
 
-type SubRow = { _id: Types.ObjectId; project: Types.ObjectId; site: Types.ObjectId; channel?: string | null | undefined; vendor?: Types.ObjectId | null | undefined; status: string; currentVersion?: number | null | undefined; startedAt?: Date | null | undefined; createdAt?: Date | null | undefined; finalApprovedAt?: Date | null | undefined };
-const SUB_FIELDS = 'project site channel vendor status currentVersion startedAt createdAt finalApprovedAt';
+type SubRow = {
+  _id: Types.ObjectId; project: Types.ObjectId; site: Types.ObjectId; channel?: string | null | undefined; vendor?: Types.ObjectId | null | undefined; status: string; currentVersion?: number | null | undefined; startedAt?: Date | null | undefined; createdAt?: Date | null | undefined; finalApprovedAt?: Date | null | undefined;
+  versions?: { version: number; stages?: string[] | null | undefined }[] | undefined; reviews?: { versionNo: number; stage: string; decision?: string | null | undefined }[] | undefined; reworks?: { _id: Types.ObjectId }[] | undefined;
+};
+/** Only what the counts need. The photos stay out of the read (a shop can hold 40 of them). */
+const SUB_FIELDS = 'project site channel vendor status currentVersion startedAt createdAt finalApprovedAt versions.version versions.stages reviews.versionNo reviews.stage reviews.decision reworks._id';
 
 type Tally = { started: number; submitted: number; underReview: number; approved: number; rework: number; completed: number; reworkShops: number; hoursSum: number; hoursN: number };
 const tally = (): Tally => ({ started: 0, submitted: 0, underReview: 0, approved: 0, rework: 0, completed: 0, reworkShops: 0, hoursSum: 0, hoursN: 0 });
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
-/** Which of these shops are completed, and which ever had rework: three queries for any number of shops. */
-async function evidence(subs: SubRow[]) {
-  const ids = subs.map((s) => s._id);
-  if (!ids.length) return { completed: new Set<string>(), reworked: new Set<string>() };
-  const [versions, approvedRows, reworks] = await Promise.all([
-    RecceVersion.find({ submission: { $in: ids } }).select('submission version stages').lean(),
-    RecceReview.find({ submission: { $in: ids }, decision: 'APPROVED' }).select('submission versionNo stage').lean(),
-    RecceRework.distinct('submission', { submission: { $in: ids } }),
-  ]);
-  const stagesOf = new Map(versions.map((v) => [`${String(v.submission)}:${v.version}`, (v.stages ?? []) as string[]]));
-  const approvedBy = new Map<string, Set<string>>();
-  for (const r of approvedRows) {
-    const k = `${String(r.submission)}:${r.versionNo}`;
-    approvedBy.set(k, (approvedBy.get(k) ?? new Set()).add(r.stage));
-  }
+/** Which of these shops are completed, and which ever had rework. No query at all: each shop's document carries its own versions, reviews and reworks. */
+function evidence(subs: SubRow[]) {
   const completed = new Set<string>();
+  const reworked = new Set<string>();
   for (const s of subs) {
-    const k = `${String(s._id)}:${s.currentVersion ?? 0}`;
-    const need = stagesOf.get(k) ?? [];
-    if (s.status === 'APPROVED' && (s.currentVersion ?? 0) > 0 && need.length > 0 && need.every((st) => approvedBy.get(k)?.has(st))) completed.add(String(s._id));
+    const id = String(s._id);
+    if ((s.reworks?.length ?? 0) > 0) reworked.add(id);
+    const cur = s.currentVersion ?? 0;
+    const need = (s.versions ?? []).find((v) => v.version === cur)?.stages ?? [];
+    const approved = new Set((s.reviews ?? []).filter((r) => r.versionNo === cur && r.decision === 'APPROVED').map((r) => r.stage));
+    if (s.status === 'APPROVED' && cur > 0 && need.length > 0 && need.every((st) => approved.has(st))) completed.add(id);
   }
-  return { completed, reworked: new Set(reworks.map(String)) };
+  return { completed, reworked };
 }
 
 function add(t: Tally, s: SubRow, ev: Awaited<ReturnType<typeof evidence>>) {
@@ -89,7 +84,7 @@ export async function fieldDashboard(actor: Actor) {
   const projects = new Map((await Project.find({ _id: { $in: [...new Set(sites.map((s) => String(s.project)))] }, deletedAt: null, status: { $nin: ['CANCELLED', 'LOSS'] } }).select('code name').lean()).map((p) => [String(p._id), p]));
   const mine = sites.filter((s) => projects.has(String(s.project)));
   const subs = (await RecceSubmission.find({ site: { $in: mine.map((s) => s._id) } }).select(SUB_FIELDS).lean()) as unknown as SubRow[];
-  const ev = await evidence(subs);
+  const ev = evidence(subs);
   const total = tally();
   const per = new Map<string, { assigned: number; t: Tally }>();
   for (const s of mine) { const c = per.get(String(s.project)) ?? { assigned: 0, t: tally() }; c.assigned++; per.set(String(s.project), c); }
@@ -124,7 +119,7 @@ export async function performance(actor: Actor, q: z.infer<typeof performanceQue
   const rows = (await RecceSubmission.find(filter).select(SUB_FIELDS).lean()) as unknown as SubRow[];
   const projects = new Map((await Project.find({ _id: { $in: [...new Set(rows.map((s) => String(s.project)))] }, deletedAt: null }).select('code name').lean()).map((p) => [String(p._id), p]));
   const subs = rows.filter((s) => projects.has(String(s.project)));
-  const ev = await evidence(subs);
+  const ev = evidence(subs);
 
   const all = tally(), inHouse = tally(), vendor = tally();
   const byProject = new Map<string, { inHouse: Tally; vendor: Tally; all: Tally }>();

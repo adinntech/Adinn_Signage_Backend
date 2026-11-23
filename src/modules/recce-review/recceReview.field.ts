@@ -11,11 +11,11 @@ import { Project } from '../projects/project.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import {
-  assertProjectOpen, clientNameFor, CLOSED_PROJECT, displayStatus, EDITABLE, FIELD_ROLES, getConfig, hasUsableGps, installationPending, logEvent, missingFor, nameMap, oid, presentInstallation, presentPhoto, requiredCategories, reviewPath, roleMap, seedItems, siteLabel, stageRecipients, type Config, type MediaItem,
+  assertProjectOpen, clientNameFor, CLOSED_PROJECT, displayStatus, EDITABLE, FIELD_ROLES, getConfig, hasUsableGps, installationPending, isLivePhoto, logEvent, missingFor, nameMap, oid, presentInstallation, presentPhoto, requiredCategories, reviewPath, roleMap, seedItems, siteLabel, stageRecipients, timeOf, type Config, type MediaItem,
 } from './recceReview.common';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
-import { photoHistory, photoReviews, presentItem, versionHistory, compareVersions, compareQuery } from './recceReview.versions';
-import { CATEGORY_LABEL, ELECTRICAL_ACCESS, PHOTO_CATEGORIES, PHOTO_SOURCES, REVIEW_STAGES, TRI_STATES, ReccePhoto, RecceReview, RecceRework, RecceSubmission, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
+import { byPhotoOrder, photoHistory, photoReviews, presentItem, versionHistory, compareVersions, compareQuery } from './recceReview.versions';
+import { CATEGORY_LABEL, ELECTRICAL_ACCESS, PHOTO_CATEGORIES, PHOTO_SOURCES, REVIEW_STAGES, TRI_STATES, RecceSubmission, STAGE_LABEL, type ReviewStage } from './recceReview.model';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
 
@@ -151,13 +151,10 @@ export async function myShops(actor: Actor, q: z.infer<typeof myShopsQuery>) {
   if (q.q) { const re = new RegExp(escapeRegex(q.q), 'i'); filter.$and = [{ $or: [{ shopName: re }, { siteCode: re }, { district: re }, { location: re }] }]; }
   const sites = await Site.find(filter).select('project siteCode seq shopName dealerName location district address1 address2 address3 pincode mobile contactPerson boardType width height unit quantity remarks assignedTo assignedToAt').sort({ project: 1, seq: 1 }).lean();
   const cfg = await getConfig();
-  const subs = await RecceSubmission.find({ site: { $in: sites.map((s) => s._id) } }).lean();
+  // The photos and rework requests of a shop are inside its own document: one read, only the few fields the list needs.
+  const subs = await RecceSubmission.find({ site: { $in: sites.map((s) => s._id) } }).select('site status currentVersion mediaItems photos.category photos.mediaKey photos.state reworks.status').lean();
   const subBy = new Map(subs.map((s) => [String(s.site), s]));
-  const photos = await ReccePhoto.find({ submission: { $in: subs.map((s) => s._id) }, state: { $in: ['DRAFT', 'SUBMITTED'] } }).select('submission category mediaKey state').lean();
-  const photosBy = new Map<string, typeof photos>();
-  for (const p of photos) photosBy.set(String(p.submission), [...(photosBy.get(String(p.submission)) ?? []), p]);
-  const reworks = await RecceRework.find({ submission: { $in: subs.map((s) => s._id) }, status: 'OPEN' }).select('submission').lean();
-  const reworkBy = new Set(reworks.map((r) => String(r.submission)));
+  const reworkBy = new Set(subs.filter((s) => (s.reworks ?? []).some((r) => r.status === 'OPEN')).map((s) => String(s._id)));
   const projects = new Map((await Project.find({ _id: { $in: [...new Set(sites.map((s) => String(s.project)))] } }).select('code name client clientDetails requirementType targetDate status').lean()).map((p) => [String(p._id), p]));
   const clientNames = new Map<string, string | null>();
   for (const p of projects.values()) clientNames.set(String(p._id), await clientNameFor(p));
@@ -165,7 +162,7 @@ export async function myShops(actor: Actor, q: z.infer<typeof myShopsQuery>) {
   let rows = sites.map((s) => {
     const sub = subBy.get(String(s._id)) ?? null;
     const project = projects.get(String(s.project))!;
-    const ph = sub ? (photosBy.get(String(sub._id)) ?? []) : [];
+    const ph = (sub?.photos ?? []).filter(isLivePhoto);
     const items = sub?.mediaItems?.length ? (sub.mediaItems as unknown as MediaItem[]) : seedItems(s);
     const m = missingFor(cfg, items, ph.map((p) => ({ _id: p._id, category: p.category, mediaKey: p.mediaKey, state: p.state })), project?.requirementType);
     const draftCount = ph.filter((p) => p.state === 'DRAFT').length;
@@ -190,14 +187,14 @@ export async function shopDetail(actor: Actor, siteId: string) {
   const site = await mySite(actor, siteId);
   const [project, cfg, sub] = await Promise.all([projectOf(site.project), getConfig(), RecceSubmission.findOne({ site: site._id }).lean()]);
   const items = (sub?.mediaItems?.length ? sub.mediaItems : seedItems(site)) as unknown as MediaItem[];
-  const photos = sub ? await ReccePhoto.find({ submission: sub._id, state: { $in: ['DRAFT', 'SUBMITTED'] } }).sort({ order: 1, createdAt: 1 }).lean() : [];
+  const photos = (sub?.photos ?? []).filter(isLivePhoto).sort(byPhotoOrder);
   const [names, roles] = await Promise.all([nameMap(photos.map((p) => p.uploadedBy)), roleMap(photos.map((p) => p.uploadedBy))]);
   const m = missingFor(cfg, items, photos.map((p) => ({ _id: p._id, category: p.category, mediaKey: p.mediaKey, state: p.state })), project.requirementType);
   const draftCount = photos.filter((p) => p.state === 'DRAFT').length;
-  const versions = sub ? await RecceVersion.find({ submission: sub._id }).sort({ version: -1 }).lean() : [];
-  const reviews = sub ? await RecceReview.find({ submission: sub._id }).sort({ versionNo: -1, stage: 1 }).lean() : [];
+  const versions = [...(sub?.versions ?? [])].sort((a, b) => b.version - a.version);
+  const reviews = [...(sub?.reviews ?? [])].sort((a, b) => b.versionNo - a.versionNo || a.stage.localeCompare(b.stage));
   const reviewers = await nameMap(reviews.map((r) => r.reviewer));
-  const reworks = sub ? await RecceRework.find({ submission: sub._id }).sort({ createdAt: -1 }).lean() : [];
+  const reworks = [...(sub?.reworks ?? [])].sort((a, b) => timeOf(b.createdAt) - timeOf(a.createdAt));
   const requestedBy = await nameMap(reworks.map((r) => r.requestedBy));
   const reviewOf = photoReviews(photos, reworks as never, sub?.status, requestedBy);
   const status = displayStatus(sub, draftCount, m.missing.length === 0);
@@ -243,8 +240,8 @@ export async function saveDraft(actor: Actor, siteId: string, input: z.infer<typ
     const keys = input.mediaItems.map((i) => i.key);
     if (new Set(keys).size !== keys.length) throw AppError.badRequest('Each media type needs its own key');
     // A media type that already has photos cannot be dropped, or those photos would be orphaned.
-    const used = await ReccePhoto.distinct('mediaKey', { submission: sub._id, state: { $in: ['DRAFT', 'SUBMITTED'] }, mediaKey: { $ne: '' } });
-    const lost = used.filter((k) => !keys.includes(k));
+    const used = new Set(sub.photos.filter((p) => isLivePhoto(p) && p.mediaKey).map((p) => p.mediaKey as string));
+    const lost = [...used].filter((k) => !keys.includes(k));
     if (lost.length) throw AppError.conflict('A media type that has photos cannot be removed. Delete or move its photos first.');
     sub.set('mediaItems', input.mediaItems);
   }
@@ -313,66 +310,73 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
   assertEditable(sub.status);
   const cfg = await getConfig();
   validateFiles('RECCE_SHOP_PHOTO', files);
-  const live = await ReccePhoto.find({ submission: sub._id, state: { $in: ['DRAFT', 'SUBMITTED'] } }).select('sha256 original.sha256 clientId category mediaKey').lean();
+  // The photos are part of the shop's one document, so everything below is read from `sub` and written with one atomic update.
+  const live = sub.photos.filter(isLivePhoto);
   const keys = new Set(sub.mediaItems.map((i) => i.key));
   const hashes = files.map((f) => createHash('sha256').update(f.buffer).digest('hex'));
-  const existing = await ReccePhoto.find({ submission: sub._id, clientId: { $in: metas.map((m) => m.clientId).filter(Boolean) as string[] } }).lean();
-  const known = new Map(existing.map((p) => [p.clientId!, p]));
+  const known = new Set(sub.photos.map((p) => p.clientId).filter((c): c is string => !!c));
   const fresh = files.map((f, i) => ({ f, m: metas[i]!, h: hashes[i]! })).filter((x) => !(x.m.clientId && known.has(x.m.clientId)));
   if (live.length + fresh.length > cfg.maxPhotos) throw AppError.badRequest(`A shop can hold ${cfg.maxPhotos} photos`);
   const seen = new Set<string>();
   for (const x of fresh) {
     if (x.m.mediaKey && !keys.has(x.m.mediaKey)) throw AppError.badRequest('Unknown media type for a photo');
-    if (live.some((p) => p.original && (p as { original?: { sha256?: string } }).original?.sha256 === x.h) || seen.has(x.h)) throw AppError.conflict(`${x.f.originalname} is already uploaded for this shop`);
+    if (live.some((p) => p.original?.sha256 === x.h) || seen.has(x.h)) throw AppError.conflict(`${x.f.originalname} is already uploaded for this shop`);
     seen.add(x.h);
-    if (x.m.replaces) {
-      const old = await ReccePhoto.findOne({ _id: x.m.replaces, submission: sub._id, state: 'SUBMITTED' }).select('_id').lean();
-      if (!old) throw AppError.badRequest('The photo to replace was not found');
-    }
+    if (x.m.replaces && !sub.photos.some((p) => String(p._id) === String(x.m.replaces) && p.state === 'SUBMITTED')) throw AppError.badRequest('The photo to replace was not found');
   }
+  if (!fresh.length) return shopDetail(actor, siteId); // every photo was already stored (a retry): nothing to add
   const project = await projectOf(site.project);
   const clientName = (await clientNameFor(project)) ?? 'Client';
   const now = new Date();
-  const base = await ReccePhoto.countDocuments({ submission: sub._id });
+  const base = sub.photos.length;
   const stored: StoredFile[] = [];
-  const created: InstanceType<typeof ReccePhoto>[] = [];
+  const entries: Record<string, unknown>[] = [];
   try {
     for (const [i, x] of fresh.entries()) {
       const file = await storeEmbeddedFile({ category: 'RECCE_SHOP_PHOTO', clientName, folderKey: `${project.code}_${site.siteCode}`, file: x.f, actor, owner: { entity: 'RecceSubmission', id: sub._id } });
       stored.push(file);
-      const doc = await ReccePhoto.create({
-        project: site.project, site: site._id, submission: sub._id, mediaKey: x.m.mediaKey, category: x.m.category, caption: x.m.caption, order: base + i, state: 'DRAFT', original: file as never,
+      entries.push({
+        _id: new Types.ObjectId(), mediaKey: x.m.mediaKey, category: x.m.category, caption: x.m.caption, order: base + i, state: 'DRAFT', original: file,
         capturedAt: x.m.capturedAt, lat: x.m.lat, lng: x.m.lng, gpsAccuracy: x.m.gpsAccuracy, source: x.m.source, device: x.m.device, width: x.m.width, height: x.m.height, flags: flagsFor(x.m, site, cfg, now),
-        uploadedBy: actor.id, clientId: x.m.clientId, replaces: x.m.replaces,
+        uploadedBy: actor.id, clientId: x.m.clientId, replaces: x.m.replaces, createdAt: now,
       });
-      created.push(doc as unknown as InstanceType<typeof ReccePhoto>);
     }
+    // One atomic push. It only lands while the shop is still open for edits and none of these clientIds was stored in the meantime
+    // (the same photo sent twice at once): the second request finds nothing to match and is refused, so a photo is never stored twice.
+    const sent = fresh.map((x) => x.m.clientId).filter((c): c is string => !!c);
+    const pushed = await RecceSubmission.updateOne({ _id: sub._id, status: { $in: EDITABLE }, 'photos.clientId': { $nin: sent } }, { $push: { photos: { $each: entries } } }, { runValidators: true });
+    if (!pushed.modifiedCount) throw AppError.conflict('These photos could not be saved: the shop was just submitted, or the same photo arrived twice at once. Reload and try again.');
   } catch (e) {
     await discardStoredFiles(stored);
-    await ReccePhoto.deleteMany({ _id: { $in: created.map((c) => c._id) } });
-    if ((e as { code?: number }).code === 11000) throw AppError.conflict('This photo was uploaded at the same time from another request. Reload and try again.');
     throw e;
   }
-  for (const d of created) await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: d.replaces ? 'PHOTO_REPLACED' : 'PHOTO_CAPTURED', mediaKey: d.mediaKey ?? undefined, photo: d._id, changes: [{ field: 'category', oldValue: null, newValue: d.category }] });
+  for (const d of entries) await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: d.replaces ? 'PHOTO_REPLACED' : 'PHOTO_CAPTURED', mediaKey: (d.mediaKey as string) || undefined, photo: d._id as Types.ObjectId, changes: [{ field: 'category', oldValue: null, newValue: d.category }] });
   return shopDetail(actor, siteId);
 }
 
+/** The shop's document and one photo of it (a photo id that is not in this shop is "not found", never another shop's photo). */
 async function myPhoto(actor: Actor, siteId: string, photoId: string) {
   const site = await mySite(actor, siteId);
   const sub = await RecceSubmission.findOne({ site: site._id });
-  const photo = sub ? await ReccePhoto.findOne({ _id: photoId, submission: sub._id }) : null;
+  const photo = sub?.photos.id(photoId);
   if (!sub || !photo) throw AppError.notFound('Photo not found');
   return { site, sub, photo };
 }
+
+/** Matches the shop while it is still open for edits and the photo is still a draft. */
+const draftPhotoOf = (subId: Types.ObjectId, photoId: Types.ObjectId) => ({ _id: subId, status: { $in: EDITABLE }, photos: { $elemMatch: { _id: photoId, state: 'DRAFT' } } });
 
 export async function patchPhoto(actor: Actor, siteId: string, photoId: string, input: z.infer<typeof photoPatch>) {
   const { site, sub, photo } = await myPhoto(actor, siteId, photoId);
   assertEditable(sub.status);
   if (photo.state !== 'DRAFT') throw AppError.conflict('A submitted photo cannot be edited. Replace it with a new photo.');
   if (input.mediaKey && !sub.mediaItems.some((i) => i.key === input.mediaKey)) throw AppError.badRequest('Unknown media type');
-  Object.assign(photo, input);
-  await photo.save();
-  await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'DRAFT_SAVED', photo: photo._id, mediaKey: photo.mediaKey ?? undefined });
+  const set = Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined).map(([k, v]) => [`photos.$.${k}`, v]));
+  if (Object.keys(set).length) {
+    const r = await RecceSubmission.updateOne(draftPhotoOf(sub._id, photo._id), { $set: set }, { runValidators: true });
+    if (!r.matchedCount) throw AppError.conflict('This photo can no longer be edited. Reload and try again.');
+  }
+  await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'DRAFT_SAVED', photo: photo._id, mediaKey: (input.mediaKey ?? photo.mediaKey) || undefined });
   return shopDetail(actor, siteId);
 }
 
@@ -381,9 +385,9 @@ export async function reorderPhotos(actor: Actor, siteId: string, ids: string[])
   const sub = await RecceSubmission.findOne({ site: site._id });
   if (!sub) throw AppError.notFound('Photo not found');
   assertEditable(sub.status);
-  const mine = await ReccePhoto.find({ submission: sub._id, _id: { $in: ids }, state: 'DRAFT' }).select('_id').lean();
-  if (mine.length !== ids.length) throw AppError.badRequest('Only draft photos of this shop can be reordered');
-  await ReccePhoto.bulkWrite(ids.map((id, i) => ({ updateOne: { filter: { _id: id }, update: { $set: { order: i } } } })));
+  const drafts = new Set(sub.photos.filter((p) => p.state === 'DRAFT').map((p) => String(p._id)));
+  if (new Set(ids).size !== ids.length || ids.some((id) => !drafts.has(String(id).toLowerCase()))) throw AppError.badRequest('Only draft photos of this shop can be reordered');
+  await RecceSubmission.bulkWrite(ids.map((id, i) => ({ updateOne: { filter: { _id: sub._id, status: { $in: EDITABLE } }, update: { $set: { 'photos.$[p].order': i } }, arrayFilters: [{ 'p._id': oid(id), 'p.state': 'DRAFT' }] } })));
   return shopDetail(actor, siteId);
 }
 
@@ -398,10 +402,9 @@ export async function annotatePhoto(actor: Actor, siteId: string, photoId: strin
     file = await storeEmbeddedFile({ category: 'RECCE_SHOP_PHOTO', clientName: (await clientNameFor(project)) ?? 'Client', folderKey: `${project.code}_${site.siteCode}`, file: edited, actor, owner: { entity: 'RecceSubmission', id: sub._id } });
   }
   const old = photo.edited as unknown as StoredFile | undefined;
-  photo.set('annotations', input.annotations);
-  if (file) photo.set('edited', file);
   try {
-    await photo.save();
+    const r = await RecceSubmission.updateOne(draftPhotoOf(sub._id, photo._id), { $set: { 'photos.$.annotations': input.annotations, ...(file ? { 'photos.$.edited': file } : {}) } });
+    if (!r.matchedCount) throw AppError.conflict('This photo can no longer be edited. Reload and try again.');
   } catch (e) {
     if (file) await discardStoredFiles([file]);
     throw e;
@@ -420,7 +423,8 @@ export async function deletePhoto(actor: Actor, siteId: string, photoId: string,
   assertEditable(sub.status);
   if (photo.state === 'DRAFT') {
     if (String(photo.uploadedBy) !== actor.id) throw AppError.forbidden('Only the person who uploaded a draft photo can delete it');
-    await ReccePhoto.deleteOne({ _id: photo._id, state: 'DRAFT' });
+    const gone = await RecceSubmission.updateOne(draftPhotoOf(sub._id, photo._id), { $pull: { photos: { _id: photo._id, state: 'DRAFT' } } });
+    if (!gone.modifiedCount) throw AppError.conflict('This photo was already changed. Reload and try again.');
     for (const f of [photo.original, photo.edited] as unknown as (StoredFile | undefined)[]) if (f?.key) await eraseStoredFile(f, actor, { entity: 'RecceSubmission', id: sub._id });
     await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'PHOTO_DELETED', photo: photo._id, mediaKey: photo.mediaKey ?? undefined, reason, changes: [{ field: 'category', oldValue: photo.category, newValue: null }] });
     return shopDetail(actor, siteId);
@@ -428,7 +432,7 @@ export async function deletePhoto(actor: Actor, siteId: string, photoId: string,
   if (photo.state !== 'SUBMITTED') throw AppError.conflict('This photo is already removed');
   if (sub.status !== 'REWORK_REQUIRED') throw AppError.conflict('A submitted photo can only be removed while rework is requested');
   if (!reason || reason.trim().length < 3) throw AppError.badRequest('Give a reason for removing a submitted photo');
-  const r = await ReccePhoto.updateOne({ _id: photo._id, state: 'SUBMITTED' }, { $set: { state: 'REMOVED', removedAt: new Date(), removedBy: actor.id, removeReason: reason.trim() } });
+  const r = await RecceSubmission.updateOne({ _id: sub._id, photos: { $elemMatch: { _id: photo._id, state: 'SUBMITTED' } } }, { $set: { 'photos.$.state': 'REMOVED', 'photos.$.removedAt': new Date(), 'photos.$.removedBy': actor.id, 'photos.$.removeReason': reason.trim() } });
   if (!r.modifiedCount) throw AppError.conflict('This photo was already removed');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'PHOTO_REMOVED', photo: photo._id, mediaKey: photo.mediaKey ?? undefined, reason: reason.trim(), visibility: 'REVIEW', changes: [{ field: 'state', oldValue: 'SUBMITTED', newValue: 'REMOVED' }] });
   return shopDetail(actor, siteId);
@@ -453,13 +457,13 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   const site = await mySite(actor, siteId);
   await assertProjectOpen(site.project);
   const sub = await ensureSubmission(actor, site);
-  const again = await RecceVersion.findOne({ submission: sub._id, idempotencyKey: input.idempotencyKey }).lean();
+  const again = sub.versions.find((v) => v.idempotencyKey === input.idempotencyKey);
   if (again) return { duplicate: true, version: again.version, detail: await shopDetail(actor, siteId) };
   assertEditable(sub.status);
   const project = await projectOf(site.project);
   const cfg = await getConfig();
-  if (input.notes !== undefined) sub.notes = input.notes;
-  const photos = await ReccePhoto.find({ submission: sub._id, state: { $in: ['DRAFT', 'SUBMITTED'] } }).sort({ order: 1, createdAt: 1 }).lean();
+  const notes = input.notes ?? sub.notes;
+  const photos = sub.photos.filter(isLivePhoto).sort(byPhotoOrder);
   const items = sub.mediaItems as unknown as MediaItem[];
   const m = missingFor(cfg, items, photos.map((p) => ({ _id: p._id, category: p.category, mediaKey: p.mediaKey, state: p.state })), project.requirementType);
   if (!photos.length) throw AppError.badRequest('Add at least one photo before submitting');
@@ -473,7 +477,7 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   }
 
   // Open rework must be answered: every replacement / extra photo it asked for needs a new draft photo.
-  const reworks = await RecceRework.find({ submission: sub._id, status: 'OPEN' });
+  const reworks = sub.reworks.filter((r) => r.status === 'OPEN');
   const drafts = photos.filter((p) => p.state === 'DRAFT');
   const unresolved: string[] = [];
   for (const rw of reworks) {
@@ -488,46 +492,54 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   const pending = installationPending(sub.installation as never);
   if (pending.length) throw AppError.badRequest(`Installation feasibility is incomplete. Answer: ${pending.join(', ')}`, pending.map((f) => ({ path: `installation.${f}`, message: `${f} is not assessed` })));
 
-  const prev = await RecceVersion.findOne({ submission: sub._id }).sort({ version: -1 }).lean();
+  const prev = [...sub.versions].sort((a, b) => b.version - a.version)[0];
   const versionNo = (prev?.version ?? 0) + 1;
   const stages = (cfg.stages as ReviewStage[]).filter((s) => REVIEW_STAGES.includes(s));
   const now = new Date();
   const dueAt = new Date(now.getTime() + cfg.slaHours * 3600_000);
-  const replaced = drafts.filter((d) => d.replaces).map((d) => d.replaces!);
+  const replacing = drafts.filter((d) => d.replaces);
+  const replaced = replacing.map((d) => d.replaces!);
   const keep = photos.filter((p) => !replaced.some((r) => String(r) === String(p._id)));
-  const gone = await ReccePhoto.find({ submission: sub._id, state: { $in: ['REMOVED'] }, ...(prev ? { removedAt: { $gt: prev.submittedAt } } : {}) }).select('_id').lean();
+  const gone = sub.photos.filter((p) => p.state === 'REMOVED' && (!prev || (p.removedAt && p.removedAt > prev.submittedAt)));
+  const first = stages[0]!;
 
-  let version;
-  try {
-    version = await RecceVersion.create({
-      project: sub.project, site: site._id, submission: sub._id, version: versionNo, submittedBy: actor.id, submittedAt: now, photos: keep.map((p) => p._id), added: drafts.map((p) => p._id),
-      removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems, notes: sub.notes, installation: presentInstallation(sub.installation as never) as never, stages, sequential: cfg.sequential, dueAt, idempotencyKey: input.idempotencyKey,
-    });
-  } catch (e) {
-    if ((e as { code?: number }).code === 11000) throw AppError.conflict('This shop was just submitted. Reload to see its status.');
-    throw e;
+  // ONE atomic update: the version snapshot, its pending reviews, the photo states, the answered rework and the status change land
+  // together or not at all, so a half-saved submission is never visible. It only applies if the shop is still open and unchanged
+  // (compare-and-set on `rev` + status): a second tap, or a second device, finds nothing to match and gets a conflict.
+  const versionEntry = {
+    _id: new Types.ObjectId(), version: versionNo, submittedBy: actor.id, submittedAt: now, photos: keep.map((p) => p._id), added: drafts.map((p) => p._id),
+    removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems.map((i) => i.toObject()), notes, installation: presentInstallation(sub.installation as never), stages, sequential: cfg.sequential, dueAt, idempotencyKey: input.idempotencyKey,
+  };
+  const set: Record<string, unknown> = { status: 'SUBMITTED', currentVersion: versionNo, submittedAt: now, dueAt, pendingStage: first, notes };
+  const arrayFilters: Record<string, unknown>[] = [];
+  if (drafts.length) {
+    arrayFilters.push({ 'd._id': { $in: drafts.map((d) => d._id) } });
+    set['photos.$[d].state'] = 'SUBMITTED';
+    set['photos.$[d].version'] = versionNo;
   }
-  const first = cfg.sequential ? stages[0]! : stages[0]!;
-  const rev = sub.rev;
+  replacing.forEach((d, i) => {
+    arrayFilters.push({ [`r${i}._id`]: d.replaces });
+    set[`photos.$[r${i}].state`] = 'SUPERSEDED';
+    set[`photos.$[r${i}].supersededBy`] = d._id;
+  });
+  if (reworks.length) {
+    arrayFilters.push({ 'w.status': 'OPEN' });
+    set['reworks.$[w].status'] = 'RESOLVED';
+    set['reworks.$[w].resolvedAt'] = now;
+    set['reworks.$[w].items.$[].resolved'] = true;
+    set['reworks.$[w].items.$[].resolvedInVersion'] = versionNo;
+  }
   const cas = await RecceSubmission.updateOne(
-    { _id: sub._id, rev, status: { $in: EDITABLE } },
-    { $set: { status: 'SUBMITTED', currentVersion: versionNo, submittedAt: now, dueAt, pendingStage: first, notes: sub.notes }, $inc: { rev: 1, attempts: 1 } },
+    { _id: sub._id, rev: sub.rev, status: { $in: EDITABLE } },
+    { $set: set, $push: { versions: versionEntry, reviews: { $each: stages.map((stage) => ({ versionNo, stage })) } }, $inc: { rev: 1, attempts: 1 } },
+    arrayFilters.length ? { arrayFilters } : {},
   );
-  if (!cas.modifiedCount) {
-    await RecceVersion.deleteOne({ _id: version._id });
-    throw AppError.conflict('This shop was changed or submitted at the same time. Reload and check its status.');
-  }
-  await RecceReview.insertMany(stages.map((stage) => ({ project: sub.project, submission: sub._id, version: version._id, versionNo, stage })));
-  await ReccePhoto.updateMany({ _id: { $in: drafts.map((d) => d._id) } }, { $set: { state: 'SUBMITTED', version: versionNo } });
-  for (const d of drafts.filter((x) => x.replaces)) await ReccePhoto.updateOne({ _id: d.replaces }, { $set: { state: 'SUPERSEDED', supersededBy: d._id } });
-  for (const rw of reworks) {
-    rw.items.forEach((it) => { it.resolved = true; it.resolvedInVersion = versionNo; });
-    rw.status = 'RESOLVED';
-    rw.resolvedAt = now;
-    await rw.save();
-  }
+  if (!cas.modifiedCount) throw AppError.conflict('This shop was changed or submitted at the same time. Reload and check its status.');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: versionNo > 1 ? 'REWORK_SUBMITTED' : 'SUBMISSION_CREATED', version: versionNo, changes: [{ field: 'photos', oldValue: prev?.photos.length ?? 0, newValue: keep.length }] });
-  await announceSubmitted(actor, { submissionId: sub._id, projectId: sub.project, siteId: site._id, siteName: siteLabel(site), project, versionNo, photoCount: keep.length, mediaNames: items.map((i) => i.name), stage: first, resubmitted: versionNo > 1 });
+  // Sequential review tells only the first stage now (the next one is told at its turn). Otherwise every stage is told at once; one card is posted.
+  for (const stage of cfg.sequential ? [first] : stages) {
+    await announceSubmitted(actor, { submissionId: sub._id, projectId: sub.project, siteId: site._id, siteName: siteLabel(site), project, versionNo, photoCount: keep.length, mediaNames: items.map((i) => i.name), stage, resubmitted: versionNo > 1, card: stage === first ? 'submitted' : 'none' });
+  }
   return { duplicate: false, version: versionNo, detail: await shopDetail(actor, siteId) };
 }
 

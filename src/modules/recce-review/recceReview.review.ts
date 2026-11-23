@@ -12,12 +12,12 @@ import { Vendor } from '../vendors/vendor.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import {
-  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, type Config, type MediaItem,
+  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, timeOf, type Config, type MediaItem,
 } from './recceReview.common';
 import { OPEN_STAGE, announceSubmitted } from './recceReview.field';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
-import { compareVersions, versionHistory, compareQuery } from './recceReview.versions';
-import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, RECCE_STATUSES, ReccePhoto, RecceConfig, RecceReview, RecceRework, RecceSubmission, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
+import { byPhotoOrder, compareVersions, versionHistory, compareQuery } from './recceReview.versions';
+import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, RECCE_STATUSES, RecceConfig, RecceSubmission, STAGE_LABEL, type ReviewStage } from './recceReview.model';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
 
@@ -55,8 +55,22 @@ async function loadSubmission(actor: Actor, id: string) {
   await assertCanSeeProject(actor, sub.project);
   return sub;
 }
-const reviewsOf = (versionId: Types.ObjectId) => RecceReview.find({ version: versionId }).lean();
-const decisionMap = (rs: { stage: string; decision: string }[]) => Object.fromEntries(rs.map((r) => [r.stage, r.decision]));
+/** The reviews of the shop's document that belong to one version. */
+const reviewsOfVersion = <T extends { versionNo: number }>(reviews: T[], versionNo: number) => reviews.filter((r) => r.versionNo === versionNo);
+/** The same, read again from the database (after a decision was written, to see what the other stage did meanwhile). */
+const freshReviews = async (submissionId: Types.ObjectId, versionNo: number) => reviewsOfVersion((await RecceSubmission.findById(submissionId).select('reviews').lean())?.reviews ?? [], versionNo);
+const decisionMap = (rs: { stage: string; decision?: string | null | undefined }[]) => Object.fromEntries(rs.map((r) => [r.stage, r.decision ?? 'PENDING']));
+const DECIDED = ['APPROVED', 'REJECTED', 'REWORK'];
+const byTime = (a: { createdAt?: Date | null }, b: { createdAt?: Date | null }) => timeOf(a.createdAt) - timeOf(b.createdAt);
+
+/** Overall status of a version from the decision of every stage. Rejection beats rework, rework beats approval. */
+function overallOutcome(stages: ReviewStage[], sequential: boolean, map: Record<string, string>): { status: string; pendingStage: ReviewStage | null } {
+  const of = (d: string) => stages.some((s) => map[s] === d);
+  if (of('REJECTED')) return { status: 'REJECTED', pendingStage: null };
+  if (of('REWORK')) return { status: 'REWORK_REQUIRED', pendingStage: null };
+  if (stages.every((s) => map[s] === 'APPROVED')) return { status: 'APPROVED', pendingStage: null };
+  return { status: 'UNDER_REVIEW', pendingStage: OPEN_STAGE(stages, sequential, map) };
+}
 
 /** Checks the person may decide this stage. Admin decides only through `override`. Operations is limited to their projects, Client Servicing to theirs. */
 function assertStageRights(actor: Actor, stage: ReviewStage) {
@@ -86,7 +100,7 @@ async function notifyNextStage(actor: Actor, sub: InstanceType<typeof RecceSubmi
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
   if (!site || !p) return;
   const items = (sub.mediaItems as unknown as MediaItem[]).map((i) => i.name);
-  const photos = await RecceVersion.findOne({ submission: sub._id, version: versionNo }).select('photos stages').lean();
+  const photos = sub.versions.find((v) => v.version === versionNo);
   await announceSubmitted({ id: String(sub.assignee), role: 'VENDOR' }, { submissionId: sub._id, projectId: sub.project, siteId: sub.site, siteName: siteLabel(site), project: p, versionNo, photoCount: photos?.photos.length ?? 0, mediaNames: items, stage, resubmitted: versionNo > 1, card: photos?.stages?.[0] === stage ? 'none' : 'turn' }).catch(() => undefined);
   void actor;
 }
@@ -145,12 +159,20 @@ export async function inbox(actor: Actor, q: z.infer<typeof inboxQuery>) {
   if (q.priority) and.push({ priority: q.priority });
   if (q.status) and.push({ status: q.status });
   else if (q.view === 'pending') and.push({ status: { $in: PENDING_STATUSES } });
-  else if (q.view === 'mine') { const st = stageOf(actor.role); and.push({ status: { $in: PENDING_STATUSES } }, st ? { pendingStage: st } : { pendingStage: { $ne: null } }); }
+  else if (q.view === 'mine') {
+    const st = stageOf(actor.role);
+    // Sequential review: the stage whose turn it is (pendingStage). Parallel review: every shop where this stage has not decided yet.
+    type OpenRow = { _id: Types.ObjectId; currentVersion?: number | null; versions: { version: number; sequential?: boolean | null }[]; reviews: { versionNo: number; stage: string; decision?: string | null }[] };
+    const waitingFilter: Record<string, unknown> = { status: { $in: PENDING_STATUSES }, reviews: { $elemMatch: { stage: st, decision: 'PENDING' } } };
+    const open = st ? ((await RecceSubmission.find(waitingFilter).select('currentVersion versions.version versions.sequential reviews.versionNo reviews.stage reviews.decision').lean()) as unknown as OpenRow[]) : [];
+    const parallelSubs = open.filter((s) => s.versions.some((v) => v.version === s.currentVersion && v.sequential === false) && s.reviews.some((r) => r.versionNo === s.currentVersion && r.stage === st && r.decision === 'PENDING')).map((s) => s._id);
+    and.push({ status: { $in: PENDING_STATUSES } }, st ? { $or: [{ pendingStage: st }, { _id: { $in: parallelSubs } }] } : { pendingStage: { $ne: null } });
+  }
   else and.push({ currentVersion: { $gt: 0 } });
   if (and.length) filter.$and = and;
 
   const [rows, total] = await Promise.all([
-    RecceSubmission.find(filter).sort({ dueAt: 1, submittedAt: -1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
+    RecceSubmission.find(filter).select('-photos').sort({ dueAt: 1, submittedAt: -1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(), // the list needs no photos
     RecceSubmission.countDocuments(filter),
   ]);
   return { items: await presentRows(rows), meta: pageMeta(q.page, q.limit, total) };
@@ -158,13 +180,12 @@ export async function inbox(actor: Actor, q: z.infer<typeof inboxQuery>) {
 
 type SubLean = any;
 async function presentRows(rows: SubLean[]) {
-  const [sites, projects, versions, reviews] = await Promise.all([
+  // Each row is the shop's own document, so its versions and reviews are already here.
+  const [sites, projects] = await Promise.all([
     Site.find({ _id: { $in: rows.map((r) => r.site) } }).select('shopName siteCode district').lean(),
     Project.find({ _id: { $in: rows.map((r) => r.project) } }).select('code name client clientDetails').lean(),
-    RecceVersion.find({ submission: { $in: rows.map((r) => r._id) } }).select('submission version photos').lean(),
-    RecceReview.find({ submission: { $in: rows.map((r) => r._id) } }).select('submission versionNo stage decision reviewer').lean(),
   ]);
-  const names = await nameMap([...rows.map((r) => r.assignee), ...rows.flatMap((r) => [r.reviewers?.OPS, r.reviewers?.CS]), ...reviews.map((r) => r.reviewer)]);
+  const names = await nameMap([...rows.map((r) => r.assignee), ...rows.flatMap((r) => [r.reviewers?.OPS, r.reviewers?.CS]), ...rows.flatMap((r) => (r.reviews ?? []).map((x: { reviewer?: Types.ObjectId }) => x.reviewer))]);
   const siteBy = new Map(sites.map((s) => [String(s._id), s]));
   const projBy = new Map(projects.map((p) => [String(p._id), p]));
   const clients = new Map<string, string | null>();
@@ -173,15 +194,15 @@ async function presentRows(rows: SubLean[]) {
   return rows.map((r) => {
     const s = siteBy.get(String(r.site));
     const p = projBy.get(String(r.project));
-    const v = versions.find((x) => String(x.submission) === String(r._id) && x.version === r.currentVersion);
-    const rv = reviews.filter((x) => String(x.submission) === String(r._id) && x.versionNo === r.currentVersion);
+    const v = (r.versions ?? []).find((x: { version: number }) => x.version === r.currentVersion);
+    const rv = (r.reviews ?? []).filter((x: { versionNo: number }) => x.versionNo === r.currentVersion);
     const pending = ['SUBMITTED', 'UNDER_REVIEW'].includes(r.status);
     const due = r.dueAt ? new Date(r.dueAt).getTime() : null;
     return {
       id: String(r._id), siteId: String(r.site), shopName: s?.shopName ?? null, siteCode: s?.siteCode ?? '', district: s?.district ?? null, projectId: String(r.project), projectCode: p?.code ?? '', projectName: p?.name ?? '', client: clients.get(String(r.project)) ?? null,
       assignee: names.get(String(r.assignee)) ?? null, channel: r.channel ?? null, submittedAt: r.submittedAt ?? null, photoCount: v?.photos.length ?? 0, mediaTypes: (r.mediaItems ?? []).map((i: MediaItem) => i.name),
       version: r.currentVersion, attempts: r.attempts, status: r.status, priority: r.priority,
-      stages: rv.map((x) => ({ stage: x.stage, label: STAGE_LABEL[x.stage as ReviewStage], decision: x.decision, reviewer: x.reviewer ? (names.get(String(x.reviewer)) ?? null) : null })),
+      stages: rv.map((x: { stage: string; decision: string; reviewer?: Types.ObjectId }) => ({ stage: x.stage, label: STAGE_LABEL[x.stage as ReviewStage], decision: x.decision, reviewer: x.reviewer ? (names.get(String(x.reviewer)) ?? null) : null })),
       pendingStage: pending ? (r.pendingStage ?? null) : null, pendingStageLabel: pending && r.pendingStage ? STAGE_LABEL[r.pendingStage as ReviewStage] : null,
       pendingReviewer: pending && r.pendingStage ? (names.get(String(r.reviewers?.[r.pendingStage as ReviewStage])) ?? STAGE_LABEL[r.pendingStage as ReviewStage]) : null,
       dueAt: r.dueAt ?? null, overdue: pending && due != null && due < now, pendingDays: pending && r.submittedAt ? Math.floor((now - new Date(r.submittedAt).getTime()) / DAY) : 0,
@@ -194,18 +215,20 @@ async function presentRows(rows: SubLean[]) {
 /** Everything the full-screen review workspace needs for one shop: shop and project, every version with its photos, reviews, rework, checklist. */
 export async function workspace(actor: Actor, id: string) {
   const sub = await loadSubmission(actor, id);
-  const [site, project, cfg, versions, reviews, reworks] = await Promise.all([
-    Site.findById(sub.site).lean(), Project.findById(sub.project).lean(), getConfig(),
-    RecceVersion.find({ submission: sub._id }).sort({ version: 1 }).lean(), RecceReview.find({ submission: sub._id }).lean(), RecceRework.find({ submission: sub._id }).sort({ createdAt: 1 }).lean(),
-  ]);
+  const [site, project, cfg] = await Promise.all([Site.findById(sub.site).lean(), Project.findById(sub.project).lean(), getConfig()]);
   if (!site || !project) throw AppError.notFound('Submission not found');
+  // Versions, reviews, reworks and photos are all inside the shop's one document.
+  const doc = sub.toObject();
+  const versions = [...doc.versions].sort((a, b) => a.version - b.version);
+  const reviews = doc.reviews;
+  const reworks = [...doc.reworks].sort(byTime);
   // Reviewers never see another person's drafts, only what was submitted (including photos later superseded or removed, with history).
-  const photos = await ReccePhoto.find({ submission: sub._id, state: { $ne: 'DRAFT' } }).sort({ order: 1, createdAt: 1 }).lean();
+  const photos = doc.photos.filter((p) => p.state !== 'DRAFT').sort(byPhotoOrder);
   const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
   const roles = await roleMap(photos.map((p) => p.uploadedBy));
   const mine = stageOf(actor.role);
   const cur = versions.at(-1);
-  const curReviews = cur ? reviews.filter((r) => String(r.version) === String(cur._id)) : [];
+  const curReviews = cur ? reviewsOfVersion(reviews, cur.version) : [];
   const open = cur && (REVIEWABLE as string[]).includes(sub.status) ? OPEN_STAGE(cur.stages as ReviewStage[], cur.sequential, decisionMap(curReviews)) : null;
   const dec = (r: (typeof reviews)[number]) => ({ stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment, checklist: r.checklist, override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null });
   return {
@@ -217,7 +240,7 @@ export async function workspace(actor: Actor, id: string) {
     project: { id: String(project._id), code: project.code, name: project.name, client: await clientNameFor(project), requirementType: project.requirementType ?? null, closed: CLOSED_PROJECT.includes(String(project.status)) },
     versions: versions.map((v) => ({
       id: String(v._id), version: v.version, submittedAt: v.submittedAt, submittedBy: names.get(String(v.submittedBy)) ?? null, photoIds: v.photos.map(String), addedIds: v.added.map(String), removedIds: v.removed.map(String), notes: v.notes, mediaItems: v.mediaItems, installation: presentInstallation(v.installation as never), installationRecorded: !!v.installation, stages: v.stages, sequential: v.sequential, dueAt: v.dueAt ?? null,
-      reviews: reviews.filter((r) => String(r.version) === String(v._id)).map(dec),
+      reviews: reviewsOfVersion(reviews, v.version).map(dec),
     })),
     photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
     reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
@@ -260,12 +283,11 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   await assertProjectOpen(sub.project);
   if (!(REVIEWABLE as string[]).includes(sub.status)) throw AppError.conflict('This submission is not waiting for review');
   if (input.versionNo !== sub.currentVersion) throw AppError.conflict(`Version ${sub.currentVersion} is current now. Reload before deciding.`);
-  const version = await RecceVersion.findOne({ submission: sub._id, version: sub.currentVersion });
+  const version = sub.versions.find((v) => v.version === sub.currentVersion);
   if (!version) throw AppError.notFound('Version not found');
   const stages = version.stages as ReviewStage[];
   if (!stages.includes(input.stage)) throw AppError.badRequest('This stage is not part of the review');
-  const rs = await reviewsOf(version._id);
-  if (OPEN_STAGE(stages, version.sequential, decisionMap(rs)) !== input.stage && !(!version.sequential && decisionMap(rs)[input.stage] === 'PENDING')) {
+  const rs = reviewsOfVersion(sub.reviews, version.version);  if (OPEN_STAGE(stages, version.sequential, decisionMap(rs)) !== input.stage && !(!version.sequential && decisionMap(rs)[input.stage] === 'PENDING')) {
     throw AppError.conflict(decisionMap(rs)[input.stage] !== 'PENDING' ? `${STAGE_LABEL[input.stage]} has already decided this version` : 'An earlier review stage must approve first');
   }
   const cfg = await getConfig();
@@ -273,7 +295,7 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   if (input.decision === 'REWORK' && input.comment.length < 5) throw AppError.badRequest('Give clear rework instructions');
   if (input.decision === 'ADDITIONAL' && !input.items.some((i) => i.type === 'ADDITIONAL_PHOTO' && i.category)) throw AppError.badRequest('Choose the photo categories you need');
   const photoIds = [...new Set(input.items.map((i) => i.photo).filter(Boolean) as string[])];
-  if (photoIds.length && (await ReccePhoto.countDocuments({ _id: { $in: photoIds }, submission: sub._id })) !== photoIds.length) throw AppError.badRequest('A selected photo does not belong to this shop');
+  if (photoIds.some((pid) => !sub.photos.some((p) => String(p._id) === String(pid).toLowerCase()))) throw AppError.badRequest('A selected photo does not belong to this shop');
   const labels = new Map(cfg.checklist.map((c) => [c.key, c.label]));
   const checklist = input.checklist.filter((c) => labels.has(c.key)).map((c) => ({ key: c.key, label: labels.get(c.key)!, passed: c.passed }));
   if (input.decision === 'APPROVE') {
@@ -284,32 +306,40 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
 
   const decision = input.decision === 'APPROVE' ? 'APPROVED' : input.decision === 'REJECT' ? 'REJECTED' : 'REWORK';
   const comment = input.decision === 'REJECT' ? (input.reason ?? input.comment) : input.comment;
-  const claimed = await RecceReview.findOneAndUpdate({ version: version._id, stage: input.stage, decision: 'PENDING' }, { $set: { decision, reviewer: actor.id, reviewerRole: actor.role, decidedAt: new Date(), comment, checklist } }, { new: true });
-  if (!claimed) throw AppError.conflict('Another reviewer has already decided this stage');
+  // Claim this stage's review entry with a compare-and-set on the shop's document: it must still be PENDING.
+  const claimed = await RecceSubmission.updateOne(
+    { _id: sub._id, reviews: { $elemMatch: { versionNo: version.version, stage: input.stage, decision: 'PENDING' } } },
+    { $set: { 'reviews.$.decision': decision, 'reviews.$.reviewer': actor.id, 'reviews.$.reviewerRole': actor.role, 'reviews.$.decidedAt': new Date(), 'reviews.$.comment': comment, 'reviews.$.checklist': checklist } },
+  );
+  if (!claimed.modifiedCount) throw AppError.conflict('Another reviewer has already decided this stage');
 
-  const all = await reviewsOf(version._id);
-  const map = decisionMap(all);
-  let status = 'UNDER_REVIEW';
-  let pendingStage: ReviewStage | null = null;
-  if (decision === 'REJECTED') status = 'REJECTED';
-  else if (decision === 'REWORK') status = 'REWORK_REQUIRED';
-  else if (stages.every((s) => map[s] === 'APPROVED')) status = 'APPROVED';
-  else pendingStage = OPEN_STAGE(stages, version.sequential, map);
+  // The overall status comes from every stage's decision, so two stages deciding at the same moment reach the same answer:
+  // any rejection wins, then any rework, then "all approved", otherwise still under review.
+  const { status, pendingStage } = overallOutcome(stages, version.sequential, decisionMap(await freshReviews(sub._id, version.version)));
   const moved = await RecceSubmission.updateOne({ _id: sub._id, currentVersion: version.version, status: { $in: REVIEWABLE } }, { $set: { status, pendingStage, ...(status === 'APPROVED' ? { finalApprovedAt: new Date() } : {}) }, $inc: { rev: 1 } });
   if (!moved.modifiedCount) {
-    await RecceReview.updateOne({ _id: claimed._id }, { $set: { decision: 'PENDING' }, $unset: { reviewer: 1, decidedAt: 1 } });
-    throw AppError.conflict('The submission changed while you were deciding. Reload and try again.');
+    // The other stage decided at the same moment and already wrote the answer. If it is the answer this decision leads to as well, this decision stands.
+    const [now, again] = await Promise.all([RecceSubmission.findById(sub._id).select('status currentVersion').lean(), freshReviews(sub._id, version.version)]);
+    const agreed = now?.currentVersion === version.version && now.status === overallOutcome(stages, version.sequential, decisionMap(again)).status;
+    if (!agreed) {
+      // Give the claimed stage back (nothing else of this decision was written).
+      await RecceSubmission.updateOne({ _id: sub._id }, { $set: { 'reviews.$[r].decision': 'PENDING' }, $unset: { 'reviews.$[r].reviewer': 1, 'reviews.$[r].decidedAt': 1 } }, { arrayFilters: [{ 'r.versionNo': version.version, 'r.stage': input.stage }] });
+      throw AppError.conflict('The submission changed while you were deciding. Reload and try again.');
+    }
   }
-  if (status === 'REJECTED' || status === 'REWORK_REQUIRED') await RecceReview.updateMany({ version: version._id, decision: 'PENDING' }, { $set: { decision: 'VOID' } });
+  const weMoved = !!moved.modifiedCount;
+  if (status === 'REJECTED' || status === 'REWORK_REQUIRED') await RecceSubmission.updateOne({ _id: sub._id }, { $set: { 'reviews.$[r].decision': 'VOID' } }, { arrayFilters: [{ 'r.versionNo': version.version, 'r.decision': 'PENDING' }] });
   if (decision === 'REWORK') {
-    await RecceRework.create({ project: sub.project, submission: sub._id, version: version._id, versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, items: input.items });
+    await RecceSubmission.updateOne({ _id: sub._id }, {
+      $push: { reworks: { _id: new Types.ObjectId(), versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, status: 'OPEN', createdAt: new Date(), items: input.items.map((i) => ({ _id: new Types.ObjectId(), ...i, resolved: false })) } },
+    });
   }
   const type = input.decision === 'APPROVE' ? 'REVIEW_APPROVED' : input.decision === 'REJECT' ? 'REVIEW_REJECTED' : input.decision === 'ADDITIONAL' ? 'ADDITIONAL_PHOTOS_REQUESTED' : 'REWORK_REQUESTED';
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type, version: version.version, reason: comment || undefined, changes: [{ field: 'status', oldValue: sub.status, newValue: status }, { field: `review.${input.stage}`, oldValue: 'PENDING', newValue: decision }] });
-  if (status === 'APPROVED') await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'FINAL_APPROVAL', version: version.version });
+  if (status === 'APPROVED' && weMoved) await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'FINAL_APPROVAL', version: version.version });
   const fresh = (await RecceSubmission.findById(sub._id))!;
   // What the reviewer pointed at, for the thread card: the photo's category (or the item's own) and a ref the app can open.
-  const catOf = new Map((photoIds.length ? await ReccePhoto.find({ _id: { $in: photoIds } }).select('category').lean() : []).map((x) => [String(x._id), x.category as keyof typeof CATEGORY_LABEL]));
+  const catOf = new Map(sub.photos.filter((p) => photoIds.some((pid) => String(pid).toLowerCase() === String(p._id))).map((p) => [String(p._id), p.category as keyof typeof CATEGORY_LABEL]));
   const pointed = input.items.map((i) => { const c = i.category ?? (i.photo ? catOf.get(i.photo) : undefined); return c ? `${CATEGORY_LABEL[c]}${i.note ? ` (${i.note})` : ''}` : null; }).filter((x): x is string => !!x);
   const cardRefs = [
     ...photoIds.map((id) => ({ type: 'PHOTO', id })),
@@ -317,8 +347,9 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   ];
   const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: 'Rework required', ADDITIONAL: 'Additional photos requested' };
   await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: 'Rework items', value: pointed.join(', ') }] : [] });
-  if (status === 'APPROVED') await notifyFinalApproval(actor, fresh, version.version, stages);
-  if (status === 'UNDER_REVIEW' && pendingStage) await notifyNextStage(actor, fresh, pendingStage, version.version);
+  if (status === 'APPROVED' && weMoved) await notifyFinalApproval(actor, fresh, version.version, stages);
+  // Only sequential review hands over to the next stage; in parallel review that stage was told when the version was submitted.
+  if (status === 'UNDER_REVIEW' && pendingStage && version.sequential) await notifyNextStage(actor, fresh, pendingStage, version.version);
   return workspace(actor, id);
 }
 
@@ -328,12 +359,22 @@ export async function override(actor: Actor, id: string, input: z.infer<typeof o
   const sub = await loadSubmission(actor, id);
   await assertProjectOpen(sub.project);
   if (!(REVIEWABLE as string[]).includes(sub.status)) throw AppError.conflict('This submission is not waiting for review');
-  const version = await RecceVersion.findOne({ submission: sub._id, version: sub.currentVersion });
+  const version = sub.versions.find((v) => v.version === sub.currentVersion);
   if (!version) throw AppError.notFound('Version not found');
   const decision = input.action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
-  await RecceReview.updateMany({ version: version._id, decision: 'PENDING' }, { $set: { decision, reviewer: actor.id, reviewerRole: actor.role, decidedAt: new Date(), comment: input.reason, override: { by: actor.id, reason: input.reason } } });
   const status = input.action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
-  const moved = await RecceSubmission.updateOne({ _id: sub._id, currentVersion: version.version, status: { $in: REVIEWABLE } }, { $set: { status, pendingStage: null, ...(status === 'APPROVED' ? { finalApprovedAt: new Date() } : {}) }, $inc: { rev: 1 } });
+  // ONE atomic update: every still-pending stage of this version is decided and the status changes together, or nothing is written.
+  const moved = await RecceSubmission.updateOne(
+    { _id: sub._id, currentVersion: version.version, status: { $in: REVIEWABLE } },
+    {
+      $set: {
+        status, pendingStage: null, ...(status === 'APPROVED' ? { finalApprovedAt: new Date() } : {}),
+        'reviews.$[r].decision': decision, 'reviews.$[r].reviewer': actor.id, 'reviews.$[r].reviewerRole': actor.role, 'reviews.$[r].decidedAt': new Date(), 'reviews.$[r].comment': input.reason, 'reviews.$[r].override': { by: actor.id, reason: input.reason },
+      },
+      $inc: { rev: 1 },
+    },
+    { arrayFilters: [{ 'r.versionNo': version.version, 'r.decision': 'PENDING' }] },
+  );
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'ADMIN_OVERRIDE', version: version.version, reason: input.reason, visibility: 'REVIEW', changes: [{ field: 'status', oldValue: sub.status, newValue: status }] });
   const after = (await RecceSubmission.findById(sub._id))!;
@@ -351,10 +392,13 @@ export async function reopen(actor: Actor, id: string, input: z.infer<typeof reo
   if (!allowed) throw AppError.forbidden(sub.status === 'REJECTED' ? 'A new attempt after rejection needs an Admin' : 'Only an Admin can reopen this');
   await assertProjectOpen(sub.project);
   if (!['REJECTED', 'APPROVED', 'SUBMITTED', 'UNDER_REVIEW'].includes(sub.status)) throw AppError.conflict('This shop is already open for the recce person');
-  const moved = await RecceSubmission.updateOne({ _id: sub._id, rev: sub.rev }, { $set: { status: 'IN_PROGRESS', pendingStage: null }, $unset: { finalApprovedAt: 1 }, $inc: { rev: 1 } });
+  // ONE atomic update: the status goes back to the recce person, waiting reviews are voided and open rework is closed together.
+  const moved = await RecceSubmission.updateOne(
+    { _id: sub._id, rev: sub.rev },
+    { $set: { status: 'IN_PROGRESS', pendingStage: null, 'reviews.$[p].decision': 'VOID', 'reworks.$[o].status': 'CLOSED' }, $unset: { finalApprovedAt: 1 }, $inc: { rev: 1 } },
+    { arrayFilters: [{ 'p.decision': 'PENDING' }, { 'o.status': 'OPEN' }] },
+  );
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
-  await RecceReview.updateMany({ submission: sub._id, decision: 'PENDING' }, { $set: { decision: 'VOID' } });
-  await RecceRework.updateMany({ submission: sub._id, status: 'OPEN' }, { $set: { status: 'CLOSED' } });
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'REOPENED', reason: input.reason, version: sub.currentVersion, changes: [{ field: 'status', oldValue: sub.status, newValue: 'IN_PROGRESS' }] });
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
@@ -368,7 +412,7 @@ export async function restorePhoto(actor: Actor, id: string, photoId: string) {
   if (actor.role !== 'SUPER_ADMIN') throw AppError.forbidden('Only an Admin can restore a removed photo');
   const sub = await loadSubmission(actor, id);
   if (!['IN_PROGRESS', 'REWORK_REQUIRED'].includes(sub.status)) throw AppError.conflict('A photo can be restored only while the shop is open for the recce person');
-  const r = await ReccePhoto.updateOne({ _id: photoId, submission: sub._id, state: 'REMOVED' }, { $set: { state: 'SUBMITTED' }, $unset: { removedAt: 1, removedBy: 1, removeReason: 1 } });
+  const r = await RecceSubmission.updateOne({ _id: sub._id, photos: { $elemMatch: { _id: oid(photoId), state: 'REMOVED' } } }, { $set: { 'photos.$.state': 'SUBMITTED' }, $unset: { 'photos.$.removedAt': 1, 'photos.$.removedBy': 1, 'photos.$.removeReason': 1 } });
   if (!r.modifiedCount) throw AppError.notFound('Removed photo not found');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'PHOTO_RESTORED', photo: oid(photoId), visibility: 'REVIEW' });
   return workspace(actor, id);
@@ -441,13 +485,12 @@ export async function progress(actor: Actor, q: z.infer<typeof progressQuery>) {
   if (q.projectId && projectIds && !projectIds.some((p) => String(p) === q.projectId)) throw AppError.notFound('Project not found');
   const sites = await Site.find(siteFilter).select('project').lean();
   const siteIds = sites.map((s) => s._id);
-  const subs = await RecceSubmission.find({ site: { $in: siteIds } }).lean();
+  const subs = await RecceSubmission.find({ site: { $in: siteIds } }).select('-photos').lean(); // counts need no photos
   const count = (st: string) => subs.filter((s) => s.status === st).length;
   const total = siteIds.length;
   const approved = count('APPROVED');
-  const reviews = await RecceReview.find({ submission: { $in: subs.map((s) => s._id) }, decision: { $in: ['APPROVED', 'REJECTED', 'REWORK'] } }).select('submission versionNo decidedAt reviewer stage').lean();
-  const versions = await RecceVersion.find({ submission: { $in: subs.map((s) => s._id) } }).select('submission version submittedAt').lean();
-  const durations = reviews.map((r) => { const v = versions.find((x) => String(x.submission) === String(r.submission) && x.version === r.versionNo); return v && r.decidedAt ? (r.decidedAt.getTime() - v.submittedAt.getTime()) / 3600_000 : null; }).filter((x): x is number => x != null);
+  const reviews = subs.flatMap((s) => (s.reviews ?? []).filter((r) => DECIDED.includes(String(r.decision))).map((r) => ({ ...r, submittedAt: (s.versions ?? []).find((v) => v.version === r.versionNo)?.submittedAt })));
+  const durations = reviews.map((r) => (r.submittedAt && r.decidedAt ? (r.decidedAt.getTime() - r.submittedAt.getTime()) / 3600_000 : null)).filter((x): x is number => x != null);
   const mediaDone = new Map<string, { total: number; approved: number }>();
   for (const s of subs) for (const i of s.mediaItems ?? []) { const k = i.name; const cur = mediaDone.get(k) ?? { total: 0, approved: 0 }; cur.total += i.quantity ?? 1; if (s.status === 'APPROVED') cur.approved += i.quantity ?? 1; mediaDone.set(k, cur); }
   const loadBy = new Map<string, { pending: number; decided: number }>();
@@ -470,14 +513,13 @@ export async function progress(actor: Actor, q: z.infer<typeof progressQuery>) {
 /** Admin / Management dashboard: every active project's recce work, delays, rework backlog, deletions and team performance. */
 export async function monitor(actor: Actor) {
   if (!MONITOR_ROLES.includes(actor.role)) throw AppError.forbidden();
-  const subs = await RecceSubmission.find({}).lean();
+  const subs = await RecceSubmission.find({}).select('-photos').lean(); // one document per shop; the monitor needs no photos
   const now = Date.now();
   const waiting = subs.filter((s) => PENDING_STATUSES.includes(s.status));
   const overdue = waiting.filter((s) => s.dueAt && s.dueAt.getTime() < now);
-  const reworkOpen = await RecceRework.find({ status: 'OPEN' }).lean();
-  const decided = await RecceReview.find({ decision: { $in: ['APPROVED', 'REJECTED', 'REWORK'] } }).select('submission versionNo decidedAt reviewer stage decision').lean();
-  const versions = await RecceVersion.find({}).select('submission version submittedAt dueAt').lean();
-  const vBy = new Map(versions.map((v) => [`${v.submission}:${v.version}`, v]));
+  const reworkOpen = subs.flatMap((s) => (s.reworks ?? []).filter((r) => r.status === 'OPEN'));
+  const decided = subs.flatMap((s) => (s.reviews ?? []).filter((r) => DECIDED.includes(String(r.decision))).map((r) => ({ ...r, submission: s._id })));
+  const vBy = new Map(subs.flatMap((s) => (s.versions ?? []).map((v) => [`${s._id}:${v.version}`, v] as const)));
   let inSla = 0;
   for (const r of decided) { const v = vBy.get(`${r.submission}:${r.versionNo}`); if (v?.dueAt && r.decidedAt && r.decidedAt <= v.dueAt) inSla++; }
   const byGroup = (key: (s: (typeof subs)[number]) => string) => {

@@ -10,7 +10,7 @@ import { notify } from '../notifications/notification.service';
 import { Project } from '../projects/project.model';
 import { User } from '../users/user.model';
 import { assertProjectOpen, clientNameFor, getConfig, logEvent, reviewPath, seedItems, siteLabel, stageRecipients, type MediaItem } from './recceReview.common';
-import { ReccePhoto, RecceThreadRead, RecceVersion, type ReviewStage } from './recceReview.model';
+import { RecceSubmission, RecceThreadRead, type ReviewStage } from './recceReview.model';
 
 /**
  * The shop communication thread, shared by the field router (own shops) and the review router (reviewers). The messages live in
@@ -88,22 +88,26 @@ async function checkRefs(ctx: ThreadCtx, refs: Ref[]): Promise<Ref[]> {
   }
   const bad = (m: string) => AppError.badRequest(m, [{ path: 'refs', message: m }]);
   const photos = out.filter((r) => r.type === 'PHOTO').map((r) => r.id);
+  const boards = out.filter((r) => r.type === 'BOARD').map((r) => r.id);
+  const versions = out.filter((r) => r.type === 'VERSION').map((r) => r.id);
+  // The shop is one document: its photos, versions and boards are all read from it in one go.
+  const own = ctx.sub && (photos.length || boards.length || versions.length)
+    ? await RecceSubmission.findById(ctx.sub._id).select('photos._id photos.state versions.version versions.mediaItems.key').lean()
+    : null;
   if (photos.length) {
     if (photos.some((id) => !/^[a-f\d]{24}$/i.test(id)) || !ctx.sub) throw bad('A referenced photo does not belong to this shop');
-    const n = await ReccePhoto.countDocuments({ _id: { $in: photos }, submission: ctx.sub._id, ...(ctx.side === 'REVIEW' ? { state: { $ne: 'DRAFT' } } : {}) });
-    if (n !== photos.length) throw bad('A referenced photo does not belong to this shop');
+    const known = new Set((own?.photos ?? []).filter((p) => ctx.side !== 'REVIEW' || p.state !== 'DRAFT').map((p) => String(p._id)));
+    if (photos.some((id) => !known.has(id.toLowerCase()))) throw bad('A referenced photo does not belong to this shop');
   }
-  const boards = out.filter((r) => r.type === 'BOARD').map((r) => r.id);
   if (boards.length) {
     const keys = new Set<string>(ctx.sub ? (ctx.sub.mediaItems ?? []).map((i) => i.key) : (seedItems(ctx.site) as MediaItem[]).map((i) => i.key));
-    if (ctx.sub) for (const v of await RecceVersion.find({ submission: ctx.sub._id }).select('mediaItems.key').lean()) for (const i of v.mediaItems ?? []) keys.add(i.key);
+    for (const v of own?.versions ?? []) for (const i of v.mediaItems ?? []) keys.add(i.key);
     if (boards.some((k) => !keys.has(k))) throw bad('A referenced board item does not exist in this shop');
   }
-  const versions = out.filter((r) => r.type === 'VERSION').map((r) => r.id);
   if (versions.length) {
     if (versions.some((v) => !/^\d{1,4}$/.test(v)) || !ctx.sub) throw bad('A referenced version does not exist in this shop');
-    const nums = versions.map(Number);
-    if ((await RecceVersion.countDocuments({ submission: ctx.sub._id, version: { $in: nums } })) !== new Set(nums).size) throw bad('A referenced version does not exist in this shop');
+    const have = new Set((own?.versions ?? []).map((v) => v.version));
+    if (versions.map(Number).some((n) => !have.has(n))) throw bad('A referenced version does not exist in this shop');
   }
   return out.map((r) => (r.type === 'VERSION' ? { type: r.type, id: String(Number(r.id)) } : r));
 }

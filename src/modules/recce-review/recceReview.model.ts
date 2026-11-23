@@ -2,14 +2,16 @@ import { Schema, model, type InferSchemaType } from 'mongoose';
 import { storedFileSchema } from '../files/storedFile.schema';
 
 /**
- * Shop-wise recce evidence and its two-stage review.
+ * Shop-wise recce evidence and its two-stage review: ONE collection, ONE document per shop (Site).
  *
- *   RecceSubmission  one per shop (Site): the working record of the person who visits it. Holds the media items,
- *                    notes, the current status and the number of the latest submitted version.
- *   ReccePhoto       one photo. Original file is never changed; an annotated copy is a separate file.
- *   RecceVersion     IMMUTABLE snapshot made at every submit (which photos, which measurements). Never edited.
- *   RecceReview      one decision per (version, stage). A reviewer can decide only his own stage, only once.
- *   RecceRework      what a reviewer asked to fix, item by item, with resolved / open state.
+ *   RecceSubmission  the working record of the person who visits the shop. It holds everything of that shop:
+ *     mediaItems / notes / installation   the content (boards, measurements, feasibility)
+ *     photos[]    one entry per photo. The original file is never changed; an annotated copy is a separate file.
+ *     versions[]  IMMUTABLE snapshot made at every submit (which photos, which measurements). Never edited.
+ *     reviews[]   one decision per (versionNo, stage). A reviewer can decide only his own stage, only once.
+ *     reworks[]   what a reviewer asked to fix, item by item, with resolved / open state.
+ * The arrays are bounded per shop (at most `maxPhotos` photos, a handful of versions), so one document stays small. Every change to
+ * them is ONE atomic update on this document (filter + positional operators), never a read-modify-write of a whole array.
  * Every event is also written to the existing AuditLog (entity "RecceSubmission") and read back as the timeline.
  */
 
@@ -89,6 +91,100 @@ export const installationSchema = new Schema(
 
 const flagSchema = new Schema({ code: String, message: String }, { _id: false });
 
+/** One photo of the shop. Embedded in the submission; its `_id` is the photo id the apps and reviewers use. */
+const photoSchema = new Schema({
+  mediaKey: { type: String, default: '' },
+  category: { type: String, enum: PHOTO_CATEGORIES, required: true },
+  caption: { type: String, default: '', maxlength: 300 },
+  order: { type: Number, default: 0 },
+  state: { type: String, enum: PHOTO_STATES, default: 'DRAFT' },
+  /** The original file as captured. Never replaced. */
+  original: { type: storedFileSchema, required: true },
+  /** A marked-up copy (annotations burnt in by the phone / web). The original stays untouched. */
+  edited: { type: storedFileSchema },
+  annotations: { type: Schema.Types.Mixed },
+  /** What the device reported. Never trusted on its own: see flags. */
+  capturedAt: Date,
+  lat: Number,
+  lng: Number,
+  gpsAccuracy: Number,
+  /** Where the picture came from. Unset on older photos. */
+  source: { type: String, enum: PHOTO_SOURCES },
+  device: { type: String, maxlength: 120 },
+  width: Number,
+  height: Number,
+  flags: { type: [flagSchema], default: [] },
+  uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  /** Phone-made id: the same photo sent twice (retry, resumed upload) is stored once. */
+  clientId: { type: String, maxlength: 80 },
+  /** Which version first contained it. */
+  version: Number,
+  replaces: { type: Schema.Types.ObjectId },
+  supersededBy: { type: Schema.Types.ObjectId },
+  removedAt: Date,
+  removedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  removeReason: String,
+  createdAt: { type: Date, default: Date.now },
+});
+
+/** IMMUTABLE snapshot of one submit. `photos` / `added` / `removed` hold photo ids (entries of `photos[]`). */
+const versionSchema = new Schema({
+  version: { type: Number, required: true },
+  submittedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  submittedAt: { type: Date, default: Date.now },
+  /** The exact photos of this version. Later removals do not change this list; they are read from the photo state. */
+  photos: [{ type: Schema.Types.ObjectId }],
+  added: [{ type: Schema.Types.ObjectId }],
+  removed: [{ type: Schema.Types.ObjectId }],
+  mediaItems: { type: [mediaItemSchema], default: [] },
+  notes: { type: String, default: '' },
+  /** Immutable installation feasibility snapshot made at submit (absent on versions made before 2026-11-21). */
+  installation: { type: installationSchema },
+  /** The stages that must approve this version (from the configuration at the time of submit). */
+  stages: [{ type: String, enum: REVIEW_STAGES }],
+  sequential: { type: Boolean, default: true },
+  dueAt: Date,
+  idempotencyKey: { type: String, maxlength: 80 },
+});
+
+/** One decision of one stage on one version. A reviewer can decide only his own stage, only once. */
+const reviewSchema = new Schema({
+  versionNo: { type: Number, required: true },
+  stage: { type: String, enum: REVIEW_STAGES, required: true },
+  decision: { type: String, enum: DECISIONS, default: 'PENDING' },
+  reviewer: { type: Schema.Types.ObjectId, ref: 'User' },
+  reviewerRole: String,
+  decidedAt: Date,
+  comment: { type: String, default: '', maxlength: 2000 },
+  checklist: [{ _id: false, key: String, label: String, passed: Boolean }],
+  /** An Admin decided for this stage: who and why are kept. */
+  override: { type: new Schema({ by: { type: Schema.Types.ObjectId, ref: 'User' }, reason: String }, { _id: false }) },
+});
+
+/** What a reviewer asked to fix, item by item. */
+const reworkSchema = new Schema({
+  versionNo: Number,
+  stage: { type: String, enum: REVIEW_STAGES, required: true },
+  kind: { type: String, enum: ['REWORK', 'ADDITIONAL'], required: true },
+  instructions: { type: String, required: true, maxlength: 2000 },
+  items: [
+    {
+      _id: { type: Schema.Types.ObjectId, auto: true },
+      type: { type: String, enum: ['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER'], required: true },
+      category: { type: String, enum: PHOTO_CATEGORIES },
+      mediaKey: String,
+      photo: { type: Schema.Types.ObjectId },
+      note: { type: String, maxlength: 500 },
+      resolved: { type: Boolean, default: false },
+      resolvedInVersion: Number,
+    },
+  ],
+  status: { type: String, enum: ['OPEN', 'RESOLVED', 'CLOSED'], default: 'OPEN' },
+  requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  resolvedAt: Date,
+  createdAt: { type: Date, default: Date.now },
+});
+
 const submissionSchema = new Schema(
   {
     project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
@@ -102,8 +198,12 @@ const submissionSchema = new Schema(
     currentVersion: { type: Number, default: 0 },
     mediaItems: { type: [mediaItemSchema], default: [] },
     notes: { type: String, default: '', maxlength: 2000 },
-    /** Installation feasibility (draft, editable while the shop is open). Copied into each RecceVersion at submit. */
+    /** Installation feasibility (draft, editable while the shop is open). Copied into each version at submit. */
     installation: { type: installationSchema },
+    photos: { type: [photoSchema], default: [] },
+    versions: { type: [versionSchema], default: [] },
+    reviews: { type: [reviewSchema], default: [] },
+    reworks: { type: [reworkSchema], default: [] },
     startedAt: Date,
     submittedAt: Date,
     /** Optional named reviewers per stage (set by Operations / Admin). */
@@ -122,135 +222,19 @@ const submissionSchema = new Schema(
 submissionSchema.index({ project: 1, status: 1 });
 export const RecceSubmission = model('RecceSubmission', submissionSchema);
 export type SubmissionDoc = InferSchemaType<typeof submissionSchema>;
-
-const photoSchema = new Schema(
-  {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true },
-    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
-    mediaKey: { type: String, default: '' },
-    category: { type: String, enum: PHOTO_CATEGORIES, required: true },
-    caption: { type: String, default: '', maxlength: 300 },
-    order: { type: Number, default: 0 },
-    state: { type: String, enum: PHOTO_STATES, default: 'DRAFT' },
-    /** The original file as captured. Never replaced. */
-    original: { type: storedFileSchema, required: true },
-    /** A marked-up copy (annotations burnt in by the phone / web). The original stays untouched. */
-    edited: { type: storedFileSchema },
-    annotations: { type: Schema.Types.Mixed },
-    /** What the device reported. Never trusted on its own: see flags. */
-    capturedAt: Date,
-    lat: Number,
-    lng: Number,
-    gpsAccuracy: Number,
-    /** Where the picture came from. Unset on older photos. */
-    source: { type: String, enum: PHOTO_SOURCES },
-    device: { type: String, maxlength: 120 },
-    width: Number,
-    height: Number,
-    flags: { type: [flagSchema], default: [] },
-    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-    /** Phone-made id: the same photo sent twice (retry, resumed upload) is stored once. */
-    clientId: { type: String, maxlength: 80 },
-    /** Which version first contained it. */
-    version: Number,
-    replaces: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
-    supersededBy: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
-    removedAt: Date,
-    removedBy: { type: Schema.Types.ObjectId, ref: 'User' },
-    removeReason: String,
-  },
-  { timestamps: true },
-);
-photoSchema.index({ submission: 1, state: 1, order: 1 });
-photoSchema.index({ submission: 1, clientId: 1 }, { unique: true, partialFilterExpression: { clientId: { $type: 'string' } } });
-export const ReccePhoto = model('ReccePhoto', photoSchema);
-
-const versionSchema = new Schema(
-  {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-    site: { type: Schema.Types.ObjectId, ref: 'Site', required: true },
-    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true },
-    version: { type: Number, required: true },
-    submittedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-    submittedAt: { type: Date, default: Date.now },
-    /** The exact photos of this version. Later removals do not change this list; they are read from the photo state. */
-    photos: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
-    added: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
-    removed: [{ type: Schema.Types.ObjectId, ref: 'ReccePhoto' }],
-    mediaItems: { type: [mediaItemSchema], default: [] },
-    notes: { type: String, default: '' },
-    /** Immutable installation feasibility snapshot made at submit (absent on versions made before 2026-11-21). */
-    installation: { type: installationSchema },
-    /** The stages that must approve this version (from the configuration at the time of submit). */
-    stages: [{ type: String, enum: REVIEW_STAGES }],
-    sequential: { type: Boolean, default: true },
-    dueAt: Date,
-    idempotencyKey: { type: String, maxlength: 80 },
-  },
-  { timestamps: true },
-);
-versionSchema.index({ submission: 1, version: 1 }, { unique: true });
-versionSchema.index({ submission: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
-export const RecceVersion = model('RecceVersion', versionSchema);
-
-const reviewSchema = new Schema(
-  {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
-    version: { type: Schema.Types.ObjectId, ref: 'RecceVersion', required: true },
-    versionNo: { type: Number, required: true },
-    stage: { type: String, enum: REVIEW_STAGES, required: true },
-    decision: { type: String, enum: DECISIONS, default: 'PENDING' },
-    reviewer: { type: Schema.Types.ObjectId, ref: 'User' },
-    reviewerRole: String,
-    decidedAt: Date,
-    comment: { type: String, default: '', maxlength: 2000 },
-    checklist: [{ _id: false, key: String, label: String, passed: Boolean }],
-    /** An Admin decided for this stage: who and why are kept. */
-    override: { type: new Schema({ by: { type: Schema.Types.ObjectId, ref: 'User' }, reason: String }, { _id: false }) },
-  },
-  { timestamps: true },
-);
-reviewSchema.index({ version: 1, stage: 1 }, { unique: true });
-export const RecceReview = model('RecceReview', reviewSchema);
-
-const reworkSchema = new Schema(
-  {
-    project: { type: Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-    submission: { type: Schema.Types.ObjectId, ref: 'RecceSubmission', required: true, index: true },
-    version: { type: Schema.Types.ObjectId, ref: 'RecceVersion', required: true },
-    versionNo: Number,
-    stage: { type: String, enum: REVIEW_STAGES, required: true },
-    kind: { type: String, enum: ['REWORK', 'ADDITIONAL'], required: true },
-    instructions: { type: String, required: true, maxlength: 2000 },
-    items: [
-      {
-        _id: { type: Schema.Types.ObjectId, auto: true },
-        type: { type: String, enum: ['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER'], required: true },
-        category: { type: String, enum: PHOTO_CATEGORIES },
-        mediaKey: String,
-        photo: { type: Schema.Types.ObjectId, ref: 'ReccePhoto' },
-        note: { type: String, maxlength: 500 },
-        resolved: { type: Boolean, default: false },
-        resolvedInVersion: Number,
-      },
-    ],
-    status: { type: String, enum: ['OPEN', 'RESOLVED', 'CLOSED'], default: 'OPEN' },
-    requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-    resolvedAt: Date,
-  },
-  { timestamps: true },
-);
-reworkSchema.index({ submission: 1, status: 1 });
-export const RecceRework = model('RecceRework', reworkSchema);
+/** The embedded parts, as stored. */
+export type PhotoEntry = SubmissionDoc['photos'][number];
+export type VersionEntry = SubmissionDoc['versions'][number];
+export type ReviewEntry = SubmissionDoc['reviews'][number];
+export type ReworkEntry = SubmissionDoc['reworks'][number];
 
 /** Single configuration document: review order, checklist, required photos per media type, SLA. Edited by Admin. */
 const configSchema = new Schema(
   {
     key: { type: String, unique: true, default: 'default' },
     stages: { type: [{ type: String, enum: REVIEW_STAGES }], default: ['OPS', 'CS'] },
-    sequential: { type: Boolean, default: true },
+    // false = both stages get the shop at the same time and decide in any order (default since 2026-11-23). true = the second stage waits for the first.
+    sequential: { type: Boolean, default: false },
     allowRetryAfterReject: { type: Boolean, default: false },
     slaHours: { type: Number, default: 24 },
     maxPhotos: { type: Number, default: 40 },

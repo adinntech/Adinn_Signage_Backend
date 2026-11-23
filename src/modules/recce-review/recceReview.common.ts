@@ -23,6 +23,11 @@ export const REVIEWABLE: RecceStatus[] = ['SUBMITTED', 'UNDER_REVIEW'];
 
 export const oid = (v: string | Types.ObjectId) => new Types.ObjectId(String(v));
 
+/** A photo that counts for the shop right now: still a draft, or part of a submitted version (not replaced or removed). */
+export const isLivePhoto = (p: { state: string }) => p.state === 'DRAFT' || p.state === 'SUBMITTED';
+/** Newest first / oldest first by a date field (missing dates sort as the oldest). */
+export const timeOf = (d?: Date | null) => d?.getTime() ?? 0;
+
 export async function getConfig() {
   return (await RecceConfig.findOneAndUpdate({ key: 'default' }, { $setOnInsert: { key: 'default' } }, { upsert: true, returnDocument: 'after' })).toObject();
 }

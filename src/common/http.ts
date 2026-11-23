@@ -11,7 +11,7 @@ export const asyncHandler =
 export const ok = (res: Response, data: unknown, meta?: unknown, status = 200) =>
   res.status(status).json({ success: true, data, ...(meta ? { meta } : {}) });
 
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
   if (err instanceof ZodError) {
     return res.status(422).json({
       success: false,
@@ -43,6 +43,8 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
       .status(400)
       .json({ success: false, error: { code: 'BAD_JSON', message: 'Malformed JSON body' } });
   }
+  // Which request and which login failed, so the stack below can be traced (ids only, no body or token).
+  console.error(`[500] ${req.method} ${req.originalUrl.split('?')[0]} user=${req.auth?.sub ?? '-'} role=${req.auth?.role ?? '-'}`);
   console.error(err);
   res
     .status(500)

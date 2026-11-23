@@ -3,11 +3,12 @@ import { z } from 'zod';
 import { AppError } from '../../common/errors';
 import { AuditLog } from '../audit/auditLog.model';
 import { EVENT_LABEL, nameMap, oid, presentInstallation, presentPhoto, roleMap, type MediaItem } from './recceReview.common';
-import { CATEGORY_LABEL, ReccePhoto, RecceReview, RecceRework, RecceVersion, STAGE_LABEL, type ReviewStage } from './recceReview.model';
+import { CATEGORY_LABEL, RecceSubmission, STAGE_LABEL, type ReviewStage } from './recceReview.model';
 
 /**
- * Version history and compare. Everything is read from what already exists: the immutable RecceVersion snapshots, the
- * RecceReview decisions, the RecceRework requests and the photos. Used by the field router (own shops) and the review router.
+ * Version history and compare. Everything is read from the one submission document of the shop: the immutable `versions[]`
+ * snapshots, the `reviews[]` decisions, the `reworks[]` requests and the `photos[]`. Used by the field router (own shops) and
+ * the review router.
  */
 
 export const compareQuery = z.object({ from: z.coerce.number().int().min(1), to: z.coerce.number().int().min(1) });
@@ -32,14 +33,16 @@ const presentRework = (r: ReworkRow, names: Map<string, string>) => ({
 
 type Presented = Awaited<ReturnType<typeof presentPhoto>>;
 
+const time = (d?: Date | null) => d?.getTime() ?? 0;
+/** Photo order: the person's own order, then the time it was uploaded. */
+export const byPhotoOrder = (a: { order?: number | null; createdAt?: Date | null }, b: { order?: number | null; createdAt?: Date | null }) => (a.order ?? 0) - (b.order ?? 0) || time(a.createdAt) - time(b.createdAt);
+
 async function loadAll(submissionId: Types.ObjectId | string) {
-  const id = oid(submissionId);
-  const [versions, reviews, reworks, photos] = await Promise.all([
-    RecceVersion.find({ submission: id }).sort({ version: 1 }).lean(),
-    RecceReview.find({ submission: id }).lean(),
-    RecceRework.find({ submission: id }).sort({ createdAt: 1 }).lean(),
-    ReccePhoto.find({ submission: id, state: { $ne: 'DRAFT' } }).sort({ order: 1, createdAt: 1 }).lean(),
-  ]);
+  const sub = await RecceSubmission.findById(oid(submissionId)).select('photos versions reviews reworks').lean();
+  const versions = [...(sub?.versions ?? [])].sort((a, b) => a.version - b.version);
+  const reviews = sub?.reviews ?? [];
+  const reworks = [...(sub?.reworks ?? [])].sort((a, b) => time(a.createdAt) - time(b.createdAt));
+  const photos = (sub?.photos ?? []).filter((p) => p.state !== 'DRAFT').sort(byPhotoOrder);
   const people = [...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy)];
   const [names, roles] = await Promise.all([nameMap(people), roleMap(photos.map((p) => p.uploadedBy))]);
   const presented = new Map<string, Presented>();
@@ -48,8 +51,8 @@ async function loadAll(submissionId: Types.ObjectId | string) {
 }
 type Loaded = Awaited<ReturnType<typeof loadAll>>;
 
-const decisions = (L: Loaded, versionId: Types.ObjectId) =>
-  L.reviews.filter((r) => String(r.version) === String(versionId)).sort((a, b) => a.stage.localeCompare(b.stage)).map((r) => ({
+const decisions = (L: Loaded, versionNo: number) =>
+  L.reviews.filter((r) => r.versionNo === versionNo).sort((a, b) => a.stage.localeCompare(b.stage)).map((r) => ({
     stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (L.names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment ?? '',
   }));
 
@@ -62,7 +65,7 @@ export async function versionHistory(submissionId: Types.ObjectId | string) {
     version: v.version, current: idx === L.versions.length - 1, submittedAt: v.submittedAt, submittedBy: L.names.get(String(v.submittedBy)) ?? null, notes: v.notes ?? '',
     mediaItems: (v.mediaItems as unknown as MediaItem[]).map(presentItem), installation: presentInstallation(v.installation as never), installationRecorded: !!v.installation,
     photos: photosOf(L, v.photos), addedIds: v.added.map(String), removedIds: v.removed.map(String), stages: v.stages,
-    decisions: decisions(L, v._id), reworks: L.reworks.filter((r) => r.versionNo === v.version).map((r) => presentRework(r as never, L.names)),
+    decisions: decisions(L, v.version), reworks: L.reworks.filter((r) => r.versionNo === v.version).map((r) => presentRework(r as never, L.names)),
   }));
 }
 
@@ -107,7 +110,7 @@ export async function compareVersions(submissionId: Types.ObjectId | string, fro
   const installation = Object.keys(ib).filter((k) => !same(ia[k], ib[k])).map((k) => ({ field: k, from: ia[k], to: ib[k] }));
   const notesChanged = !same(a.notes ?? '', b.notes ?? '');
 
-  const side = (v: typeof a) => ({ version: v.version, submittedAt: v.submittedAt, submittedBy: L.names.get(String(v.submittedBy)) ?? null, reviewerComments: decisions(L, v._id).filter((d) => d.decision !== 'PENDING' && d.decision !== 'VOID') });
+  const side = (v: typeof a) => ({ version: v.version, submittedAt: v.submittedAt, submittedBy: L.names.get(String(v.submittedBy)) ?? null, reviewerComments: decisions(L, v.version).filter((d) => d.decision !== 'PENDING' && d.decision !== 'VOID') });
   return {
     from: side(a), to: side(b),
     photos: { added, replaced, unchanged, removed },
@@ -145,7 +148,8 @@ export function photoReviews(photos: LivePhoto[], openReworks: ReworkRow[], subm
 /** One photo's revisions (replaces chain, oldest first), its timeline events and the rework requests that named it. */
 export async function photoHistory(submissionId: Types.ObjectId | string, photoId: string, visibility: string[]) {
   const sid = oid(submissionId);
-  const all = await ReccePhoto.find({ submission: sid }).lean();
+  const sub = await RecceSubmission.findById(sid).select('photos reworks').lean();
+  const all = sub?.photos ?? [];
   const byId = new Map(all.map((p) => [String(p._id), p]));
   const start = byId.get(photoId);
   if (!start) throw AppError.notFound('Photo not found');
@@ -159,10 +163,8 @@ export async function photoHistory(submissionId: Types.ObjectId | string, photoI
     chain.push(next);
   }
   const ids = chain.map((p) => p._id);
-  const [events, reworks] = await Promise.all([
-    AuditLog.find({ entity: 'RecceSubmission', entityId: sid, 'meta.photo': { $in: ids }, 'meta.visibility': { $in: visibility } }).sort({ at: 1 }).populate('user', 'name').lean(),
-    RecceRework.find({ submission: sid, 'items.photo': { $in: ids } }).sort({ createdAt: 1 }).lean(),
-  ]);
+  const events = await AuditLog.find({ entity: 'RecceSubmission', entityId: sid, 'meta.photo': { $in: ids }, 'meta.visibility': { $in: visibility } }).sort({ at: 1 }).populate('user', 'name').lean();
+  const reworks = (sub?.reworks ?? []).filter((r) => r.items.some((i) => i.photo && ids.some((x) => String(x) === String(i.photo)))).sort((a, b) => time(a.createdAt) - time(b.createdAt));
   const [names, roles] = await Promise.all([nameMap([...chain.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reworks.map((r) => r.requestedBy)]), roleMap(chain.map((p) => p.uploadedBy))]);
   const revisions = await Promise.all(chain.map(async (p, i) => ({ revision: i + 1, current: i === chain.length - 1, ...(await presentPhoto(p as never, names, { withHistory: true, roles })) })));
   const isMine = (x: Types.ObjectId | null | undefined) => !!x && ids.some((i) => String(i) === String(x));
