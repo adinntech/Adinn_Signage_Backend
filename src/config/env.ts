@@ -41,8 +41,6 @@ const schema = z
     MAX_IMAGE_SIZE: z.coerce.number().int().positive(),
     MAX_VIDEO_SIZE: z.coerce.number().int().positive(),
     SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
-    /** TESTING ONLY. true lets one recce picture be stored for several photo types of the same shop (normally the same content twice is refused). Ignored in production. */
-    ALLOW_DUPLICATE_RECCE_PHOTOS: z.enum(['true', 'false']).default('false'),
     /** Where the in-house recce team starts from when a project has no start point of its own (used by the smart planner). */
     DEFAULT_BASE_NAME: z.string().trim().min(1).default('Adinn Head Office'),
     DEFAULT_BASE_LAT: z.coerce.number().min(-90).max(90).default(9.9252),
@@ -191,8 +189,6 @@ export const env = {
   SIGNAGE_MAIL_API_KEY: parsed.data.SIGNAGE_MAIL_API_KEY ?? parsed.data.SIGNAGE_MAIL_KEY,
   corsOrigins: parsed.data.CORS_ORIGINS.split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean),
   cookieSecure: parsed.data.COOKIE_SECURE === 'true',
-  /** Testing switch: never applies when NODE_ENV is production, whatever the .env says. */
-  allowDuplicateRecce: parsed.data.ALLOW_DUPLICATE_RECCE_PHOTOS === 'true' && parsed.data.NODE_ENV !== 'production',
   dnsServers: parsed.data.DNS_SERVERS.split(',').map((x) => x.trim()).filter(Boolean),
   isProd: parsed.data.NODE_ENV === 'production',
   /** `production` is accepted as an alias for `space`. */

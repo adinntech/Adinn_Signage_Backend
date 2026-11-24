@@ -33,7 +33,7 @@ export const decideBody = z.object({
   stage: z.enum(REVIEW_STAGES), decision: z.enum(['APPROVE', 'REJECT', 'REWORK', 'ADDITIONAL']), versionNo: z.coerce.number().int().min(1),
   comment: z.string().trim().max(2000).default(''), checklist: checklistBody,
   reason: z.string().trim().max(2000).optional(), // rejection reason or admin override reason
-  items: z.array(z.object({ type: z.enum(['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER']), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(20).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional() })).max(30).default([]),
+  items: z.array(z.object({ type: z.enum(['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER']), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(20).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional(), rejected: z.boolean().optional() })).max(30).default([]),
 });
 /** A stage that approved changes its answer: Reject, Rework or More photos, always with a written reason (min 5 characters). */
 export const changeDecisionBody = decideBody.extend({ decision: z.enum(['REJECT', 'REWORK', 'ADDITIONAL']) });
@@ -247,7 +247,7 @@ export async function workspace(actor: Actor, id: string) {
       reviews: reviewsOfVersion(reviews, v.version).map(dec),
     })),
     photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
-    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
+    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
     checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps })),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
     me: { stage: mine, canDecide: !!mine && open === mine && !CLOSED_PROJECT.includes(String(project.status)), canChange: !!mine && CHANGEABLE.includes(sub.status) && curReviews.find((r) => r.stage === mine)?.decision === 'APPROVED' && !CLOSED_PROJECT.includes(String(project.status)), openStage: open, isAdmin: actor.role === 'SUPER_ADMIN', canReopen: (sub.status === 'REJECTED' && (cfg.allowRetryAfterReject ? !!mine || actor.role === 'SUPER_ADMIN' : actor.role === 'SUPER_ADMIN')) || (sub.status === 'APPROVED' && actor.role === 'SUPER_ADMIN') },
@@ -283,6 +283,9 @@ function checkDecisionInput(sub: InstanceType<typeof RecceSubmission>, input: z.
   if (input.decision === 'ADDITIONAL' && !input.items.some((i) => i.type === 'ADDITIONAL_PHOTO' && i.category)) throw AppError.badRequest('Choose the photo categories you need');
   const photoIds = [...new Set(input.items.map((i) => i.photo).filter(Boolean) as string[])];
   if (photoIds.some((pid) => !sub.photos.some((p) => String(p._id) === String(pid).toLowerCase()))) throw AppError.badRequest('A selected photo does not belong to this shop');
+  // A rejected photo names the photo and says why: the recce person sees "Rejected" with this reason.
+  if (input.items.some((i) => i.rejected && (i.type !== 'REPLACE_PHOTO' || !i.photo))) throw AppError.badRequest('Only a photo of this shop can be rejected');
+  if (input.items.some((i) => i.rejected && (i.note ?? '').length < 3)) throw AppError.badRequest('Give the reason for rejecting each photo');
   return photoIds;
 }
 
@@ -355,8 +358,9 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
     ...photoIds.map((id) => ({ type: 'PHOTO', id })),
     ...[...new Set(input.items.filter((i) => !i.photo && i.mediaKey && sub.mediaItems.some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
   ];
-  const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: 'Rework required', ADDITIONAL: 'Additional photos requested' };
-  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: 'Rework items', value: pointed.join(', ') }] : [] });
+  const anyRejected = input.items.some((i) => i.rejected);
+  const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: anyRejected ? 'Photos rejected' : 'Rework required', ADDITIONAL: 'Additional photos requested' };
+  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: anyRejected ? 'Rejected photos' : 'Rework items', value: pointed.join(', ') }] : [] });
   if (status === 'APPROVED' && weMoved) await notifyFinalApproval(actor, fresh, version.version, stages);
   // Only sequential review hands over to the next stage; in parallel review that stage was told when the version was submitted.
   if (status === 'UNDER_REVIEW' && pendingStage && version.sequential) await notifyNextStage(actor, fresh, pendingStage, version.version);
@@ -413,7 +417,7 @@ export async function changeDecision(actor: Actor, id: string, input: z.infer<ty
   const fresh = (await RecceSubmission.findById(sub._id))!;
   const cats = input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]);
   await afterDecision(actor, fresh, {
-    versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: `Decision changed: ${decision === 'REJECTED' ? 'rejected' : input.decision === 'ADDITIONAL' ? 'more photos requested' : 'rework required'}`, tone: decision === 'REJECTED' ? 'bad' : 'warn',
+    versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: `Decision changed: ${decision === 'REJECTED' ? 'rejected' : input.decision === 'ADDITIONAL' ? 'more photos requested' : input.items.some((i) => i.rejected) ? 'photos rejected' : 'rework required'}`, tone: decision === 'REJECTED' ? 'bad' : 'warn',
     refs: photoIds.map((pid) => ({ type: 'PHOTO', id: pid })),
     extra: [{ label: 'Earlier decision', value: 'Approved' }, ...(cats.length ? [{ label: 'Needed', value: cats.join(', ') }] : [])],
   });

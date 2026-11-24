@@ -26,6 +26,7 @@ import { fileRouter } from './modules/files/file.routes';
 import { salesRouter } from './modules/sales/sales.routes';
 import { templateRouter } from './modules/templates/template.routes';
 import { mailSettingsRouter } from './modules/mailSettings/mailSettings.routes';
+import { catalogRouter } from './modules/catalog/catalog.routes';
 import { mailRepliesRouter } from './modules/mailReplies/mailReplies.routes';
 import { replyLabRouter } from './modules/mailReplies/replyLab.routes';
 import { mailContactRouter } from './modules/mailContacts/mailContact.routes';
@@ -70,6 +71,7 @@ export function createApp() {
   app.use('/api/v1/mail-replies', mailRepliesRouter);
   app.use('/api/v1/mail-settings/reply-lab', replyLabRouter);
   app.use('/api/v1/mail-settings', mailSettingsRouter);
+  app.use('/api/v1/catalog', catalogRouter);
   app.use('/api/v1/mail-contacts', mailContactRouter);
   app.use('/api/v1/rate-items', rateItemRouter);
   app.use('/api/v1/rate-card-creation', rateCardCreationRouter);

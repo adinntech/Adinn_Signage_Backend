@@ -8,8 +8,8 @@ import type { Express } from 'express';
 
 /**
  * Recce photo types: a picture is accepted whatever picture format it is and whatever picture extension it carries
- * (a PNG screenshot saved as photo.jpg), a non-picture is still refused, and with the testing switch on
- * (ALLOW_DUPLICATE_RECCE_PHOTOS=true) one picture can be stored for every photo type of a shop.
+ * (a PNG screenshot saved as photo.jpg), a non-picture is still refused, and one picture can be stored for every photo type
+ * of a shop (the person may use one good view for several angles).
  */
 let mongod: MongoMemoryServer;
 let app: Express;
@@ -43,7 +43,6 @@ beforeAll(async () => {
   process.env.JWT_ACCESS_SECRET = 'test-secret-test-secret-test-secret-123';
   process.env.STORAGE_TYPE = 'local';
   process.env.LOCAL_UPLOAD_PATH = root;
-  process.env.ALLOW_DUPLICATE_RECCE_PHOTOS = 'true'; // read when the config is first imported
   const db = await import('../src/config/db');
   disconnectDb = db.disconnectDb;
   await db.connectDb();
@@ -92,7 +91,7 @@ describe('recce photo types', () => {
     expect((await send(SCRIPT, 'run.exe', 'ADDITIONAL')).status).toBe(400);
   });
 
-  it('stores one picture for every photo type when the testing switch is on', async () => {
+  it('stores one picture for every photo type, with no switch or setting needed', async () => {
     const same = Buffer.concat([BYTES.png, Buffer.from('one-picture-for-all')]);
     for (const category of ['SIDE_VIEW', 'LONG_SHOT', 'ANNOTATED_VIEW', 'LOCATION_VIEW']) {
       const res = await send(same, 'photo_same.jpg', category);

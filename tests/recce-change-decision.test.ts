@@ -75,7 +75,7 @@ beforeAll(async () => {
   }
   const client = await Client.create({ name: 'DEMO', code: 'DM' });
   const p = await Project.create({ code: '20262026', name: 'DEMO - 2026-FIRST', client: client._id, status: 'IN_PROGRESS', assignedTo: ids.OPS, createdBy: ids.CS, requirementType: 'SHOP_DETAILS' });
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= 7; i++) {
     ids[`S${i}`] = String((await Site.create({ project: p._id, seq: i, siteCode: `20262026-S00${i}`, scenario: 'MEASUREMENT_REQUIRED', dealerName: `Dealer ${i}`, boardType: 'Board', quantity: 1, district: 'CHENNAI', location: 'T. Nagar', lat: 13.041, lng: 80.234, channel: 'VENDOR', vendor: vendor._id }))._id);
   }
   for (const k of ['OPS', 'CS', 'ADMIN']) tokens[k] = (await api().post(`${BASE}/auth/login`).send({ email: `${k.toLowerCase()}@t.com`, password: 'Passw0rd!x' })).body.data.accessToken;
@@ -159,7 +159,7 @@ describe('a stage that approved changes its decision', () => {
   });
 
   /** What the recce person sees for each photo of a shop: category -> { review status, the reviewer's note }. */
-  const flags = async (siteId: string) => Object.fromEntries(((await detail('VA', siteId)).photos as { category: string; review: { status: string; openRework: { note: string } | null } }[]).map((p) => [p.category, { status: p.review.status, note: p.review.openRework?.note ?? null }]));
+  const flags = async (siteId: string) => Object.fromEntries(((await detail('VA', siteId)).photos as { category: string; review: { status: string; openRework: { note: string; rejected: boolean } | null } }[]).map((p) => [p.category, { status: p.review.status, note: p.review.openRework?.note ?? null, rejected: p.review.openRework?.rejected ?? false }]));
   const photoId = async (who: string, sub: string, category: string) => ((await workspace(who, sub)).photos as { id: string; category: string }[]).find((p) => p.category === category)!.id;
 
   it('each photo can be rejected with its own reason: two rejected photos go back as ONE rework and only those two are flagged', async () => {
@@ -169,15 +169,16 @@ describe('a stage that approved changes its decision', () => {
     // the same request the review screen sends for "Send 2 rejected photos back"
     const r = await api().post(`${BASE}/recce-review/submissions/${sub}/decision`).set(as('CS')).send({
       stage: 'CS', decision: 'REWORK', versionNo: 1, comment: 'Photos rejected: Full Shop Front View, Side View', checklist: [],
-      items: [{ type: 'REPLACE_PHOTO', photo: front, note: 'Board is cut off' }, { type: 'REPLACE_PHOTO', photo: side, note: 'Too dark' }],
+      items: [{ type: 'REPLACE_PHOTO', photo: front, note: 'Board is cut off', rejected: true }, { type: 'REPLACE_PHOTO', photo: side, note: 'Too dark', rejected: true }],
     });
     expect(r.status).toBe(200);
     expect(r.body.data.status).toBe('REWORK_REQUIRED');
     expect(r.body.data.reworks).toHaveLength(1);
     expect(r.body.data.reworks[0].items).toHaveLength(2);
+    expect(r.body.data.reworks[0].items.every((i: { rejected: boolean }) => i.rejected)).toBe(true);
     const f = await flags(ids.S5!);
-    expect(f.SHOP_FRONT).toEqual({ status: 'REWORK_REQUIRED', note: 'Board is cut off' });
-    expect(f.SIDE_VIEW).toEqual({ status: 'REWORK_REQUIRED', note: 'Too dark' });
+    expect(f.SHOP_FRONT).toEqual({ status: 'REWORK_REQUIRED', note: 'Board is cut off', rejected: true });
+    expect(f.SIDE_VIEW).toEqual({ status: 'REWORK_REQUIRED', note: 'Too dark', rejected: true });
     expect(f.LONG_SHOT!.status).toBe('PENDING'); // the other photos are not asked again
     expect(f.ACCESS_PATH!.status).toBe('PENDING');
   });
@@ -186,12 +187,29 @@ describe('a stage that approved changes its decision', () => {
     const sub = await submitted(ids.S6!);
     expect((await approve('OPS', sub, 'OPS')).status).toBe(200);
     const roof = await photoId('OPS', sub, 'LOCATION_VIEW');
-    const r = await change('OPS', sub, 'OPS', 'REWORK', { comment: 'Photos rejected: Location View', items: [{ type: 'REPLACE_PHOTO', photo: roof, note: 'Wrong street' }] });
+    const r = await change('OPS', sub, 'OPS', 'REWORK', { comment: 'Photos rejected: Location View', items: [{ type: 'REPLACE_PHOTO', photo: roof, note: 'Wrong street', rejected: true }] });
     expect(r.status).toBe(200);
     expect(r.body.data.status).toBe('REWORK_REQUIRED');
     const f = await flags(ids.S6!);
-    expect(f.LOCATION_VIEW).toEqual({ status: 'REWORK_REQUIRED', note: 'Wrong street' });
+    expect(f.LOCATION_VIEW).toEqual({ status: 'REWORK_REQUIRED', note: 'Wrong street', rejected: true });
     expect(f.SHOP_FRONT!.status).toBe('PENDING');
+  });
+
+  it('a plain rework item (not rejected) is flagged "rework required" and carries no rejected mark; a rejected photo needs its reason', async () => {
+    const sub = await submitted(ids.S7!);
+    const front = await photoId('CS', sub, 'SHOP_FRONT');
+    const side = await photoId('CS', sub, 'SIDE_VIEW');
+    const decide = (items: unknown[]) => api().post(`${BASE}/recce-review/submissions/${sub}/decision`).set(as('CS')).send({ stage: 'CS', decision: 'REWORK', versionNo: 1, comment: 'Fix the photos', checklist: [], items });
+    // refused, nothing written: a rejected photo without a reason, and a rejected item that names no photo
+    expect((await decide([{ type: 'REPLACE_PHOTO', photo: front, rejected: true }])).status).toBe(400);
+    expect((await decide([{ type: 'REPLACE_PHOTO', photo: front, note: 'ab', rejected: true }])).status).toBe(400);
+    expect((await decide([{ type: 'REPLACE_PHOTO', category: 'SIDE_VIEW', note: 'Retake this one', rejected: true }])).status).toBe(400);
+    expect((await detail('VA', ids.S7!)).status).toBe('SUBMITTED'); // untouched: still waiting for the review
+    // accepted: one rejected, one plain rework
+    expect((await decide([{ type: 'REPLACE_PHOTO', photo: front, note: 'Out of focus', rejected: true }, { type: 'REPLACE_PHOTO', photo: side, note: 'Please retake' }])).status).toBe(200);
+    const f = await flags(ids.S7!);
+    expect(f.SHOP_FRONT).toEqual({ status: 'REWORK_REQUIRED', note: 'Out of focus', rejected: true });
+    expect(f.SIDE_VIEW).toEqual({ status: 'REWORK_REQUIRED', note: 'Please retake', rejected: false });
   });
 
   it('refuses: no approval yet, wrong team, wrong version, vendor, short reason, approve as the new answer', async () => {

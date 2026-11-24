@@ -1,9 +1,8 @@
-import { createHash } from 'node:crypto';
 import { Types } from 'mongoose';
 import { z } from 'zod';
-import { env } from '../../config/env';
 import { AppError } from '../../common/errors';
 import { escapeRegex, objectId, pageMeta, type Actor } from '../../common/query';
+import { assertBoardRefs } from '../catalog/catalog.service';
 import { postShopMessage } from '../connect/connect.service';
 import { discardStoredFiles, eraseStoredFile, storeEmbeddedFile, validateFiles, type UploadedFile } from '../files/file.service';
 import type { StoredFile } from '../files/storedFile.schema';
@@ -38,6 +37,13 @@ export const mediaItemBody = z.object({
   condition: z.enum(['EXISTING', 'PROPOSED']).optional(),
   position: text(120).optional(),
   installationNotes: text(500).optional(),
+  // Per-board installation requirement: the catalog media code, the catalog installation code, and the answers to that board's site questions.
+  mediaCode: z.string().trim().regex(/^[A-Z0-9_]{2,30}$/).optional(),
+  installationType: z.string().trim().regex(/^[a-z0-9_]{2,40}$/).optional(),
+  answers: z
+    .record(z.string().regex(/^[a-z0-9_]{1,50}$/), z.union([text(300), z.number(), z.boolean()]))
+    .refine((o) => Object.keys(o).length <= 60, 'Too many answers')
+    .optional(),
 });
 const tri = z.enum(TRI_STATES);
 const list = (n: number, each: number) => z.array(z.string().trim().min(1).max(each)).max(n);
@@ -213,7 +219,7 @@ export async function shopDetail(actor: Actor, siteId: string) {
     progress: { percent: status === 'APPROVED' ? 100 : m.percent, required: m.required, done: m.done, missing: m.missing.map((x) => ({ ...x, label: x.category === 'DIMENSIONS' ? 'Width, height and quantity' : CATEGORY_LABEL[x.category as keyof typeof CATEGORY_LABEL] })) },
     versions: versions.map((v) => ({ version: v.version, submittedAt: v.submittedAt, photoCount: v.photos.length })),
     reviews: reviews.map((r) => ({ versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, comment: r.comment, reviewer: r.reviewer ? (reviewers.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null })),
-    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: requestedBy.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: i.resolved })) })),
+    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: requestedBy.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: i.resolved })) })),
     maxPhotos: cfg.maxPhotos,
   };
 }
@@ -244,6 +250,8 @@ export async function saveDraft(actor: Actor, siteId: string, input: z.infer<typ
     if (new Set(keys).size !== keys.length) throw AppError.badRequest('Each media type needs its own key');
     const numbers = input.mediaItems.filter((i) => i.mediaType && i.seq).map((i) => `${i.mediaType!.toLowerCase()}-${i.seq}`);
     if (new Set(numbers).size !== numbers.length) throw AppError.badRequest('Two boards have the same number');
+    // The media type / installation of a board must be one the catalog offers (checked only when it changed: an older draft can be saved again as it is).
+    await assertBoardRefs(input.mediaItems, sub.mediaItems.map((i) => i.toObject()) as never);
     // A media type that already has photos cannot be dropped, or those photos would be orphaned.
     const used = new Set(sub.photos.filter((p) => isLivePhoto(p) && p.mediaKey).map((p) => p.mediaKey as string));
     const lost = [...used].filter((k) => !keys.includes(k));
@@ -302,9 +310,9 @@ function flagsFor(m: z.infer<typeof photoMeta>, site: { lat?: number | null; lng
 }
 
 /**
- * Adds draft photos, one metadata object per file (same order). The same photo twice is stored once: by `clientId`
- * (a retry or a resumed upload returns the stored photo) and by content (sha256) within the shop. All files are checked
- * before any is stored, and stored files are removed again if saving fails.
+ * Adds draft photos, one metadata object per file (same order). A retry of the same upload is stored once, by `clientId`
+ * (a retry or a resumed upload returns the stored photo). The same picture sent for another angle (another `clientId`) is a new
+ * photo of its own. All files are checked before any is stored, and stored files are removed again if saving fails.
  */
 export async function uploadPhotos(actor: Actor, siteId: string, files: UploadedFile[], metas: z.infer<typeof photoMeta>[]) {
   if (!files.length) throw AppError.badRequest('Attach at least one photo');
@@ -318,16 +326,13 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
   // The photos are part of the shop's one document, so everything below is read from `sub` and written with one atomic update.
   const live = sub.photos.filter(isLivePhoto);
   const keys = new Set(sub.mediaItems.map((i) => i.key));
-  const hashes = files.map((f) => createHash('sha256').update(f.buffer).digest('hex'));
   const known = new Set(sub.photos.map((p) => p.clientId).filter((c): c is string => !!c));
-  const fresh = files.map((f, i) => ({ f, m: metas[i]!, h: hashes[i]! })).filter((x) => !(x.m.clientId && known.has(x.m.clientId)));
+  const fresh = files.map((f, i) => ({ f, m: metas[i]! })).filter((x) => !(x.m.clientId && known.has(x.m.clientId)));
   if (live.length + fresh.length > cfg.maxPhotos) throw AppError.badRequest(`A shop can hold ${cfg.maxPhotos} photos`);
-  const seen = new Set<string>();
   for (const x of fresh) {
     if (x.m.mediaKey && !keys.has(x.m.mediaKey)) throw AppError.badRequest('Unknown media type for a photo');
-    // The same content twice in one shop is refused, except when the testing switch is on (one picture for every photo type).
-    if (!env.allowDuplicateRecce && (live.some((p) => p.original?.sha256 === x.h) || seen.has(x.h))) throw AppError.conflict(`${x.f.originalname} is already uploaded for this shop`);
-    seen.add(x.h);
+    // The same picture may be stored for several angles (and boards) of one shop: one good view often serves more than one angle.
+    // Only a RETRY of the same upload (same clientId) is stored once; that is handled above, not by comparing content.
     if (x.m.replaces && !sub.photos.some((p) => String(p._id) === String(x.m.replaces) && p.state === 'SUBMITTED')) throw AppError.badRequest('The photo to replace was not found');
   }
   if (!fresh.length) return shopDetail(actor, siteId); // every photo was already stored (a retry): nothing to add

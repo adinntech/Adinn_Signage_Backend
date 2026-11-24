@@ -144,15 +144,20 @@ describe('recce data of a shop is one document', () => {
     expect(filesUnder(root).filter((f) => f.includes('P-ONE_P-ONE-S2'))).toHaveLength(1); // the loser's file was removed again
   });
 
-  it('refuses the same picture twice in one shop (the testing switch is off unless the .env turns it on)', async () => {
+  it('allows the same picture for several angles of one shop: each angle is a photo of its own', async () => {
     const { Site } = await import('../src/modules/sites/site.model');
     const site = await Site.create({ project: ids.PA, seq: 3, siteCode: 'P-ONE-S3', scenario: 'MEASUREMENT_REQUIRED', shopName: 'Shop A3', boardType: 'GSB Single Side', quantity: 2, district: 'Madurai', lat: 9.9, lng: 78.1, channel: 'VENDOR', vendor: (await Site.findById(ids.SA1).lean())!.vendor });
     const same = png();
-    const send = (category: string) => api().post(`/api/v1/recce/shops/${site._id}/photos`).set(as('VA')).attach('photos', same, 'same.png').field('meta', JSON.stringify([meta(category)]));
-    expect((await send('SHOP_FRONT')).status).toBe(201);
-    const again = await send('NAME_BOARD');
-    expect(again.status).toBe(409);
-    expect(again.body.error.message).toMatch(/already uploaded/);
+    const send = (category: string, clientId: string) => api().post(`/api/v1/recce/shops/${site._id}/photos`).set(as('VA')).attach('photos', same, 'same.png').field('meta', JSON.stringify([meta(category, { clientId })]));
+    expect((await send('SHOP_FRONT', 'angle-front-0001')).status).toBe(201);
+    expect((await send('NAME_BOARD', 'angle-name-0001')).status).toBe(201);
+    expect((await send('LEFT_SIDE', 'angle-left-0001')).status).toBe(201);
+    const doc = (await Models.RecceSubmission.findOne({ site: site._id }).lean())!;
+    expect(doc.photos.map((p) => p.category).sort()).toEqual(['LEFT_SIDE', 'NAME_BOARD', 'SHOP_FRONT']);
+    expect(new Set(doc.photos.map((p) => String(p._id))).size).toBe(3); // three photos, not one shared record
+    // a RETRY of one of them (same clientId) is still stored once
+    expect((await send('LEFT_SIDE', 'angle-left-0001')).status).toBe(201);
+    expect((await Models.RecceSubmission.findOne({ site: site._id }).lean())!.photos).toHaveLength(3);
   });
 
   it('keeps a draft upload from landing in a shop that was just submitted', async () => {

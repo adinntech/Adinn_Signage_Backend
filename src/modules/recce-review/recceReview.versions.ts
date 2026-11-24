@@ -13,7 +13,7 @@ import { CATEGORY_LABEL, RecceSubmission, STAGE_LABEL, type ReviewStage } from '
 
 export const compareQuery = z.object({ from: z.coerce.number().int().min(1), to: z.coerce.number().int().min(1) });
 
-const ITEM_FIELDS = ['name', 'quantity', 'width', 'height', 'unit', 'sided', 'condition', 'position', 'installationNotes', 'notes'] as const;
+const ITEM_FIELDS = ['name', 'quantity', 'width', 'height', 'unit', 'sided', 'condition', 'position', 'installationNotes', 'notes', 'installationType', 'answers'] as const;
 
 /** The readable number of a board: "GSB-01" from its media type and seq; a board made before numbers existed is shown by its name. */
 export const boardLabel = (i: MediaItem) => (i.mediaType && i.seq ? `${i.mediaType}-${String(i.seq).padStart(2, '0')}` : i.name);
@@ -22,16 +22,17 @@ export const boardLabel = (i: MediaItem) => (i.mediaType && i.seq ? `${i.mediaTy
 export const presentItem = (i: MediaItem) => ({
   key: i.key, name: i.name, mediaType: i.mediaType ?? null, seq: i.seq ?? null, label: boardLabel(i), quantity: i.quantity ?? 1, width: i.width ?? null, height: i.height ?? null, unit: i.unit ?? 'FT', notes: i.notes ?? '',
   sided: i.sided ?? null, condition: i.condition ?? null, position: i.position ?? '', installationNotes: i.installationNotes ?? '',
+  mediaCode: i.mediaCode ?? null, installationType: i.installationType ?? null, answers: i.answers ?? {},
 });
 
 type ReworkRow = {
   _id: Types.ObjectId; versionNo?: number | null; stage: string; kind: string; status: string; instructions: string; requestedBy: Types.ObjectId; createdAt?: Date; resolvedAt?: Date | null;
-  items: { _id: Types.ObjectId; type: string; category?: string | null; mediaKey?: string | null; photo?: Types.ObjectId | null; note?: string | null; resolved?: boolean; resolvedInVersion?: number | null }[];
+  items: { _id: Types.ObjectId; type: string; category?: string | null; mediaKey?: string | null; photo?: Types.ObjectId | null; note?: string | null; rejected?: boolean | null; resolved?: boolean; resolvedInVersion?: number | null }[];
 };
 const presentRework = (r: ReworkRow, names: Map<string, string>) => ({
   id: String(r._id), versionNo: r.versionNo ?? null, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions,
   requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt ?? null, resolvedAt: r.resolvedAt ?? null,
-  items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })),
+  items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })),
 });
 
 type Presented = Awaited<ReturnType<typeof presentPhoto>>;
@@ -132,7 +133,7 @@ type LivePhoto = { _id: Types.ObjectId; category: string; mediaKey?: string | nu
  * item without a photo, at its category). APPROVED once the whole shop is approved. Otherwise PENDING.
  */
 export function photoReviews(photos: LivePhoto[], openReworks: ReworkRow[], submissionStatus: string | null | undefined, names: Map<string, string>) {
-  type Review = { status: 'PENDING' | 'APPROVED' | 'REWORK_REQUIRED'; openRework: null | { reworkId: string; itemId: string; note: string; stage: string; stageLabel: string; instructions: string; requestedBy: string | null; requestedAt: Date | null } };
+  type Review = { status: 'PENDING' | 'APPROVED' | 'REWORK_REQUIRED'; openRework: null | { reworkId: string; itemId: string; note: string; /** the reviewer rejected this photo (the note is the reason for rejection) */ rejected: boolean; stage: string; stageLabel: string; instructions: string; requestedBy: string | null; requestedAt: Date | null } };
   const out = new Map<string, Review>();
   const newestFirst = openReworks.filter((r) => r.status === 'OPEN').sort((x, y) => (y.createdAt?.getTime() ?? 0) - (x.createdAt?.getTime() ?? 0));
   for (const p of photos) {
@@ -142,7 +143,7 @@ export function photoReviews(photos: LivePhoto[], openReworks: ReworkRow[], subm
       if (i) { hit = { r, i }; break; }
     }
     out.set(String(p._id), hit
-      ? { status: 'REWORK_REQUIRED', openRework: { reworkId: String(hit.r._id), itemId: String(hit.i._id), note: hit.i.note ?? '', stage: hit.r.stage, stageLabel: STAGE_LABEL[hit.r.stage as ReviewStage], instructions: hit.r.instructions, requestedBy: names.get(String(hit.r.requestedBy)) ?? null, requestedAt: hit.r.createdAt ?? null } }
+      ? { status: 'REWORK_REQUIRED', openRework: { reworkId: String(hit.r._id), itemId: String(hit.i._id), note: hit.i.note ?? '', rejected: !!hit.i.rejected, stage: hit.r.stage, stageLabel: STAGE_LABEL[hit.r.stage as ReviewStage], instructions: hit.r.instructions, requestedBy: names.get(String(hit.r.requestedBy)) ?? null, requestedAt: hit.r.createdAt ?? null } }
       : { status: submissionStatus === 'APPROVED' && p.state === 'SUBMITTED' ? 'APPROVED' : 'PENDING', openRework: null });
   }
   return out;
@@ -174,6 +175,6 @@ export async function photoHistory(submissionId: Types.ObjectId | string, photoI
   return {
     photoId: String(start._id), revisions,
     events: events.map((l) => ({ id: String(l._id), type: l.action, label: EVENT_LABEL[l.action] ?? l.action, actor: (l.user as unknown as { name?: string } | null)?.name ?? 'Unknown', role: l.role ?? '', at: l.at, reason: l.reason ?? '', photoId: String((l.meta as { photo?: unknown } | undefined)?.photo ?? ''), version: (l.meta as { version?: number | null } | undefined)?.version ?? null })),
-    reworks: reworks.flatMap((r) => r.items.filter((i) => isMine(i.photo as never)).map((i) => ({ reworkId: String(r._id), itemId: String(i._id), photoId: String(i.photo), stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt ?? null, note: i.note ?? '', instructions: r.instructions, resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null }))),
+    reworks: reworks.flatMap((r) => r.items.filter((i) => isMine(i.photo as never)).map((i) => ({ reworkId: String(r._id), itemId: String(i._id), photoId: String(i.photo), stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt ?? null, note: i.note ?? '', rejected: !!i.rejected, instructions: r.instructions, resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null }))),
   };
 }

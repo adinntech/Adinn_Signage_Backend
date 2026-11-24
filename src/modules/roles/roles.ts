@@ -53,6 +53,8 @@ export const PERMISSIONS = [
   'mail:manage',
   // Review recce photo submissions as Client Servicing (client requirement stage). Recce Operations uses verification:manage.
   'recce:review-cs',
+  // Media catalog: add, edit and delete media types, installation types and the site questions (SUPER_ADMIN only; web and phone).
+  'catalog:manage',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -92,9 +94,10 @@ export const ROLE_HOME: Record<Role, string> = {
 
 
 // Which client app each role signs in on. Recce field staff are mobile-only; everyone else uses the web CRM.
+// SUPER_ADMIN may also sign in on the phone: the app then shows only the Media catalog screens and the profile (2026-11-24).
 export type Platform = 'web' | 'mobile';
 export const ROLE_PLATFORMS: Record<Role, readonly Platform[]> = {
-  SUPER_ADMIN: ['web'],
+  SUPER_ADMIN: ['web', 'mobile'],
   BD: ['web'],
   CLIENT_SERVICING: ['web'],
   RECCE_COORDINATOR: ['web'],

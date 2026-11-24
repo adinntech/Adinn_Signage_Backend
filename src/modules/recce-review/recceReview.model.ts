@@ -72,6 +72,14 @@ const mediaItemSchema = new Schema(
     condition: { type: String, enum: ['EXISTING', 'PROPOSED'] },
     position: { type: String, maxlength: 120 },
     installationNotes: { type: String, maxlength: 500 },
+    /**
+     * Per-board installation requirement (2026-11-24). `mediaCode` is the catalog code of the media type the board was made from (the name above
+     * can be edited in the catalog later; boards keep the name they were made with). `installationType` is a catalog installation code and
+     * `answers` holds the site questions' answers by question key. All optional: older boards have none of them.
+     */
+    mediaCode: { type: String, maxlength: 30 },
+    installationType: { type: String, maxlength: 40 },
+    answers: { type: Schema.Types.Mixed },
   },
   { _id: false },
 );
@@ -184,6 +192,8 @@ const reworkSchema = new Schema({
       mediaKey: String,
       photo: { type: Schema.Types.ObjectId },
       note: { type: String, maxlength: 500 },
+      /** A REPLACE_PHOTO item the reviewer REJECTED on the review screen: the photo is shown "Rejected" with `note` as the reason (same work for the recce person: retake it). */
+      rejected: { type: Boolean, default: false },
       resolved: { type: Boolean, default: false },
       resolvedInVersion: Number,
     },
@@ -246,7 +256,8 @@ const configSchema = new Schema(
     sequential: { type: Boolean, default: false },
     allowRetryAfterReject: { type: Boolean, default: false },
     slaHours: { type: Number, default: 24 },
-    maxPhotos: { type: Number, default: 40 },
+    // Each board has its own seven photos (up to 12 boards): 100 is the most the settings screen accepts.
+    maxPhotos: { type: Number, default: 100 },
     requireGps: { type: Boolean, default: false },
     checklist: {
       type: [{ _id: false, key: String, label: String, stage: { type: String, enum: [...REVIEW_STAGES, 'ALL'], default: 'ALL' }, gps: Boolean }],

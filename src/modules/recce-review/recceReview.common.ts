@@ -103,7 +103,7 @@ export async function assertProjectOpen(projectId: Types.ObjectId | string) {
 
 /* ------------------------------------------------ requirements & progress ------------------------------------------------ */
 
-export type MediaItem = { key: string; name: string; mediaType?: string | null | undefined; seq?: number | null | undefined; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined };
+export type MediaItem = { key: string; name: string; mediaType?: string | null | undefined; seq?: number | null | undefined; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined; mediaCode?: string | null | undefined; installationType?: string | null | undefined; answers?: Record<string, string | number | boolean> | null | undefined };
 
 /** Photo categories this media item needs. Configurable: the first config key contained in the media name wins, else the project rule, else default. */
 export function requiredCategories(cfg: Config, item: MediaItem, requirementType?: string | null): PhotoCategory[] {

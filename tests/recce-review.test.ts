@@ -118,16 +118,15 @@ describe('photo capture and upload', () => {
     expect(r.body.data.photos).toHaveLength(2);
     expect(r.body.data.progress.missing.length).toBe(0);
   });
-  it('rejects the same photo twice, but a retried upload with the same clientId is stored once', async () => {
+  it('allows the same picture for another angle (a photo of its own), while a retried upload with the same clientId is stored once', async () => {
     const buf = png();
     const m = meta('LEFT_SIDE');
     expect((await upload('VA', ids.S1, [m], [buf])).status).toBe(201);
-    const dup = await upload('VA', ids.S1, [meta('RIGHT_SIDE')], [buf]);
-    expect(dup.status).toBe(409);
+    const other = await upload('VA', ids.S1, [meta('RIGHT_SIDE')], [buf]); // the same picture, another angle
+    expect(other.status).toBe(201);
     const before = (await detail('VA', ids.S1)).photos.length;
-    const retry = await upload('VA', ids.S1, [m]);
-    expect(retry.status).toBe(201);
-    expect((await detail('VA', ids.S1)).photos.length).toBe(before);
+    expect((await upload('VA', ids.S1, [m])).status).toBe(201); // a retry of the first upload
+    expect((await detail('VA', ids.S1)).photos.length).toBe(before); // stored once, not again
   });
   it('accepts a photo without GPS (permission denied) and rejects non-images', async () => {
     const r = await upload('VA', ids.S4, [{ category: 'SHOP_FRONT', mediaKey: 'm1', clientId: 'no-gps-12345' }]);

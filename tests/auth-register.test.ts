@@ -182,6 +182,17 @@ describe('platform separation', () => {
     expect(b.body.error.code).toBe('PLATFORM_NOT_ALLOWED');
     expect((await post('/login', { identifier: field.email, password: field.password, platform: 'mobile' })).status).toBe(200);
   });
+
+  it('a super admin may sign in on the phone (Media catalog screens) as well as on the web, only under the Admin card', async () => {
+    const admin = { ...web, role: 'SUPER_ADMIN', email: 'admin@adinn.test', phone: '9000000100', employeeId: 'ADM1' };
+    expect((await post('/register', admin)).status).toBe(201);
+    const onPhone = await post('/login', { identifier: admin.email, mpin: admin.mpin, loginRole: 'ADMIN', platform: 'mobile' });
+    expect(onPhone.status).toBe(200);
+    expect(onPhone.body.data.user.role).toBe('SUPER_ADMIN');
+    expect((await post('/login', { identifier: admin.email, mpin: admin.mpin, loginRole: 'ADMIN', platform: 'web' })).status).toBe(200);
+    // another card is still "User not found", also on the phone
+    expect((await post('/login', { identifier: admin.email, mpin: admin.mpin, loginRole: 'RECCE', platform: 'mobile' })).status).toBe(404);
+  });
 });
 
 describe('role card must match the registered role', () => {
