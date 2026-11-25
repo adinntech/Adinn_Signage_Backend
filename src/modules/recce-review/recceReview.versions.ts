@@ -32,7 +32,7 @@ type ReworkRow = {
 const presentRework = (r: ReworkRow, names: Map<string, string>) => ({
   id: String(r._id), versionNo: r.versionNo ?? null, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions,
   requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt ?? null, resolvedAt: r.resolvedAt ?? null,
-  items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })),
+  items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, section: (i as { section?: string | null }).section ?? null, label: (i as { label?: string | null }).label ?? '', resolved: !!i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })),
 });
 
 type Presented = Awaited<ReturnType<typeof presentPhoto>>;

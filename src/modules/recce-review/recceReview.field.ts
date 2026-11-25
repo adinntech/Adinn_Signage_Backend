@@ -219,7 +219,7 @@ export async function shopDetail(actor: Actor, siteId: string) {
     progress: { percent: status === 'APPROVED' ? 100 : m.percent, required: m.required, done: m.done, missing: m.missing.map((x) => ({ ...x, label: x.category === 'DIMENSIONS' ? 'Width, height and quantity' : CATEGORY_LABEL[x.category as keyof typeof CATEGORY_LABEL] })) },
     versions: versions.map((v) => ({ version: v.version, submittedAt: v.submittedAt, photoCount: v.photos.length })),
     reviews: reviews.map((r) => ({ versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, comment: r.comment, reviewer: r.reviewer ? (reviewers.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null })),
-    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: requestedBy.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: i.resolved })) })),
+    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: requestedBy.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, section: (i as { section?: string | null }).section ?? null, label: (i as { label?: string | null }).label ?? '', resolved: i.resolved })) })),
     maxPhotos: cfg.maxPhotos,
   };
 }
@@ -451,13 +451,11 @@ export async function deletePhoto(actor: Actor, siteId: string, photoId: string,
 
 /* ------------------------------------------------ submit ------------------------------------------------ */
 
-export const OPEN_STAGE = (stages: ReviewStage[], sequential: boolean, decisions: Record<string, string>): ReviewStage | null => {
-  const pending = stages.filter((s) => decisions[s] === 'PENDING');
-  if (!pending.length) return null;
-  if (!sequential) return pending[0]!;
-  const first = stages.find((s) => decisions[s] !== 'APPROVED');
-  return first && decisions[first] === 'PENDING' ? first : null;
-};
+/**
+ * The first stage that has not decided yet (null when every stage has). There is no "turn" order: Recce Operations and Client Servicing
+ * may each approve, reject or send rework first, in any order, so this is only a label for "someone still has to decide".
+ */
+export const OPEN_STAGE = (stages: ReviewStage[], decisions: Record<string, string>): ReviewStage | null => stages.find((s) => decisions[s] === 'PENDING') ?? null;
 
 /**
  * Submits the shop for review as the next immutable version. Safe against double taps: the same idempotencyKey returns the
@@ -519,7 +517,7 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   // (compare-and-set on `rev` + status): a second tap, or a second device, finds nothing to match and gets a conflict.
   const versionEntry = {
     _id: new Types.ObjectId(), version: versionNo, submittedBy: actor.id, submittedAt: now, photos: keep.map((p) => p._id), added: drafts.map((p) => p._id),
-    removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems.map((i) => i.toObject()), notes, installation: presentInstallation(sub.installation as never), stages, sequential: cfg.sequential, dueAt, idempotencyKey: input.idempotencyKey,
+    removed: [...gone.map((g) => g._id), ...replaced], mediaItems: sub.mediaItems.map((i) => i.toObject()), notes, installation: presentInstallation(sub.installation as never), stages, sequential: false, dueAt, idempotencyKey: input.idempotencyKey,
   };
   const set: Record<string, unknown> = { status: 'SUBMITTED', currentVersion: versionNo, submittedAt: now, dueAt, pendingStage: first, notes };
   const arrayFilters: Record<string, unknown>[] = [];
@@ -547,8 +545,8 @@ export async function submit(actor: Actor, siteId: string, input: z.infer<typeof
   );
   if (!cas.modifiedCount) throw AppError.conflict('This shop was changed or submitted at the same time. Reload and check its status.');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: versionNo > 1 ? 'REWORK_SUBMITTED' : 'SUBMISSION_CREATED', version: versionNo, changes: [{ field: 'photos', oldValue: prev?.photos.length ?? 0, newValue: keep.length }] });
-  // Sequential review tells only the first stage now (the next one is told at its turn). Otherwise every stage is told at once; one card is posted.
-  for (const stage of cfg.sequential ? [first] : stages) {
+  // Every stage is told at once (nobody waits for the other); one card is posted.
+  for (const stage of stages) {
     await announceSubmitted(actor, { submissionId: sub._id, projectId: sub.project, siteId: site._id, siteName: siteLabel(site), project, versionNo, photoCount: keep.length, mediaNames: items.map((i) => i.name), stage, resubmitted: versionNo > 1, card: stage === first ? 'submitted' : 'none' });
   }
   return { duplicate: false, version: versionNo, detail: await shopDetail(actor, siteId) };

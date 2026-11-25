@@ -403,7 +403,8 @@ describe('two reviewers, no dependency: every order and every mix', () => {
     expect(vendor.status).toBe(403);
     expect(wrongStage.status).toBe(403);
   });
-  it('H. switch the dependency back on (Admin): then Client Servicing must wait for Operations', async () => {
+  it('H. old data and an old config still saying "sequential": Client Servicing never waits for Operations', async () => {
+    // Atlas still holds sequential: true in the config and on versions made before 2026-11-25. Both are ignored now.
     await api().put(`${BASE}/recce-review/config`).set(as('ADMIN')).send({ sequential: true }).expect(200);
     // S9 belongs to the other vendor, so make a fresh shop for the test by re-using S2 after reopening is not needed: add one through a new site.
     const { Site } = await import('../src/modules/sites/site.model');
@@ -411,13 +412,17 @@ describe('two reviewers, no dependency: every order and every mix', () => {
     const v = await Vendor.findOne({ code: 'VND-0048' }).select('_id').lean();
     const site = await Site.create({ project: ids.P, seq: 20, siteCode: '20262026-S020', scenario: 'MEASUREMENT_REQUIRED', dealerName: 'Dealer 20', boardType: 'Board', quantity: 1, district: 'CHENNAI', lat: 13.041, lng: 80.234, channel: 'VENDOR', vendor: v!._id });
     const sub = await readyAndSubmit(String(site._id));
-    const early = await decide('CS', sub, 'CS', 'APPROVE', 1);
-    const first = await decide('OPS', sub, 'OPS', 'APPROVE', 1);
-    const then = await decide('CS', sub, 'CS', 'APPROVE', 1);
-    remark(`Scenario H (sequential = true): CS before OPS ${early.status} (${(early.body.error as { message?: string } | undefined)?.message ?? ''}); OPS ${first.status}; CS after OPS ${then.status}`);
-    expect(early.status).toBe(409);
+    const { RecceSubmission } = await import('../src/modules/recce-review/recceReview.model');
+    await RecceSubmission.updateOne({ _id: sub }, { $set: { 'versions.$[].sequential': true } }); // a version made while the old rule was on
+    const csView = await api().get(`${BASE}/recce-review/submissions/${sub}`).set(as('CS'));
+    const first = await decide('CS', sub, 'CS', 'APPROVE', 1);
+    const second = await decide('OPS', sub, 'OPS', 'APPROVE', 1);
+    remark(`Scenario H (old sequential flags): CS can decide ${(csView.body.data as { me: { canDecide: boolean } }).me.canDecide}; CS first ${first.status} (${(first.body.data as { status?: string } | undefined)?.status}); OPS after ${second.status} (${(second.body.data as { status?: string } | undefined)?.status})`);
+    expect((csView.body.data as { me: { canDecide: boolean } }).me.canDecide).toBe(true);
     expect(first.status).toBe(200);
-    expect(then.status).toBe(200);
+    expect((first.body.data as { status: string }).status).toBe('UNDER_REVIEW');
+    expect(second.status).toBe(200);
+    expect((second.body.data as { status: string }).status).toBe('APPROVED');
     await api().put(`${BASE}/recce-review/config`).set(as('ADMIN')).send({ sequential: false }).expect(200);
   });
 });

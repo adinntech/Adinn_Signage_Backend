@@ -14,10 +14,11 @@ import { User } from '../users/user.model';
 import {
   assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, timeOf, type Config, type MediaItem,
 } from './recceReview.common';
-import { OPEN_STAGE, announceSubmitted } from './recceReview.field';
+import { OPEN_STAGE } from './recceReview.field';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
-import { byPhotoOrder, compareVersions, versionHistory, compareQuery } from './recceReview.versions';
-import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, RECCE_STATUSES, RecceConfig, RecceSubmission, STAGE_LABEL, type RecceStatus, type ReviewStage } from './recceReview.model';
+import { itemsFromMarks, marksBody, presentMarks, unsentProblems, writeMarks, type NewItem } from './recceReview.marks';
+import { boardLabel, byPhotoOrder, compareVersions, versionHistory, compareQuery } from './recceReview.versions';
+import { CATEGORY_LABEL, PHOTO_CATEGORIES, REVIEW_STAGES, REWORK_ITEM_TYPES, RECCE_STATUSES, RecceConfig, RecceSubmission, STAGE_LABEL, type RecceStatus, type ReviewStage } from './recceReview.model';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
 
@@ -33,7 +34,7 @@ export const decideBody = z.object({
   stage: z.enum(REVIEW_STAGES), decision: z.enum(['APPROVE', 'REJECT', 'REWORK', 'ADDITIONAL']), versionNo: z.coerce.number().int().min(1),
   comment: z.string().trim().max(2000).default(''), checklist: checklistBody,
   reason: z.string().trim().max(2000).optional(), // rejection reason or admin override reason
-  items: z.array(z.object({ type: z.enum(['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER']), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(20).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional(), rejected: z.boolean().optional() })).max(30).default([]),
+  items: z.array(z.object({ type: z.enum(REWORK_ITEM_TYPES), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(20).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional(), rejected: z.boolean().optional() })).max(30).default([]),
 });
 /** A stage that approved changes its answer: Reject, Rework or More photos, always with a written reason (min 5 characters). */
 export const changeDecisionBody = decideBody.extend({ decision: z.enum(['REJECT', 'REWORK', 'ADDITIONAL']) });
@@ -68,12 +69,12 @@ const CHANGEABLE: RecceStatus[] = [...REVIEWABLE, 'APPROVED'];
 const byTime = (a: { createdAt?: Date | null }, b: { createdAt?: Date | null }) => timeOf(a.createdAt) - timeOf(b.createdAt);
 
 /** Overall status of a version from the decision of every stage. Rejection beats rework, rework beats approval. */
-function overallOutcome(stages: ReviewStage[], sequential: boolean, map: Record<string, string>): { status: string; pendingStage: ReviewStage | null } {
+function overallOutcome(stages: ReviewStage[], map: Record<string, string>): { status: string; pendingStage: ReviewStage | null } {
   const of = (d: string) => stages.some((s) => map[s] === d);
   if (of('REJECTED')) return { status: 'REJECTED', pendingStage: null };
   if (of('REWORK')) return { status: 'REWORK_REQUIRED', pendingStage: null };
   if (stages.every((s) => map[s] === 'APPROVED')) return { status: 'APPROVED', pendingStage: null };
-  return { status: 'UNDER_REVIEW', pendingStage: OPEN_STAGE(stages, sequential, map) };
+  return { status: 'UNDER_REVIEW', pendingStage: OPEN_STAGE(stages, map) };
 }
 
 /** Checks the person may decide this stage. Admin decides only through `override`. Operations is limited to their projects, Client Servicing to theirs. */
@@ -82,31 +83,24 @@ function assertStageRights(actor: Actor, stage: ReviewStage) {
   if (mine !== stage) throw AppError.forbidden(`Only ${STAGE_LABEL[stage]} can decide this review stage`);
 }
 
-async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[]; refs?: { type: string; id: string }[] }) {
+/** A decision in words, for a notification: "Client Servicing (CS) — rejected". */
+const DECISION_WORD: Record<string, string> = { APPROVE: 'approved', REJECT: 'rejected', REWORK: 'asked for rework', ADDITIONAL: 'asked for more photos' };
+
+async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[]; refs?: { type: string; id: string }[]; /** both stages approved: `notifyFinalApproval` tells the review teams, so they are not told twice */ finalApproved?: boolean }) {
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
   const who = (await User.findById(actor.id).select('name').lean())?.name ?? STAGE_LABEL[info.stage];
   const name = site ? siteLabel(site) : 'Shop';
   const clientName = p ? await clientNameFor(p) : null;
   const other = REVIEW_STAGES.filter((s) => s !== info.stage);
-  const reviewerIds = (await Promise.all(other.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat();
+  const reviewerIds = info.finalApproved ? [] : (await Promise.all(other.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat();
+  // The other review team hears every answer at once, an approval too, so Operations and Client Servicing always see what the other did.
   await notify({
-    recipients: [sub.assignee, ...reviewerIds.filter(() => info.decision !== 'APPROVE')], kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
-    title: info.title, body: `${name}: ${who} (${STAGE_LABEL[info.stage]}) — ${info.decision.toLowerCase().replace('_', ' ')}${info.comment ? `. ${info.comment.slice(0, 160)}` : ''}`,
+    recipients: [sub.assignee, ...reviewerIds], kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
+    title: info.title, body: `${name}: ${who} (${STAGE_LABEL[info.stage]}) — ${DECISION_WORD[info.decision] ?? info.decision.toLowerCase().replace('_', ' ')}${info.comment ? `. ${info.comment.slice(0, 220)}` : ''}`,
     dedupe: (r) => `recce-review:${String(sub._id)}:${info.versionNo}:${info.stage}:${info.decision}:${r}`,
   });
   await postShopMessage(sub.project, sub.site, actor, { eventKey: `review:${String(sub._id)}:${info.versionNo}:${info.stage}:${info.decision}:${info.title}`.slice(0, 160), refs: [{ type: 'VERSION', id: String(info.versionNo) }, ...(info.refs ?? [])], card: { title: 'Recce Review Update', tone: info.tone, path: reviewPath(sub._id), lines: [{ label: 'Shop', value: name }, { label: 'Decision', value: info.title }, { label: 'Reviewer', value: `${who} (${STAGE_LABEL[info.stage]})` }, ...(info.extra ?? []), { label: 'Comments', value: info.comment || '-' }] } });
-}
-
-/** Tells the next stage that it is its turn (sequential flow). */
-async function notifyNextStage(actor: Actor, sub: InstanceType<typeof RecceSubmission>, stage: ReviewStage, versionNo: number) {
-  const site = await Site.findById(sub.site).select('shopName siteCode').lean();
-  const p = await Project.findById(sub.project).select('code client clientDetails').lean();
-  if (!site || !p) return;
-  const items = (sub.mediaItems as unknown as MediaItem[]).map((i) => i.name);
-  const photos = sub.versions.find((v) => v.version === versionNo);
-  await announceSubmitted({ id: String(sub.assignee), role: 'VENDOR' }, { submissionId: sub._id, projectId: sub.project, siteId: sub.site, siteName: siteLabel(site), project: p, versionNo, photoCount: photos?.photos.length ?? 0, mediaNames: items, stage, resubmitted: versionNo > 1, card: photos?.stages?.[0] === stage ? 'none' : 'turn' }).catch(() => undefined);
-  void actor;
 }
 
 /**
@@ -165,12 +159,12 @@ export async function inbox(actor: Actor, q: z.infer<typeof inboxQuery>) {
   else if (q.view === 'pending') and.push({ status: { $in: PENDING_STATUSES } });
   else if (q.view === 'mine') {
     const st = stageOf(actor.role);
-    // Sequential review: the stage whose turn it is (pendingStage). Parallel review: every shop where this stage has not decided yet.
-    type OpenRow = { _id: Types.ObjectId; currentVersion?: number | null; versions: { version: number; sequential?: boolean | null }[]; reviews: { versionNo: number; stage: string; decision?: string | null }[] };
+    // Every shop where this stage has not decided yet (nobody waits for the other stage).
+    type OpenRow = { _id: Types.ObjectId; currentVersion?: number | null; reviews: { versionNo: number; stage: string; decision?: string | null }[] };
     const waitingFilter: Record<string, unknown> = { status: { $in: PENDING_STATUSES }, reviews: { $elemMatch: { stage: st, decision: 'PENDING' } } };
-    const open = st ? ((await RecceSubmission.find(waitingFilter).select('currentVersion versions.version versions.sequential reviews.versionNo reviews.stage reviews.decision').lean()) as unknown as OpenRow[]) : [];
-    const parallelSubs = open.filter((s) => s.versions.some((v) => v.version === s.currentVersion && v.sequential === false) && s.reviews.some((r) => r.versionNo === s.currentVersion && r.stage === st && r.decision === 'PENDING')).map((s) => s._id);
-    and.push({ status: { $in: PENDING_STATUSES } }, st ? { $or: [{ pendingStage: st }, { _id: { $in: parallelSubs } }] } : { pendingStage: { $ne: null } });
+    const open = st ? ((await RecceSubmission.find(waitingFilter).select('currentVersion reviews.versionNo reviews.stage reviews.decision').lean()) as unknown as OpenRow[]) : [];
+    const waitingSubs = open.filter((s) => s.reviews.some((r) => r.versionNo === s.currentVersion && r.stage === st && r.decision === 'PENDING')).map((s) => s._id);
+    and.push({ status: { $in: PENDING_STATUSES } }, st ? { $or: [{ pendingStage: st }, { _id: { $in: waitingSubs } }] } : { pendingStage: { $ne: null } });
   }
   else and.push({ currentVersion: { $gt: 0 } });
   if (and.length) filter.$and = and;
@@ -228,12 +222,17 @@ export async function workspace(actor: Actor, id: string) {
   const reworks = [...doc.reworks].sort(byTime);
   // Reviewers never see another person's drafts, only what was submitted (including photos later superseded or removed, with history).
   const photos = doc.photos.filter((p) => p.state !== 'DRAFT').sort(byPhotoOrder);
-  const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...reviews.flatMap((r) => (r.history ?? []).map((h) => h.reviewer)),...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
+  const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...reviews.flatMap((r) => (r.history ?? []).map((h) => h.reviewer)),...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), ...doc.marks.flatMap((m) => [m.reviewer, ...(m.history ?? []).map((h) => h.reviewer)]), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
   const roles = await roleMap(photos.map((p) => p.uploadedBy));
   const mine = stageOf(actor.role);
   const cur = versions.at(-1);
   const curReviews = cur ? reviewsOfVersion(reviews, cur.version) : [];
-  const open = cur && (REVIEWABLE as string[]).includes(sub.status) ? OPEN_STAGE(cur.stages as ReviewStage[], cur.sequential, decisionMap(curReviews)) : null;
+  const open = cur && (REVIEWABLE as string[]).includes(sub.status) ? OPEN_STAGE(cur.stages as ReviewStage[], decisionMap(curReviews)) : null;
+  // A stage may decide whenever its own review is still PENDING, whatever the other stage did (or did not do yet).
+  const myDecision = mine ? curReviews.find((r) => r.stage === mine)?.decision : undefined;
+  const myTurn = !!mine && !!cur && (REVIEWABLE as string[]).includes(sub.status) && myDecision === 'PENDING';
+  const myApproved = !!mine && CHANGEABLE.includes(sub.status) && myDecision === 'APPROVED';
+  const projectOpen = !CLOSED_PROJECT.includes(String(project.status));
   const dec = (r: (typeof reviews)[number]) => ({ stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment, checklist: r.checklist, override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null, history: (r.history ?? []).map((h) => ({ decision: h.decision ?? null, reviewer: h.reviewer ? (names.get(String(h.reviewer)) ?? null) : null, decidedAt: h.decidedAt ?? null, comment: h.comment ?? '', changedAt: h.changedAt ?? null })) });
   return {
     id: String(sub._id), status: sub.status, currentVersion: sub.currentVersion, attempts: sub.attempts, priority: sub.priority, submittedAt: sub.submittedAt ?? null, dueAt: sub.dueAt ?? null,
@@ -247,10 +246,11 @@ export async function workspace(actor: Actor, id: string) {
       reviews: reviewsOfVersion(reviews, v.version).map(dec),
     })),
     photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
-    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
+    reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, section: (i as { section?: string | null }).section ?? null, label: (i as { label?: string | null }).label ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
+    marks: presentMarks(doc.marks ?? [], names, new Map(cfg.checklist.map((c) => [c.key, c.label]))),
     checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps })),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
-    me: { stage: mine, canDecide: !!mine && open === mine && !CLOSED_PROJECT.includes(String(project.status)), canChange: !!mine && CHANGEABLE.includes(sub.status) && curReviews.find((r) => r.stage === mine)?.decision === 'APPROVED' && !CLOSED_PROJECT.includes(String(project.status)), openStage: open, isAdmin: actor.role === 'SUPER_ADMIN', canReopen: (sub.status === 'REJECTED' && (cfg.allowRetryAfterReject ? !!mine || actor.role === 'SUPER_ADMIN' : actor.role === 'SUPER_ADMIN')) || (sub.status === 'APPROVED' && actor.role === 'SUPER_ADMIN') },
+    me: { stage: mine, canDecide: myTurn && projectOpen, canChange: myApproved && projectOpen, /** may tick photos / board details and mark them Approved, Rejected or Rework */ canMark: (myTurn || myApproved) && projectOpen, openStage: open, isAdmin: actor.role === 'SUPER_ADMIN', canReopen: (sub.status === 'REJECTED' && (cfg.allowRetryAfterReject ? !!mine || actor.role === 'SUPER_ADMIN' : actor.role === 'SUPER_ADMIN')) || (sub.status === 'APPROVED' && actor.role === 'SUPER_ADMIN') },
     viewedAt: new Date(),
   };
 }
@@ -268,8 +268,10 @@ export async function reviewCompare(actor: Actor, id: string, q: z.infer<typeof 
 export async function markReviewStarted(actor: Actor, id: string) {
   const sub = await loadSubmission(actor, id);
   const stage = stageOf(actor.role);
-  if (!stage || !(REVIEWABLE as string[]).includes(sub.status) || sub.pendingStage !== stage) return { started: false };
-  const moved = await RecceSubmission.updateOne({ _id: sub._id, status: 'SUBMITTED', pendingStage: stage }, { $set: { status: 'UNDER_REVIEW' }, $inc: { rev: 1 } });
+  // Either stage opening the shop starts the review, as long as its own decision is still to come.
+  const mineNow = stage ? reviewsOfVersion(sub.reviews, sub.currentVersion).find((r) => r.stage === stage)?.decision : undefined;
+  if (!stage || !(REVIEWABLE as string[]).includes(sub.status) || mineNow !== 'PENDING') return { started: false };
+  const moved = await RecceSubmission.updateOne({ _id: sub._id, status: 'SUBMITTED', currentVersion: sub.currentVersion }, { $set: { status: 'UNDER_REVIEW' }, $inc: { rev: 1 } });
   if (moved.modifiedCount) await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'REVIEW_STARTED', version: sub.currentVersion, visibility: 'REVIEW' });
   return { started: !!moved.modifiedCount };
 }
@@ -304,12 +306,18 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   if (!version) throw AppError.notFound('Version not found');
   const stages = version.stages as ReviewStage[];
   if (!stages.includes(input.stage)) throw AppError.badRequest('This stage is not part of the review');
-  const rs = reviewsOfVersion(sub.reviews, version.version);  if (OPEN_STAGE(stages, version.sequential, decisionMap(rs)) !== input.stage && !(!version.sequential && decisionMap(rs)[input.stage] === 'PENDING')) {
-    throw AppError.conflict(decisionMap(rs)[input.stage] !== 'PENDING' ? `${STAGE_LABEL[input.stage]} has already decided this version` : 'An earlier review stage must approve first');
-  }
+  // Either stage may decide first. The only thing that blocks it is its own earlier decision on this version.
+  const rs = reviewsOfVersion(sub.reviews, version.version);
+  if (decisionMap(rs)[input.stage] !== 'PENDING') throw AppError.conflict(`${STAGE_LABEL[input.stage]} has already decided this version`);
   const cfg = await getConfig();
-  const photoIds = checkDecisionInput(sub, input);
+  checkDecisionInput(sub, input);
+  // Photos / board details this stage marked Rejected or Rework (and did not send yet) are part of any rework request, and block an approval.
+  const marked = unsentProblems(sub.marks, input.stage, version.version);
+  if (input.decision === 'APPROVE' && marked.length) throw AppError.badRequest(`Approve the ${marked.length} item${marked.length === 1 ? '' : 's'} you marked for rework or rejection again, or send them back, before approving`);
   const labels = new Map(cfg.checklist.map((c) => [c.key, c.label]));
+  // Marked checklist items become rework items too (each with its own remark, section and label).
+  const sentItems: NewItem[] = input.decision === 'REWORK' || input.decision === 'ADDITIONAL' ? [...input.items, ...itemsFromMarks(marked, sub.photos as never, input.items, labels)] : input.items;
+  const photoIds = [...new Set(sentItems.map((i) => i.photo).filter(Boolean) as string[])];
   const checklist = input.checklist.filter((c) => labels.has(c.key)).map((c) => ({ key: c.key, label: labels.get(c.key)!, passed: c.passed }));
   if (input.decision === 'APPROVE') {
     const mandatory = cfg.checklist.filter((c) => (c.stage === 'ALL' || c.stage === input.stage) && !(c.gps && !cfg.requireGps));
@@ -328,12 +336,12 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
 
   // The overall status comes from every stage's decision, so two stages deciding at the same moment reach the same answer:
   // any rejection wins, then any rework, then "all approved", otherwise still under review.
-  const { status, pendingStage } = overallOutcome(stages, version.sequential, decisionMap(await freshReviews(sub._id, version.version)));
+  const { status, pendingStage } = overallOutcome(stages, decisionMap(await freshReviews(sub._id, version.version)));
   const moved = await RecceSubmission.updateOne({ _id: sub._id, currentVersion: version.version, status: { $in: REVIEWABLE } }, { $set: { status, pendingStage, ...(status === 'APPROVED' ? { finalApprovedAt: new Date() } : {}) }, $inc: { rev: 1 } });
   if (!moved.modifiedCount) {
     // The other stage decided at the same moment and already wrote the answer. If it is the answer this decision leads to as well, this decision stands.
     const [now, again] = await Promise.all([RecceSubmission.findById(sub._id).select('status currentVersion').lean(), freshReviews(sub._id, version.version)]);
-    const agreed = now?.currentVersion === version.version && now.status === overallOutcome(stages, version.sequential, decisionMap(again)).status;
+    const agreed = now?.currentVersion === version.version && now.status === overallOutcome(stages, decisionMap(again)).status;
     if (!agreed) {
       // Give the claimed stage back (nothing else of this decision was written).
       await RecceSubmission.updateOne({ _id: sub._id }, { $set: { 'reviews.$[r].decision': 'PENDING' }, $unset: { 'reviews.$[r].reviewer': 1, 'reviews.$[r].decidedAt': 1 } }, { arrayFilters: [{ 'r.versionNo': version.version, 'r.stage': input.stage }] });
@@ -344,8 +352,9 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   if (status === 'REJECTED' || status === 'REWORK_REQUIRED') await RecceSubmission.updateOne({ _id: sub._id }, { $set: { 'reviews.$[r].decision': 'VOID' } }, { arrayFilters: [{ 'r.versionNo': version.version, 'r.decision': 'PENDING' }] });
   if (decision === 'REWORK') {
     await RecceSubmission.updateOne({ _id: sub._id }, {
-      $push: { reworks: { _id: new Types.ObjectId(), versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, status: 'OPEN', createdAt: new Date(), items: input.items.map((i) => ({ _id: new Types.ObjectId(), ...i, resolved: false })) } },
+      $push: { reworks: { _id: new Types.ObjectId(), versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, status: 'OPEN', createdAt: new Date(), items: sentItems.map((i) => ({ _id: new Types.ObjectId(), ...i, resolved: false })) } },
     });
+    if (marked.length) await RecceSubmission.updateOne({ _id: sub._id }, { $set: { 'marks.$[m].sent': true } }, { arrayFilters: [{ 'm.versionNo': version.version, 'm.stage': input.stage, 'm.sent': false, 'm.decision': { $in: ['REJECTED', 'REWORK'] } }] });
   }
   const type = input.decision === 'APPROVE' ? 'REVIEW_APPROVED' : input.decision === 'REJECT' ? 'REVIEW_REJECTED' : input.decision === 'ADDITIONAL' ? 'ADDITIONAL_PHOTOS_REQUESTED' : 'REWORK_REQUESTED';
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type, version: version.version, reason: comment || undefined, changes: [{ field: 'status', oldValue: sub.status, newValue: status }, { field: `review.${input.stage}`, oldValue: 'PENDING', newValue: decision }] });
@@ -353,17 +362,15 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   const fresh = (await RecceSubmission.findById(sub._id))!;
   // What the reviewer pointed at, for the thread card: the photo's category (or the item's own) and a ref the app can open.
   const catOf = new Map(sub.photos.filter((p) => photoIds.some((pid) => String(pid).toLowerCase() === String(p._id))).map((p) => [String(p._id), p.category as keyof typeof CATEGORY_LABEL]));
-  const pointed = input.items.map((i) => { const c = i.category ?? (i.photo ? catOf.get(i.photo) : undefined); return c ? `${CATEGORY_LABEL[c]}${i.note ? ` (${i.note})` : ''}` : null; }).filter((x): x is string => !!x);
+  const pointed = sentItems.map((i) => { const c = (i.category ?? (i.photo ? catOf.get(i.photo) : undefined)) as keyof typeof CATEGORY_LABEL | undefined; return c ? `${CATEGORY_LABEL[c]}${i.note ? ` (${i.note})` : ''}` : i.label ? `${i.label}${i.note ? ` (${i.note})` : ''}` : null; }).filter((x): x is string => !!x);
   const cardRefs = [
     ...photoIds.map((id) => ({ type: 'PHOTO', id })),
-    ...[...new Set(input.items.filter((i) => !i.photo && i.mediaKey && sub.mediaItems.some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
+    ...[...new Set(sentItems.filter((i) => !i.photo && i.mediaKey && sub.mediaItems.some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
   ];
-  const anyRejected = input.items.some((i) => i.rejected);
+  const anyRejected = sentItems.some((i) => i.rejected);
   const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: anyRejected ? 'Photos rejected' : 'Rework required', ADDITIONAL: 'Additional photos requested' };
-  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: anyRejected ? 'Rejected photos' : 'Rework items', value: pointed.join(', ') }] : [] });
+  await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, finalApproved: status === 'APPROVED' && weMoved, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: anyRejected ? 'Rejected photos' : 'Rework items', value: pointed.join(', ') }] : [] });
   if (status === 'APPROVED' && weMoved) await notifyFinalApproval(actor, fresh, version.version, stages);
-  // Only sequential review hands over to the next stage; in parallel review that stage was told when the version was submitted.
-  if (status === 'UNDER_REVIEW' && pendingStage && version.sequential) await notifyNextStage(actor, fresh, pendingStage, version.version);
   return workspace(actor, id);
 }
 
@@ -387,16 +394,20 @@ export async function changeDecision(actor: Actor, id: string, input: z.infer<ty
   const rs = reviewsOfVersion(sub.reviews, version.version);
   const mine = rs.find((r) => r.stage === input.stage);
   if (mine?.decision !== 'APPROVED') throw AppError.conflict(`${STAGE_LABEL[input.stage]} has not approved this version, so there is no approval to change`);
-  const photoIds = checkDecisionInput(sub, input);
+  checkDecisionInput(sub, input);
+  const marked = unsentProblems(sub.marks, input.stage, version.version);
+  const labels = new Map((await getConfig()).checklist.map((c) => [c.key, c.label]));
+  const sentItems: NewItem[] = input.decision === 'REJECT' ? input.items : [...input.items, ...itemsFromMarks(marked, sub.photos as never, input.items, labels)];
+  const photoIds = [...new Set(sentItems.map((i) => i.photo).filter(Boolean) as string[])];
   const comment = input.decision === 'REJECT' ? (input.reason ?? input.comment) : input.comment;
   if (comment.trim().length < 5) throw AppError.badRequest('Give the reason for changing the decision');
 
   const decision = input.decision === 'REJECT' ? 'REJECTED' : 'REWORK';
   const now = new Date();
-  const { status, pendingStage } = overallOutcome(stages, version.sequential, { ...decisionMap(rs), [input.stage]: decision });
+  const { status, pendingStage } = overallOutcome(stages, { ...decisionMap(rs), [input.stage]: decision });
   const earlier = { decision: mine.decision, reviewer: mine.reviewer, reviewerRole: mine.reviewerRole, decidedAt: mine.decidedAt, comment: mine.comment ?? '', changedAt: now };
   const rework = decision === 'REWORK'
-    ? { _id: new Types.ObjectId(), versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, status: 'OPEN', createdAt: now, items: input.items.map((i) => ({ _id: new Types.ObjectId(), ...i, resolved: false })) }
+    ? { _id: new Types.ObjectId(), versionNo: version.version, stage: input.stage, kind: input.decision === 'ADDITIONAL' ? 'ADDITIONAL' : 'REWORK', instructions: comment, requestedBy: actor.id, status: 'OPEN', createdAt: now, items: sentItems.map((i) => ({ _id: new Types.ObjectId(), ...i, resolved: false })) }
     : null;
   const moved = await RecceSubmission.updateOne(
     { _id: sub._id, rev: sub.rev, currentVersion: version.version, status: { $in: CHANGEABLE } },
@@ -404,24 +415,86 @@ export async function changeDecision(actor: Actor, id: string, input: z.infer<ty
       $set: {
         status, pendingStage, 'reviews.$[mine].decision': decision, 'reviews.$[mine].reviewer': actor.id, 'reviews.$[mine].reviewerRole': actor.role, 'reviews.$[mine].decidedAt': now, 'reviews.$[mine].comment': comment, 'reviews.$[mine].checklist': [],
         'reviews.$[open].decision': 'VOID', // the other stage's waiting review is void now, as after any rejection or rework
+        ...(rework && marked.length ? { 'marks.$[sent].sent': true } : {}),
       },
       $unset: { finalApprovedAt: 1, 'reviews.$[mine].override': 1 },
       $push: { 'reviews.$[mine].history': earlier, ...(rework ? { reworks: rework } : {}) },
       $inc: { rev: 1 },
     },
-    { arrayFilters: [{ 'mine.versionNo': version.version, 'mine.stage': input.stage, 'mine.decision': 'APPROVED' }, { 'open.versionNo': version.version, 'open.decision': 'PENDING' }] },
+    { arrayFilters: [{ 'mine.versionNo': version.version, 'mine.stage': input.stage, 'mine.decision': 'APPROVED' }, { 'open.versionNo': version.version, 'open.decision': 'PENDING' }, ...(rework && marked.length ? [{ 'sent.versionNo': version.version, 'sent.stage': input.stage, 'sent.sent': false, 'sent.decision': { $in: ['REJECTED', 'REWORK'] } }] : [])] },
   );
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed while you were deciding. Reload and try again.');
 
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'DECISION_CHANGED', version: version.version, reason: comment, changes: [{ field: 'status', oldValue: sub.status, newValue: status }, { field: `review.${input.stage}`, oldValue: 'APPROVED', newValue: decision }] });
   const fresh = (await RecceSubmission.findById(sub._id))!;
-  const cats = input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]);
+  const cats = sentItems.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL]);
   await afterDecision(actor, fresh, {
-    versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: `Decision changed: ${decision === 'REJECTED' ? 'rejected' : input.decision === 'ADDITIONAL' ? 'more photos requested' : input.items.some((i) => i.rejected) ? 'photos rejected' : 'rework required'}`, tone: decision === 'REJECTED' ? 'bad' : 'warn',
+    versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: `Decision changed: ${decision === 'REJECTED' ? 'rejected' : input.decision === 'ADDITIONAL' ? 'more photos requested' : sentItems.some((i) => i.rejected) ? 'photos rejected' : 'rework required'}`, tone: decision === 'REJECTED' ? 'bad' : 'warn',
     refs: photoIds.map((pid) => ({ type: 'PHOTO', id: pid })),
     extra: [{ label: 'Earlier decision', value: 'Approved' }, ...(cats.length ? [{ label: 'Needed', value: cats.join(', ') }] : [])],
   });
   return workspace(actor, id);
+}
+
+/**
+ * A reviewer ticks photos and / or board details (media type, quantity, size) and marks them Approved, Rejected or Rework. Each stage writes only its own marks, and only
+ * while it may still answer: its review is pending, or it approved and may still change its mind. A remark is mandatory for Rejected and Rework (400 without it).
+ * The marks are saved at once; they reach the recce person when the stage sends its Rework decision.
+ */
+export async function applyMarks(actor: Actor, id: string, input: z.infer<typeof marksBody>) {
+  assertStageRights(actor, input.stage);
+  const sub = await loadSubmission(actor, id);
+  await assertProjectOpen(sub.project);
+  if (!CHANGEABLE.includes(sub.status)) throw AppError.conflict('This submission is not with the review teams now');
+  if (input.versionNo !== sub.currentVersion) throw AppError.conflict(`Version ${sub.currentVersion} is current now. Reload before marking.`);
+  const version = sub.versions.find((v) => v.version === sub.currentVersion);
+  if (!version) throw AppError.notFound('Version not found');
+  const stages = version.stages as ReviewStage[];
+  if (!stages.includes(input.stage)) throw AppError.badRequest('This stage is not part of the review');
+  const mine = reviewsOfVersion(sub.reviews, version.version).find((r) => r.stage === input.stage)?.decision;
+  if (mine !== 'PENDING' && mine !== 'APPROVED') throw AppError.conflict(`${STAGE_LABEL[input.stage]} has already sent its decision on this version`);
+  const { changes, applied } = await writeMarks(actor, sub, input);
+  if (applied) {
+    await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'ITEMS_MARKED', version: version.version, visibility: 'REVIEW', reason: input.reason || undefined, changes });
+    await notifyMarks(actor, sub, version, input);
+  }
+  return workspace(actor, id);
+}
+
+const MARK_WORD: Record<string, string> = { APPROVED: 'approved', REJECTED: 'rejected', REWORK: 'marked for rework' };
+const BOARD_FIELD_WORD = { MEDIA_TYPE: 'media type', QUANTITY: 'quantity', SIZE: 'size' } as const;
+
+/**
+ * The other review team is told at once what this stage marked and why (a mark is saved the moment it is made, long before the stage sends
+ * its decision), so Operations and Client Servicing see each other's answers without waiting. The recce person is told only when the stage
+ * sends its Rework. A short list of what was marked and the remark go into the text; each action is its own notification.
+ */
+async function notifyMarks(actor: Actor, sub: InstanceType<typeof RecceSubmission>, version: { mediaItems: unknown }, input: z.infer<typeof marksBody>) {
+  const boards = version.mediaItems as unknown as MediaItem[];
+  const boardName = (key: string | undefined | null) => { const b = boards.find((x) => x.key === key); return b ? boardLabel(b) : 'Board'; };
+  const checkLabel = new Map((await getConfig()).checklist.map((c) => [c.key, c.label]));
+  // Each item with its OWN remark: "Shop front visible (blurred); GSB-01 quantity (wrong)".
+  const entries = input.targets.map((t) => {
+    const why = (t.reason || input.reason).slice(0, 80);
+    const name = t.kind === 'BOARD' ? `${boardName(t.mediaKey)} ${BOARD_FIELD_WORD[t.field]}` : t.kind === 'CHECK' ? (checkLabel.get(t.key) ?? t.key) : (() => {
+      const p = sub.photos.find((x) => String(x._id) === String(t.photo).toLowerCase());
+      return p ? `${CATEGORY_LABEL[p.category as keyof typeof CATEGORY_LABEL] ?? p.category}${p.mediaKey ? ` of ${boardName(p.mediaKey)}` : ''}` : 'Photo';
+    })();
+    return why ? `${name} (${why})` : name;
+  });
+  const shown = entries.slice(0, 3).join('; ') + (entries.length > 3 ? ` and ${entries.length - 3} more` : '');
+  const other = REVIEW_STAGES.filter((s) => s !== input.stage);
+  const recipients = (await Promise.all(other.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat();
+  if (!recipients.length) return;
+  const [site, p, who] = await Promise.all([Site.findById(sub.site).select('shopName siteCode').lean(), Project.findById(sub.project).select('code client clientDetails').lean(), User.findById(actor.id).select('name').lean()]);
+  const clientName = p ? await clientNameFor(p) : null;
+  const at = Date.now();
+  await notify({
+    recipients, kind: 'RECCE_REVIEWED', path: reviewPath(sub._id), site: sub.site, actorId: actor.id, project: p ? { _id: sub.project, code: p.code, clientName: clientName ?? undefined } : undefined as never,
+    title: `${STAGE_LABEL[input.stage]}: ${input.decision === 'APPROVED' ? 'approved' : input.decision === 'REJECTED' ? 'rejected' : 'rework asked'}`,
+    body: `${site ? siteLabel(site) : 'Shop'}: ${who?.name ?? STAGE_LABEL[input.stage]} (${STAGE_LABEL[input.stage]}) ${MARK_WORD[input.decision] ?? input.decision.toLowerCase()} ${shown}`,
+    dedupe: (r) => `recce-marks:${String(sub._id)}:${input.versionNo}:${input.stage}:${at}:${r}`,
+  });
 }
 
 /** Admin only, with a reason, kept in the timeline (hidden from the field person). Decides every still-pending stage of the current version. */
@@ -449,7 +522,7 @@ export async function override(actor: Actor, id: string, input: z.infer<typeof o
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'ADMIN_OVERRIDE', version: version.version, reason: input.reason, visibility: 'REVIEW', changes: [{ field: 'status', oldValue: sub.status, newValue: status }] });
   const after = (await RecceSubmission.findById(sub._id))!;
-  await afterDecision(actor, after, { versionNo: version.version, stage: 'OPS', decision: input.action, comment: input.reason, title: `Admin override: ${status.toLowerCase()}`, tone: input.action === 'APPROVE' ? 'good' : 'bad' });
+  await afterDecision(actor, after, { versionNo: version.version, stage: 'OPS', decision: input.action, comment: input.reason, title: `Admin override: ${status.toLowerCase()}`, tone: input.action === 'APPROVE' ? 'good' : 'bad', finalApproved: input.action === 'APPROVE' });
   if (status === 'APPROVED') await notifyFinalApproval(actor, after, version.version, version.stages as ReviewStage[]);
   return workspace(actor, id);
 }

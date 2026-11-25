@@ -51,6 +51,33 @@ export type PhotoState = (typeof PHOTO_STATES)[number];
 export const DECISIONS = ['PENDING', 'APPROVED', 'REJECTED', 'REWORK', 'VOID'] as const;
 export type Decision = (typeof DECISIONS)[number];
 
+/**
+ * What a rework item asks the recce person to do. FIX_MEASUREMENT = correct the board size (width / height); FIX_QUANTITY and FIX_MEDIA_TYPE
+ * (2026-11-24) ask for the board's quantity or media type to be checked and corrected. The three need no answer to resubmit.
+ */
+export const REWORK_ITEM_TYPES = ['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'FIX_QUANTITY', 'FIX_MEDIA_TYPE', 'OTHER'] as const;
+export type ReworkItemType = (typeof REWORK_ITEM_TYPES)[number];
+
+/** What a reviewer can mark on one board: the media type, the quantity or the size (width x height). */
+export const BOARD_FIELDS = ['MEDIA_TYPE', 'QUANTITY', 'SIZE'] as const;
+export type BoardField = (typeof BOARD_FIELDS)[number];
+export const BOARD_FIELD_ITEM: Record<BoardField, ReworkItemType> = { MEDIA_TYPE: 'FIX_MEDIA_TYPE', QUANTITY: 'FIX_QUANTITY', SIZE: 'FIX_MEASUREMENT' };
+/**
+ * The checklist items of a review are marked too (2026-11-25): one answer and one remark PER ITEM. Each item belongs to a section of the phone app,
+ * so a Rework / Rejected checklist item shows there with its own remark: BOARDS (size, quantity, media type), PHOTOS (angles, quality, GPS), SHOP (anything else).
+ */
+export const CHECK_SECTIONS = ['SHOP', 'PHOTOS', 'BOARDS', 'INSTALLATION'] as const;
+export type CheckSection = (typeof CHECK_SECTIONS)[number];
+export const CHECK_RULE: Record<string, { type: ReworkItemType; section: CheckSection }> = {
+  measurements: { type: 'FIX_MEASUREMENT', section: 'BOARDS' }, media_type: { type: 'FIX_MEDIA_TYPE', section: 'BOARDS' }, quantity: { type: 'FIX_QUANTITY', section: 'BOARDS' },
+  shop_front: { type: 'OTHER', section: 'PHOTOS' }, board_area: { type: 'OTHER', section: 'PHOTOS' }, angles: { type: 'OTHER', section: 'PHOTOS' }, quality: { type: 'OTHER', section: 'PHOTOS' }, gps: { type: 'OTHER', section: 'PHOTOS' },
+  correct_shop: { type: 'OTHER', section: 'SHOP' }, client_req: { type: 'OTHER', section: 'SHOP' },
+};
+/** The rework item a checklist item turns into; a checklist item an Admin added later belongs to SHOP. */
+export const checkRule = (key: string) => CHECK_RULE[key] ?? { type: 'OTHER' as ReworkItemType, section: 'SHOP' as CheckSection };
+export const MARK_DECISIONS = ['APPROVED', 'REJECTED', 'REWORK'] as const;
+export type MarkDecision = (typeof MARK_DECISIONS)[number];
+
 const mediaItemSchema = new Schema(
   {
     key: { type: String, required: true },
@@ -157,7 +184,8 @@ const versionSchema = new Schema({
   installation: { type: installationSchema },
   /** The stages that must approve this version (from the configuration at the time of submit). */
   stages: [{ type: String, enum: REVIEW_STAGES }],
-  sequential: { type: Boolean, default: true },
+  /** Not used any more: review is never in turn order. Old versions may still hold `true`; it is ignored everywhere. */
+  sequential: { type: Boolean, default: false },
   dueAt: Date,
   idempotencyKey: { type: String, maxlength: 80 },
 });
@@ -187,13 +215,16 @@ const reworkSchema = new Schema({
   items: [
     {
       _id: { type: Schema.Types.ObjectId, auto: true },
-      type: { type: String, enum: ['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER'], required: true },
+      type: { type: String, enum: REWORK_ITEM_TYPES, required: true },
       category: { type: String, enum: PHOTO_CATEGORIES },
       mediaKey: String,
       photo: { type: Schema.Types.ObjectId },
       note: { type: String, maxlength: 500 },
       /** A REPLACE_PHOTO item the reviewer REJECTED on the review screen: the photo is shown "Rejected" with `note` as the reason (same work for the recce person: retake it). */
       rejected: { type: Boolean, default: false },
+      /** A reworked checklist item (type OTHER, or FIX_* for size / quantity / media type): the phone shows it in this section, with `label` and `note` (the reviewer's own remark for that item). */
+      section: { type: String, enum: CHECK_SECTIONS },
+      label: String,
       resolved: { type: Boolean, default: false },
       resolvedInVersion: Number,
     },
@@ -202,6 +233,28 @@ const reworkSchema = new Schema({
   requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   resolvedAt: Date,
   createdAt: { type: Date, default: Date.now },
+});
+
+/**
+ * A reviewer's answer on ONE thing of ONE version: a photo (`photo`) or one field of a board (`mediaKey` + `field`). One entry per
+ * (version, stage, thing); changing it (Approved -> Rejected and so on) keeps the earlier answer, with its reason, in `history`.
+ * `sent` turns true when the stage's REWORK decision carried it to the recce person. A reason is mandatory for REJECTED / REWORK.
+ */
+const markSchema = new Schema({
+  versionNo: { type: Number, required: true },
+  stage: { type: String, enum: REVIEW_STAGES, required: true },
+  photo: { type: Schema.Types.ObjectId },
+  mediaKey: { type: String, default: '' },
+  field: { type: String, enum: BOARD_FIELDS },
+  /** A checklist item (its key), when the mark is about one. */
+  check: String,
+  decision: { type: String, enum: MARK_DECISIONS, required: true },
+  reason: { type: String, default: '', maxlength: 500 },
+  reviewer: { type: Schema.Types.ObjectId, ref: 'User' },
+  reviewerRole: String,
+  at: { type: Date, default: Date.now },
+  sent: { type: Boolean, default: false },
+  history: [{ _id: false, decision: String, reason: { type: String, default: '' }, reviewer: { type: Schema.Types.ObjectId, ref: 'User' }, reviewerRole: String, at: Date, changedAt: Date }],
 });
 
 const submissionSchema = new Schema(
@@ -223,6 +276,8 @@ const submissionSchema = new Schema(
     versions: { type: [versionSchema], default: [] },
     reviews: { type: [reviewSchema], default: [] },
     reworks: { type: [reworkSchema], default: [] },
+    /** Per-photo / per-board answers of the reviewers, every version (see markSchema). */
+    marks: { type: [markSchema], default: [] },
     startedAt: Date,
     submittedAt: Date,
     /** Optional named reviewers per stage (set by Operations / Admin). */
@@ -246,6 +301,7 @@ export type PhotoEntry = SubmissionDoc['photos'][number];
 export type VersionEntry = SubmissionDoc['versions'][number];
 export type ReviewEntry = SubmissionDoc['reviews'][number];
 export type ReworkEntry = SubmissionDoc['reworks'][number];
+export type MarkEntry = SubmissionDoc['marks'][number];
 
 /** Single configuration document: review order, checklist, required photos per media type, SLA. Edited by Admin. */
 const configSchema = new Schema(

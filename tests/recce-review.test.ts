@@ -58,9 +58,7 @@ beforeAll(async () => {
   ({ Notification } = await import('../src/modules/notifications/notification.model'));
   const { Site } = await import('../src/modules/sites/site.model');
   app = (await import('../src/app')).createApp();
-  // These tests cover the ordered review (Operations first, then Client Servicing). The default is parallel review since 2026-11-23, see tests/recce-19steps.test.ts.
-  const { RecceConfig } = await import('../src/modules/recce-review/recceReview.model');
-  await RecceConfig.updateOne({ key: 'default' }, { $set: { sequential: true } }, { upsert: true });
+  // Review has no turn order since 2026-11-25: either stage may decide first (see tests/recce-19steps.test.ts). The tests below decide Operations first only because that is how they were written.
 
   const kyc = { pan: true, gst: true, bank: true, address: true };
   const mk = (code: string) => Vendor.create({ code, name: code, nameKey: code, type: 'ORGANIZATION', mobile: '9000000000', status: 'ACTIVE', kyc });
@@ -194,8 +192,11 @@ describe('submission and two-stage review', () => {
     const reply = await api().post(`/api/v1/recce/shops/${ids.S1}/messages`).set(as('VA')).send({ body: 'Visited, board is faded' });
     expect(reply.status).toBe(201);
   });
-  it('Client Servicing cannot decide before Operations; Operations cannot decide the CS stage', async () => {
-    expect((await decide('CS', sub, 'CS', 'APPROVE')).status).toBe(409);
+  it('Client Servicing may decide before Operations (no waiting); Operations cannot decide the CS stage', async () => {
+    const cs = await ws('CS', sub);
+    expect(cs.me.canDecide).toBe(true);
+    expect(cs.me.canMark).toBe(true);
+    expect((await ws('OPS', sub)).me.canDecide).toBe(true);
     expect((await decide('OPS', sub, 'CS', 'APPROVE')).status).toBe(403);
     expect((await decide('ADMIN', sub, 'OPS', 'APPROVE')).status).toBe(403);
   });

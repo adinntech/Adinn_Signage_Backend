@@ -9,6 +9,7 @@ import { actorOf, objectId } from '../../common/query';
 import * as f from './recceReview.field';
 import * as r from './recceReview.review';
 import { fieldDashboard, performance, performanceQuery } from './recceReview.dashboard';
+import { marksBody } from './recceReview.marks';
 import { threadQuery } from './recceReview.thread';
 import { compareQuery } from './recceReview.versions';
 
@@ -76,6 +77,7 @@ recceReviewRouter.get('/submissions/:id/versions/compare', asyncHandler(async (r
 recceReviewRouter.get('/submissions/:id/versions', asyncHandler(async (req, res) => ok(res, await r.reviewVersions(A(req), r.idParam.parse(req.params).id))));
 recceReviewRouter.post('/submissions/:id/start', asyncHandler(async (req, res) => ok(res, await r.markReviewStarted(A(req), r.idParam.parse(req.params).id))));
 recceReviewRouter.post('/submissions/:id/decision', asyncHandler(async (req, res) => ok(res, await r.decide(A(req), r.idParam.parse(req.params).id, r.decideBody.parse(req.body)))));
+recceReviewRouter.post('/submissions/:id/marks', asyncHandler(async (req, res) => ok(res, await r.applyMarks(A(req), r.idParam.parse(req.params).id, marksBody.parse(req.body)))));
 recceReviewRouter.post('/submissions/:id/change-decision', asyncHandler(async (req, res) => ok(res, await r.changeDecision(A(req), r.idParam.parse(req.params).id, r.changeDecisionBody.parse(req.body)))));
 recceReviewRouter.post('/submissions/:id/override', asyncHandler(async (req, res) => ok(res, await r.override(A(req), r.idParam.parse(req.params).id, r.overrideBody.parse(req.body)))));
 recceReviewRouter.post('/submissions/:id/reopen', asyncHandler(async (req, res) => ok(res, await r.reopen(A(req), r.idParam.parse(req.params).id, r.reopenBody.parse(req.body)))));

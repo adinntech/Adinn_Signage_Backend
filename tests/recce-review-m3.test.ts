@@ -139,7 +139,6 @@ describe('system events in the shop thread and the notifications that go with th
     expect(again.body.data.duplicate).toBe(true);
     expect((await decide('CS', sub, 'CS', 'APPROVE', 2)).body.data.status).toBe('UNDER_REVIEW');
     expect((await decide('OPS', sub, 'OPS', 'APPROVE', 2)).body.data.status).toBe('APPROVED');
-    await M.RecceConfig.updateOne({ key: 'default' }, { $set: { sequential: true } });
     const msgs = (await thread('VA', ids.S1)).body.data;
     expect(cardsOf(msgs)).toEqual([
       'Shop Recce Submitted:', 'Recce Review Update:Client Servicing approved', 'Recce Review Update:Rework required', 'Shop Recce Resubmitted:', 'Recce Review Update:Client Servicing approved', 'Recce Review Update:Final approval',
@@ -354,7 +353,8 @@ describe('field dashboard (own shops only)', () => {
     expect((await decide('OPS', sub, 'OPS', 'APPROVE', 1)).body.data.status).toBe('UNDER_REVIEW');
     expect((await dash('EX1')).body.data).toMatchObject({ approved: 0, completed: 0, underReview: 1 }); // one stage is not enough
     const thr = cardsOf((await thread('EX1', ids.S4)).body.data);
-    expect(thr).toEqual(['Shop Recce Submitted:', 'Recce Review Update:Recce Operations approved', 'Client Servicing Review Due:']);
+    // No "your turn" card any more: Client Servicing was told when the shop was submitted and never waits for Operations.
+    expect(thr).toEqual(['Shop Recce Submitted:', 'Recce Review Update:Recce Operations approved']);
     expect((await decide('CS', sub, 'CS', 'APPROVE', 1)).body.data.status).toBe('APPROVED');
     const d = (await dash('EX1')).body.data;
     expect(d).toMatchObject({ started: 1, submitted: 1, underReview: 0, approved: 1, completed: 1, pending: 2, reworkCount: 0, reworkPercent: 0 });

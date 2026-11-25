@@ -41,7 +41,7 @@ export const EVENT_LABEL: Record<string, string> = {
   MEASUREMENT_UPDATED: 'Measurement updated', DRAFT_SAVED: 'Draft saved', SUBMISSION_CREATED: 'Submission created', REWORK_SUBMITTED: 'Rework submitted',
   REVIEW_APPROVED: 'Review approved', REVIEW_REJECTED: 'Review rejected', REWORK_REQUESTED: 'Rework requested', ADDITIONAL_PHOTOS_REQUESTED: 'Additional photos requested',
   FINAL_APPROVAL: 'Final approval', DECISION_CHANGED: 'Decision changed', ADMIN_OVERRIDE: 'Admin override', REOPENED: 'Reopened', COMMENT_ADDED: 'Comment added', REVIEWER_ASSIGNED: 'Reviewer assigned',
-  REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added', INSTALLATION_UPDATED: 'Installation feasibility updated',
+  ITEMS_MARKED: 'Photos / board details marked', REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added', INSTALLATION_UPDATED: 'Installation feasibility updated',
 };
 
 export type Visibility = 'ALL' | 'REVIEW' | 'ADMIN';
