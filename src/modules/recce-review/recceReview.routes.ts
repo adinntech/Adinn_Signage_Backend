@@ -36,6 +36,8 @@ recceFieldRouter.get('/shops/:siteId', asyncHandler(async (req, res) => ok(res, 
 recceFieldRouter.post('/shops/:siteId/start', asyncHandler(async (req, res) => ok(res, await f.startVisit(A(req), f.siteParam.parse(req.params).siteId))));
 recceFieldRouter.put('/shops/:siteId/draft', asyncHandler(async (req, res) => ok(res, await f.saveDraft(A(req), f.siteParam.parse(req.params).siteId, f.draftBody.parse(req.body)))));
 recceFieldRouter.post('/shops/:siteId/photos', upload.array('photos', 10), asyncHandler(async (req, res) => ok(res, await f.uploadPhotos(A(req), f.siteParam.parse(req.params).siteId, files(req), parseMetas(req.body?.meta)), undefined, 201)));
+// The 2D drawing / 3D preview picture of ONE board (multipart, field "file"): stored inside the shop's document with that board.
+recceFieldRouter.put('/shops/:siteId/boards/:mediaKey/renders/:kind', upload.single('file'), asyncHandler(async (req, res) => { const p = f.renderParam.parse(req.params); ok(res, await f.saveBoardRender(A(req), p.siteId, p.mediaKey, p.kind, one(req))); }));
 recceFieldRouter.put('/shops/:siteId/photos/order', asyncHandler(async (req, res) => ok(res, await f.reorderPhotos(A(req), f.siteParam.parse(req.params).siteId, f.reorderBody.parse(req.body).ids))));
 recceFieldRouter.patch('/shops/:siteId/photos/:photoId', asyncHandler(async (req, res) => { const p = f.photoParam.parse(req.params); ok(res, await f.patchPhoto(A(req), p.siteId, p.photoId, f.photoPatch.parse(req.body))); }));
 recceFieldRouter.put('/shops/:siteId/photos/:photoId/annotation', upload.single('edited'), asyncHandler(async (req, res) => {

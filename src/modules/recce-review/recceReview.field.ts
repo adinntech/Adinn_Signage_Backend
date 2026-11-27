@@ -15,7 +15,8 @@ import {
 } from './recceReview.common';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
 import { byPhotoOrder, photoHistory, photoReviews, presentItem, versionHistory, compareVersions, compareQuery } from './recceReview.versions';
-import { CATEGORY_LABEL, ELECTRICAL_ACCESS, PHOTO_CATEGORIES, PHOTO_SOURCES, REVIEW_STAGES, TRI_STATES, RecceSubmission, STAGE_LABEL, type ReviewStage } from './recceReview.model';
+import { CATEGORY_LABEL, ELECTRICAL_ACCESS, PHOTO_CATEGORIES, PHOTO_SOURCES, REVIEW_STAGES, TRI_STATES, RecceSubmission, STAGE_LABEL, isRenderCategory, type ReviewStage } from './recceReview.model';
+import { nestBoards } from './recceReview.boards';
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
 
@@ -207,6 +208,7 @@ export async function shopDetail(actor: Actor, siteId: string) {
   const requestedBy = await nameMap(reworks.map((r) => r.requestedBy));
   const reviewOf = photoReviews(photos, reworks as never, sub?.status, requestedBy);
   const status = displayStatus(sub, draftCount, m.missing.length === 0);
+  const presented = await Promise.all(photos.map(async (p) => ({ ...(await presentPhoto(p as never, names, { withHistory: false, roles })), review: reviewOf.get(String(p._id))! })));
   return {
     siteId: String(site._id), siteCode: site.siteCode, shopName: site.shopName ?? null, dealerName: site.dealerName ?? null, district: site.district ?? null, contactPerson: site.contactPerson ?? null, mobile: site.mobile ?? null,
     address: [site.address1, site.address2, site.address3, site.pincode].filter(Boolean).join(', '), lat: site.lat ?? null, lng: site.lng ?? null, remarks: site.remarks ?? null,
@@ -215,7 +217,9 @@ export async function shopDetail(actor: Actor, siteId: string) {
     mediaItems: items.map((i) => ({ ...presentItem(i), required: requiredCatsOf(cfg, i, project.requirementType) })), notes: sub?.notes ?? '',
     installation: presentInstallation(sub?.installation as never), installationPending: installationPending(sub?.installation as never),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
-    photos: await Promise.all(photos.map(async (p) => ({ ...(await presentPhoto(p as never, names, { withHistory: false, roles })), review: reviewOf.get(String(p._id))! }))),
+    photos: presented,
+    // The same photos, grouped under the board they belong to (size, quantity, installation, questions, photos, 2D, 3D together).
+    ...nestBoards(items, presented),
     progress: { percent: status === 'APPROVED' ? 100 : m.percent, required: m.required, done: m.done, missing: m.missing.map((x) => ({ ...x, label: x.category === 'DIMENSIONS' ? 'Width, height and quantity' : CATEGORY_LABEL[x.category as keyof typeof CATEGORY_LABEL] })) },
     versions: versions.map((v) => ({ version: v.version, submittedAt: v.submittedAt, photoCount: v.photos.length })),
     reviews: reviews.map((r) => ({ versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, comment: r.comment, reviewer: r.reviewer ? (reviewers.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null })),
@@ -324,10 +328,11 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
   const cfg = await getConfig();
   validateFiles('RECCE_SHOP_PHOTO', files);
   // The photos are part of the shop's one document, so everything below is read from `sub` and written with one atomic update.
-  const live = sub.photos.filter(isLivePhoto);
+  const live = sub.photos.filter((p) => isLivePhoto(p) && !isRenderCategory(p.category)); // the 2D / 3D pictures are not site photos
   const keys = new Set(sub.mediaItems.map((i) => i.key));
   const known = new Set(sub.photos.map((p) => p.clientId).filter((c): c is string => !!c));
   const fresh = files.map((f, i) => ({ f, m: metas[i]! })).filter((x) => !(x.m.clientId && known.has(x.m.clientId)));
+  if (fresh.some((x) => isRenderCategory(x.m.category))) throw AppError.badRequest('Send the 2D drawing and 3D preview through the board render endpoint');
   if (live.length + fresh.length > cfg.maxPhotos) throw AppError.badRequest(`A shop can hold ${cfg.maxPhotos} photos`);
   for (const x of fresh) {
     if (x.m.mediaKey && !keys.has(x.m.mediaKey)) throw AppError.badRequest('Unknown media type for a photo');
@@ -362,6 +367,50 @@ export async function uploadPhotos(actor: Actor, siteId: string, files: Uploaded
     throw e;
   }
   for (const d of entries) await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: d.replaces ? 'PHOTO_REPLACED' : 'PHOTO_CAPTURED', mediaKey: (d.mediaKey as string) || undefined, photo: d._id as Types.ObjectId, changes: [{ field: 'category', oldValue: null, newValue: d.category }] });
+  return shopDetail(actor, siteId);
+}
+
+export const renderParam = siteParam.extend({ mediaKey: z.string().trim().min(1).max(20).regex(/^[a-z0-9_-]+$/i), kind: z.enum(['2d', '3d']) });
+const RENDER_OF = { '2d': 'DRAWING_2D', '3d': 'VIEW_3D' } as const;
+
+/**
+ * Stores (or replaces) the 2D drawing or the 3D preview picture of ONE board. It is saved inside the shop's own document, tagged with the
+ * board's key, like the board's photos, so it is part of the version that is submitted and shows with the board in review. A newer picture
+ * of the same kind replaces the draft one (its file is erased); a picture already submitted is kept as history and marked as replaced at the next submit.
+ */
+export async function saveBoardRender(actor: Actor, siteId: string, mediaKey: string, kind: '2d' | '3d', file: UploadedFile | undefined) {
+  if (!file) throw AppError.badRequest('Attach the picture in the "file" field');
+  const site = await mySite(actor, siteId);
+  await assertProjectOpen(site.project);
+  const sub = await ensureSubmission(actor, site);
+  assertEditable(sub.status);
+  if (!sub.mediaItems.some((i) => i.key === mediaKey)) throw AppError.badRequest('Unknown board');
+  validateFiles('RECCE_SHOP_PHOTO', [file]);
+  const category = RENDER_OF[kind];
+  const project = await projectOf(site.project);
+  const stored = await storeEmbeddedFile({ category: 'RECCE_SHOP_PHOTO', clientName: (await clientNameFor(project)) ?? 'Client', folderKey: `${project.code}_${site.siteCode}`, file, actor, owner: { entity: 'RecceSubmission', id: sub._id } });
+  const now = new Date();
+  const same = sub.photos.filter((p) => p.mediaKey === mediaKey && p.category === category);
+  const drafts = same.filter((p) => p.state === 'DRAFT');
+  const submitted = same.filter((p) => p.state === 'SUBMITTED').at(-1);
+  const entry = {
+    _id: new Types.ObjectId(), mediaKey, category, caption: CATEGORY_LABEL[category], order: 900 + sub.photos.length, state: 'DRAFT', original: stored, source: undefined, device: 'APP_RENDER', flags: [],
+    uploadedBy: actor.id, replaces: submitted?._id, createdAt: now,
+  };
+  try {
+    // One atomic update: the older draft of this kind leaves and the new one comes in together.
+    const r = await RecceSubmission.updateOne(
+      { _id: sub._id, status: { $in: EDITABLE } },
+      { $pull: { photos: { mediaKey, category, state: 'DRAFT' } } },
+    );
+    if (!r.matchedCount) throw AppError.conflict('The shop was just submitted. Reload and try again.');
+    await RecceSubmission.updateOne({ _id: sub._id, status: { $in: EDITABLE } }, { $push: { photos: entry } }, { runValidators: true });
+  } catch (e) {
+    await discardStoredFiles([stored]);
+    throw e;
+  }
+  for (const d of drafts) await eraseStoredFile(d.original as unknown as StoredFile, actor, { entity: 'RecceSubmission', id: sub._id });
+  await logEvent(actor, { submission: sub._id, project: sub.project, site: site._id, type: 'PHOTO_CAPTURED', mediaKey, photo: entry._id, changes: [{ field: 'category', oldValue: null, newValue: category }] });
   return shopDetail(actor, siteId);
 }
 

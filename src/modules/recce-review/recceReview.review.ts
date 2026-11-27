@@ -15,6 +15,7 @@ import {
   assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, timeOf, type Config, type MediaItem,
 } from './recceReview.common';
 import { OPEN_STAGE } from './recceReview.field';
+import { nestBoards } from './recceReview.boards';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
 import { itemsFromMarks, marksBody, presentMarks, unsentProblems, writeMarks, type NewItem } from './recceReview.marks';
 import { boardLabel, byPhotoOrder, compareVersions, versionHistory, compareQuery } from './recceReview.versions';
@@ -170,7 +171,7 @@ export async function inbox(actor: Actor, q: z.infer<typeof inboxQuery>) {
   if (and.length) filter.$and = and;
 
   const [rows, total] = await Promise.all([
-    RecceSubmission.find(filter).select('-photos').sort({ dueAt: 1, submittedAt: -1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(), // the list needs no photos
+    RecceSubmission.find(filter).select('-photos').sort({ submittedAt: -1, _id: -1 }).skip((q.page - 1) * q.limit).limit(q.limit).lean(), // the list needs no photos
     RecceSubmission.countDocuments(filter),
   ]);
   return { items: await presentRows(rows), meta: pageMeta(q.page, q.limit, total) };
@@ -234,6 +235,7 @@ export async function workspace(actor: Actor, id: string) {
   const myApproved = !!mine && CHANGEABLE.includes(sub.status) && myDecision === 'APPROVED';
   const projectOpen = !CLOSED_PROJECT.includes(String(project.status));
   const dec = (r: (typeof reviews)[number]) => ({ stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment, checklist: r.checklist, override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null, history: (r.history ?? []).map((h) => ({ decision: h.decision ?? null, reviewer: h.reviewer ? (names.get(String(h.reviewer)) ?? null) : null, decidedAt: h.decidedAt ?? null, comment: h.comment ?? '', changedAt: h.changedAt ?? null })) });
+  const presented = await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles })));
   return {
     id: String(sub._id), status: sub.status, currentVersion: sub.currentVersion, attempts: sub.attempts, priority: sub.priority, submittedAt: sub.submittedAt ?? null, dueAt: sub.dueAt ?? null,
     overdue: (REVIEWABLE as string[]).includes(sub.status) && !!sub.dueAt && sub.dueAt.getTime() < Date.now(), pendingStage: (REVIEWABLE as string[]).includes(sub.status) ? (sub.pendingStage ?? null) : null,
@@ -245,7 +247,9 @@ export async function workspace(actor: Actor, id: string) {
       id: String(v._id), version: v.version, submittedAt: v.submittedAt, submittedBy: names.get(String(v.submittedBy)) ?? null, photoIds: v.photos.map(String), addedIds: v.added.map(String), removedIds: v.removed.map(String), notes: v.notes, mediaItems: v.mediaItems, installation: presentInstallation(v.installation as never), installationRecorded: !!v.installation, stages: v.stages, sequential: v.sequential, dueAt: v.dueAt ?? null,
       reviews: reviewsOfVersion(reviews, v.version).map(dec),
     })),
-    photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
+    photos: presented,
+    // Each board with its photos, 2D drawing and 3D preview inside it (the live ones of the submitted versions).
+    ...nestBoards(doc.mediaItems as unknown as MediaItem[], presented),
     reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', rejected: !!i.rejected, section: (i as { section?: string | null }).section ?? null, label: (i as { label?: string | null }).label ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
     marks: presentMarks(doc.marks ?? [], names, new Map(cfg.checklist.map((c) => [c.key, c.label]))),
     checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps })),

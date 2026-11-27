@@ -26,13 +26,19 @@ export const PHOTO_CATEGORIES = [
   'SHOP_FRONT', 'NAME_BOARD', 'LEFT_SIDE', 'RIGHT_SIDE', 'MEASUREMENT', 'MOUNTING_AREA', 'ELECTRICAL', 'EXISTING_BOARD', 'OBSTRUCTION', 'ADDITIONAL',
   // Mobile field flow (2026-11-21): the six GPS-tagged photos. SHOP_FRONT stays the "Front View" photo.
   'SIDE_VIEW', 'LONG_SHOT', 'ANNOTATED_VIEW', 'LOCATION_VIEW', 'ACCESS_PATH',
+  // Pictures the phone draws from the board's size (2026-11-27): the 2D drawing and the 3D view. One of each per board, stored with that board.
+  'DRAWING_2D', 'VIEW_3D',
 ] as const;
 export type PhotoCategory = (typeof PHOTO_CATEGORIES)[number];
+/** The generated pictures of a board. They are not site photos: no GPS check, and they do not count against `maxPhotos`. */
+export const RENDER_CATEGORIES = ['DRAWING_2D', 'VIEW_3D'] as const;
+export const isRenderCategory = (c?: string | null) => (RENDER_CATEGORIES as readonly string[]).includes(c ?? '');
 export const CATEGORY_LABEL: Record<PhotoCategory, string> = {
   SHOP_FRONT: 'Full Shop Front View', NAME_BOARD: 'Shop Name Board', LEFT_SIDE: 'Left Side View', RIGHT_SIDE: 'Right Side View',
   MEASUREMENT: 'Measurement View', MOUNTING_AREA: 'Mounting Area', ELECTRICAL: 'Electrical Connection', EXISTING_BOARD: 'Existing Board',
   OBSTRUCTION: 'Obstruction / Site Issue', ADDITIONAL: 'Additional Photo',
   SIDE_VIEW: 'Side View', LONG_SHOT: 'Long Shot', ANNOTATED_VIEW: 'Annotated View', LOCATION_VIEW: 'Location View', ACCESS_PATH: 'Access Path',
+  DRAWING_2D: '2D Drawing', VIEW_3D: '3D Preview',
 };
 export const PHOTO_SOURCES = ['LIVE_CAMERA', 'GALLERY'] as const;
 export type PhotoSource = (typeof PHOTO_SOURCES)[number];
