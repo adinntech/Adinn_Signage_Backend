@@ -27,7 +27,9 @@ const OPEN = ['SUBMITTED', 'UNDER_REVIEW'];
 const unitLabel = (m: Row, u: Row) => `${m.name ?? m.mediaType ?? m.mediaKey} · ${u.unitId}`;
 const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x ?? null));
 const unitsOf = (items: Row[]) => (items ?? []).flatMap((m: Row) => (m.units ?? []).map((u: Row) => ({ m, u })));
-const reviewOf = (u: Row, stage: string, version = u.currentVersion) => (u.reviews ?? []).find((r: Row) => r.version === version && r.stage === stage);
+/** The latest entry of a stage on a version (a revert is a later entry after the approval). */
+const reviewOf = (u: Row, stage: string, version = u.currentVersion) => [...(u.reviews ?? [])].reverse().find((r: Row) => r.version === version && r.stage === stage);
+const SENT_BACK = ['REJECTED', 'REVERTED'];
 const currentReviews = (u: Row) => (u.reviews ?? []).filter((r: Row) => r.version === u.currentVersion);
 const reworkIdOf = (u: Row, version: number, stage: string) => `rw_${String(u.unitId).toLowerCase()}_v${version}_${stage.toLowerCase()}`;
 
@@ -90,17 +92,23 @@ function applyFlatVersion(items: Row[], flat: Row, allPhotos: Row[], stages: Rev
   return touched;
 }
 
-/** A unit's status from its current version's reviews. */
+/**
+ * A unit's status from its current version's reviews (rule since 2026-11-28): ONE approval from either stage (CS or OPS) completes
+ * the unit; the other stage's pending review becomes VOID ("not needed"), so it is no longer counted as pending. A rejection still
+ * sends the unit back. Each stage's own decision record is kept for the history.
+ */
 function unitOutcome(u: Row) {
   const rs = currentReviews(u);
   if (!u.currentVersion || !rs.length) return;
-  if (rs.some((r: Row) => r.decision === 'REJECTED')) {
+  // Rejected, or an approval reverted: the unit goes back for correction (the approval entry stays as history).
+  if (rs.some((r: Row) => SENT_BACK.includes(r.decision))) {
     for (const r of rs) if (r.decision === 'PENDING') r.decision = 'VOID';
     if (u.status !== 'REJECTED') u.status = 'REWORK';
     u.approvedAt = null;
-  } else if (rs.every((r: Row) => r.decision === 'APPROVED')) {
+  } else if (rs.some((r: Row) => r.decision === 'APPROVED')) {
+    for (const r of rs) if (r.decision === 'PENDING') r.decision = 'VOID';
     u.status = 'APPROVED';
-    u.approvedAt = rs.reduce((mx: Date | null, r: Row) => (r.decidedAt && (!mx || new Date(r.decidedAt) > mx) ? new Date(r.decidedAt) : mx), null);
+    u.approvedAt = rs.filter((r: Row) => r.decision === 'APPROVED').reduce((mx: Date | null, r: Row) => (r.decidedAt && (!mx || new Date(r.decidedAt) > mx) ? new Date(r.decidedAt) : mx), null);
   } else if (OPEN.includes(u.status)) {
     u.status = rs.some((r: Row) => r.decision !== 'PENDING') ? 'UNDER_REVIEW' : 'SUBMITTED';
   }
@@ -118,7 +126,7 @@ export function summaryOf(items: Row[]) {
  * Shop-level state from the units: status, pending stage, each stage's decision on the current shop version (kept for the inbox,
  * dashboards and lists) and, when the round ends with units sent back, the rework list the field app answers.
  */
-function rollUp(sub: Row, items: Row[], stages: ReviewStage[]) {
+function rollUp(sub: Row, items: Row[], stages: ReviewStage[], only?: Set<Row>) {
   const units = unitsOf(items).filter((x) => x.u.currentVersion > 0);
   if (!units.length) return null;
   const open = units.filter((x) => OPEN.includes(x.u.status));
@@ -132,9 +140,10 @@ function rollUp(sub: Row, items: Row[], stages: ReviewStage[]) {
   // Each stage on the current shop version: still deciding (PENDING), done (APPROVED / REWORK) or not needed (VOID).
   const stageDecision = (s: ReviewStage) => {
     const mine = units.map((x) => reviewOf(x.u, s)).filter(Boolean);
-    if (status === 'APPROVED') return 'APPROVED';
+    // Approved shop: this stage shows APPROVED only when it approved at least one unit; otherwise it was not needed.
+    if (status === 'APPROVED') return mine.some((r: Row) => r.decision === 'APPROVED') ? 'APPROVED' : 'VOID';
     if (mine.some((r: Row) => r.decision === 'PENDING')) return status === 'REWORK_REQUIRED' ? 'VOID' : 'PENDING';
-    if (mine.some((r: Row) => r.decision === 'REJECTED')) return status === 'REJECTED' ? 'REJECTED' : 'REWORK';
+    if (mine.some((r: Row) => SENT_BACK.includes(r.decision))) return status === 'REJECTED' ? 'REJECTED' : 'REWORK';
     return mine.every((r: Row) => r.decision === 'APPROVED') ? 'APPROVED' : 'VOID';
   };
   const lastBy = (s: ReviewStage) => units.map((x) => reviewOf(x.u, s)).filter((r: Row) => r?.decidedAt).sort((a: Row, b: Row) => +new Date(b.decidedAt) - +new Date(a.decidedAt))[0];
@@ -147,12 +156,13 @@ function rollUp(sub: Row, items: Row[], stages: ReviewStage[]) {
 
   // Rework list for the field app (one entry per round): every rejected photo / measurement of the units sent back.
   let rework: Row = null;
-  if (status === 'REWORK_REQUIRED' && sub.status !== 'REWORK_REQUIRED') {
+  // `only`: boards reverted while the shop is already in rework (a separate entry with just those boards).
+  if (status === 'REWORK_REQUIRED' && (sub.status !== 'REWORK_REQUIRED' || only)) {
     const list: Row[] = [];
     const lines: string[] = [];
     let by: Row = null;
-    for (const { m, u } of units.filter((x) => x.u.status === 'REWORK')) {
-      for (const r of currentReviews(u).filter((x: Row) => x.decision === 'REJECTED')) {
+    for (const { m, u } of units.filter((x) => x.u.status === 'REWORK' && (!only || only.has(x.u)))) {
+      for (const r of currentReviews(u).filter((x: Row) => SENT_BACK.includes(x.decision))) {
         by ??= r;
         const rw = (u.reworks ?? []).find((x: Row) => x.reworkId === r.reworkId);
         const its = rw?.items ?? [];
@@ -170,15 +180,17 @@ function rollUp(sub: Row, items: Row[], stages: ReviewStage[]) {
 }
 
 /** Writes the media items + rolled-up shop state with a compare-and-set on `rev`. Returns null when another write landed first. */
-async function commit(sub: Row, items: Row[], stages: ReviewStage[], extra: { requireReviewable?: boolean } = {}) {
-  const roll = rollUp(sub, items, stages);
+async function commit(sub: Row, items: Row[], stages: ReviewStage[], extra: { requireReviewable?: boolean; allowStatuses?: string[]; only?: Set<Row> } = {}) {
+  const roll = rollUp(sub, items, stages, extra.only);
   const set: Record<string, unknown> = { mediaItems: items, summary: summaryOf(items) };
-  if (roll && (!extra.requireReviewable || OPEN.includes(sub.status))) {
+  if (roll && (!extra.requireReviewable || OPEN.includes(sub.status) || extra.allowStatuses?.includes(sub.status))) {
     Object.assign(set, { status: roll.status, pendingStage: roll.pendingStage, reviews: roll.reviews });
     if (roll.final) set.finalApprovedAt = new Date();
+    // A reverted approval: the shop is no longer finally approved.
+    if (roll.status !== 'APPROVED' && sub.status === 'APPROVED') set.finalApprovedAt = null;
   }
   const filter: Record<string, unknown> = { _id: sub._id, rev: sub.rev };
-  if (extra.requireReviewable) filter.status = { $in: REVIEWABLE };
+  if (extra.requireReviewable) filter.status = { $in: extra.allowStatuses ?? REVIEWABLE };
   const r = await RecceSubmission.updateOne(
     filter,
     { $set: set, $unset: { boards: 1 }, ...(roll?.rework && set.status === 'REWORK_REQUIRED' ? { $push: { reworks: roll.rework } } : {}), $inc: { rev: 1 } },
@@ -227,9 +239,11 @@ export async function syncAfterSubmit(submissionId: Types.ObjectId | string) {
 /** boardKey = mediaItems[].mediaKey, unitKey = units[].unitId (the web keeps these names). */
 const unitRef = z.object({ boardKey: z.string().trim().min(1).max(20), unitKey: z.string().trim().min(1).max(20), versionNo: z.coerce.number().int().min(1) });
 export const unitDecisionBody = z.object({
-  decision: z.enum(['APPROVE', 'REJECT']),
+  /** REVERT: takes back the approval of an approved unit and sends it for correction (same items as a rejection). */
+  decision: z.enum(['APPROVE', 'REJECT', 'REVERT']),
   units: z.array(unitRef).min(1).max(50),
   comment: z.string().trim().max(1500).default(''),
+  revertReason: z.string().trim().max(200).optional(),
   rejectMode: z.enum(['PHOTO', 'MEASUREMENT', 'BOTH']).optional(),
   checklist: z.array(z.object({ key: z.string().max(40), passed: z.boolean() })).max(30).default([]),
   /** REJECT: what is wrong in each unit (photo id or measurement field), with a reason. */
@@ -262,7 +276,11 @@ export async function applyUnitDecisions(id: string | Types.ObjectId, actor: Act
   for (let attempt = 0; attempt < 3; attempt++) {
     const sub = await RecceSubmission.findById(id).lean<Row>().exec();
     if (!sub) throw AppError.notFound('Submission not found');
-    if (!REVIEWABLE.includes(sub.status)) throw AppError.conflict('This shop is not waiting for review');
+    const revert = input.decision === 'REVERT';
+    // A revert works on any approved unit: shop under review, finally approved, or already in rework for another board.
+    const allowed = revert ? [...REVIEWABLE, 'APPROVED', 'REWORK_REQUIRED', 'IN_PROGRESS'] : REVIEWABLE;
+    if (!allowed.includes(sub.status)) throw AppError.conflict(revert ? 'This approval cannot be reverted now. Reload and check the shop status.' : 'This shop is not waiting for review');
+    if (revert && (input.revertReason ?? '').length < 3) throw AppError.badRequest('Choose the reason for reverting the approval');
     const items = itemsOf(sub);
     const at = opts.at ?? new Date();
     const decided: { m: Row; u: Row; r: Row; rw: Row }[] = [];
@@ -271,19 +289,20 @@ export async function applyUnitDecisions(id: string | Types.ObjectId, actor: Act
       const u = m?.units.find((x: Row) => x.unitId === ref.unitKey);
       if (!m || !u) throw AppError.notFound(`Unit ${ref.boardKey}/${ref.unitKey} not found`);
       if (u.currentVersion !== ref.versionNo) throw AppError.conflict(`${unitLabel(m, u)} is on version ${u.currentVersion} now. Reload before deciding.`);
-      if (!OPEN.includes(u.status)) throw AppError.conflict(`${unitLabel(m, u)} is not waiting for review`);
+      if (revert ? u.status !== 'APPROVED' : !OPEN.includes(u.status)) throw AppError.conflict(revert ? `${unitLabel(m, u)} is not approved now. Reload and check its status.` : `${unitLabel(m, u)} is not waiting for review`);
       const v = u.versions.at(-1);
-      const r = reviewOf(u, stage);
+      // Revert: a new entry for my stage (the approval entry stays as it is). Otherwise my pending review on this version.
+      const r = revert ? { version: u.currentVersion, stage } : reviewOf(u, stage);
       if (!r) throw AppError.badRequest(`${STAGE_LABEL[stage]} is not part of this review`);
-      if (r.decision !== 'PENDING') throw AppError.conflict(`${STAGE_LABEL[stage]} has already decided ${unitLabel(m, u)} V${u.currentVersion}`);
+      if (!revert && r.decision !== 'PENDING') throw AppError.conflict(`${STAGE_LABEL[stage]} has already decided ${unitLabel(m, u)} V${u.currentVersion}`);
       const flat = (sub.versions ?? []).find((x: Row) => x.version === v?.shopVersion);
-      if (flat?.sequential) {
+      if (!revert && flat?.sequential) {
         const order = (flat.stages ?? []) as string[];
         const before = order.slice(0, order.indexOf(stage));
         if (before.some((s) => (reviewOf(u, s)?.decision ?? 'APPROVED') !== 'APPROVED')) throw AppError.conflict('An earlier review stage must approve this unit first');
       }
       let rw: Row = null;
-      if (input.decision === 'REJECT') {
+      if (input.decision === 'REJECT' || revert) {
         const its = input.items.filter((i) => i.boardKey === m.mediaKey && i.unitKey === u.unitId).map((i) => {
           if (i.kind === 'PHOTO') {
             if (!i.ref || !(v?.photoIds ?? []).map(String).includes(i.ref.toLowerCase())) throw AppError.badRequest(`A chosen photo is not part of ${unitLabel(m, u)} V${u.currentVersion}`);
@@ -293,27 +312,31 @@ export async function applyUnitDecisions(id: string | Types.ObjectId, actor: Act
           return { kind: 'MEASUREMENT', field: i.field ?? 'both', reason: i.reason };
         });
         if (!its.length && input.comment.length < 5) throw AppError.badRequest(`Say what is wrong in ${unitLabel(m, u)}: choose a photo or measurement, or write a comment`);
-        rw = { reworkId: reworkIdOf(u, u.currentVersion, stage), sourceVersion: u.currentVersion, stage, requestedBy: new Types.ObjectId(actor.id), requestedAt: at, status: 'OPEN', items: its };
+        rw = { reworkId: `${reworkIdOf(u, u.currentVersion, stage)}${revert ? '_revert' : ''}`, sourceVersion: u.currentVersion, stage, requestedBy: new Types.ObjectId(actor.id), requestedAt: at, status: 'OPEN', items: its };
         (u.reworks ??= []).push(rw);
       }
       Object.assign(r, {
-        decision: input.decision === 'APPROVE' ? 'APPROVED' : 'REJECTED', reviewer: new Types.ObjectId(actor.id), reviewerRole: actor.role, decidedAt: at, comment: input.comment,
+        decision: input.decision === 'APPROVE' ? 'APPROVED' : revert ? 'REVERTED' : 'REJECTED', reviewer: new Types.ObjectId(actor.id), reviewerRole: actor.role, decidedAt: at, comment: input.comment,
         checklist: input.decision === 'APPROVE' ? checklist : [],
+        ...(revert ? { revertReason: input.revertReason } : {}),
         ...(rw ? { reworkId: rw.reworkId, rejectMode: input.rejectMode ?? (rw.items.some((i: Row) => i.kind === 'PHOTO') && rw.items.some((i: Row) => i.kind === 'MEASUREMENT') ? 'BOTH' : rw.items.some((i: Row) => i.kind === 'MEASUREMENT') ? 'MEASUREMENT' : 'PHOTO') } : {}),
       });
+      if (revert) u.reviews.push(r);
       unitOutcome(u);
       decided.push({ m, u, r, rw });
     }
     const flat = (sub.versions ?? []).find((x: Row) => x.version === sub.currentVersion);
     const stages = (flat?.stages ?? REVIEW_STAGES) as ReviewStage[];
-    const roll = await commit(sub, items, stages, { requireReviewable: true });
+    // Shop already in rework: the field app gets a rework entry for just the reverted boards.
+    const only = revert && ['REWORK_REQUIRED', 'IN_PROGRESS'].includes(sub.status) ? new Set(decided.map((d) => d.u)) : undefined;
+    const roll = await commit(sub, items, stages, { requireReviewable: true, allowStatuses: allowed, only });
     if (!roll) continue;
 
     for (const { m, u, r, rw } of decided) {
       await logEvent(actor, {
-        submission: sub._id, project: sub.project, site: sub.site, type: r.decision === 'APPROVED' ? 'UNIT_APPROVED' : 'UNIT_REJECTED', version: sub.currentVersion, mediaKey: `${m.mediaKey}/${u.unitId}`, visibility: 'ALL',
-        reason: r.decision === 'REJECTED' ? [r.comment, ...(rw?.items ?? []).map((i: Row) => `${i.kind === 'PHOTO' ? (CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] ?? 'Photo') : `Measurement (${i.field})`}: ${i.reason}`)].filter(Boolean).join('; ').slice(0, 1000) : r.comment || undefined,
-        changes: [{ field: `${unitLabel(m, u)} V${u.currentVersion}.${stage}`, oldValue: 'PENDING', newValue: r.decision }],
+        submission: sub._id, project: sub.project, site: sub.site, type: r.decision === 'APPROVED' ? 'UNIT_APPROVED' : r.decision === 'REVERTED' ? 'UNIT_REVERTED' : 'UNIT_REJECTED', version: sub.currentVersion, mediaKey: `${m.mediaKey}/${u.unitId}`, visibility: 'ALL',
+        reason: r.decision !== 'APPROVED' ? [r.revertReason ? `Reverted: ${r.revertReason}` : '', r.comment, ...(rw?.items ?? []).map((i: Row) => `${i.kind === 'PHOTO' ? (CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] ?? 'Photo') : `Measurement (${i.field})`}: ${i.reason}`)].filter(Boolean).join('; ').slice(0, 1000) : r.comment || undefined,
+        changes: [{ field: `${unitLabel(m, u)} V${u.currentVersion}.${stage}`, oldValue: r.decision === 'REVERTED' ? 'APPROVED' : 'PENDING', newValue: r.decision }],
       });
     }
     if (roll.final) await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'FINAL_APPROVAL', version: sub.currentVersion });
@@ -330,6 +353,24 @@ export async function applyUnitDecisions(id: string | Types.ObjectId, actor: Act
   throw AppError.conflict('The shop changed while you were deciding. Reload and try again.');
 }
 
+/**
+ * Re-applies the unit rule to a shop under review (used once after the "one approval is enough" change): a unit that one stage
+ * already approved becomes APPROVED and the shop status is rolled up again. Returns true when something changed.
+ */
+export async function recalcUnits(id: Types.ObjectId | string) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const sub = await RecceSubmission.findById(id).lean<Row>().exec();
+    if (!sub || !REVIEWABLE.includes(sub.status) || !hasUnits(sub)) return false;
+    const items = itemsOf(sub);
+    const before = JSON.stringify(unitsOf(items).map(({ u }) => u.status));
+    for (const { u } of unitsOf(items)) if (OPEN.includes(u.status)) unitOutcome(u);
+    if (JSON.stringify(unitsOf(items).map(({ u }) => u.status)) === before) return false;
+    const flat = (sub.versions ?? []).find((x: Row) => x.version === sub.currentVersion);
+    if (await commit(sub, items, (flat?.stages ?? REVIEW_STAGES) as ReviewStage[], { requireReviewable: true })) return true;
+  }
+  return false;
+}
+
 /* ------------------------------------------------ voice note on a unit rejection ------------------------------------------------ */
 
 export const voiceBody = unitRef;
@@ -343,9 +384,11 @@ export async function addUnitVoiceNote(actor: Actor, id: string, ref: z.infer<ty
   await assertCanSeeProject(actor, sub.project);
   const mi = (sub.mediaItems ?? []).findIndex((m: Row) => m.mediaKey === ref.boardKey);
   const ui = mi >= 0 ? (sub.mediaItems[mi].units ?? []).findIndex((u: Row) => u.unitId === ref.unitKey) : -1;
-  const ri = ui >= 0 ? (sub.mediaItems[mi].units[ui].reviews ?? []).findIndex((r: Row) => r.version === ref.versionNo && r.stage === stage) : -1;
+  // My latest rejection / revert on that version (a revert is a later entry than the approval).
+  let ri = -1;
+  (ui >= 0 ? (sub.mediaItems[mi].units[ui].reviews ?? []) : []).forEach((r: Row, i: number) => { if (r.version === ref.versionNo && r.stage === stage) ri = i; });
   const review = ri >= 0 ? sub.mediaItems[mi].units[ui].reviews[ri] : null;
-  if (!review || String(review.reviewer) !== actor.id || review.decision !== 'REJECTED') throw AppError.conflict(`Add a voice note only to your own ${STAGE_LABEL[stage]} rejection`);
+  if (!review || String(review.reviewer) !== actor.id || !SENT_BACK.includes(review.decision)) throw AppError.conflict(`Add a voice note only to your own ${STAGE_LABEL[stage]} rejection or revert`);
   if (review.voiceNote?.key) throw AppError.conflict('A voice note is already attached to this decision');
   const [project, site] = await Promise.all([Project.findById(sub.project).select('code client clientDetails').lean(), Site.findById(sub.site).select('siteCode').lean()]);
   const stored = await storeEmbeddedFile({
@@ -534,7 +577,7 @@ export async function presentBoards(rawItems: Row[]) {
             const rw = r.reworkId ? (u.reworks ?? []).find((x: Row) => x.reworkId === r.reworkId) : null;
             return {
               stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null,
-              comment: r.comment ?? '', rejectMode: r.rejectMode ?? null, reworkId: r.reworkId ?? null, voiceNoteUrl: await voice(r.voiceNote), override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null,
+              comment: r.comment ?? '', rejectMode: r.rejectMode ?? null, reworkId: r.reworkId ?? null, revertReason: r.revertReason ?? null, voiceNoteUrl: await voice(r.voiceNote), override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null,
               items: (rw?.items ?? []).map((it: Row) => ({ kind: it.kind, ref: it.photoId ? String(it.photoId) : null, category: it.category ?? null, categoryLabel: it.category ? (CATEGORY_LABEL[it.category as keyof typeof CATEGORY_LABEL] ?? it.category) : null, field: it.field ?? null, reason: it.reason, fixedInVersion: rw?.resolvedInVersion ?? null })),
             };
           })),

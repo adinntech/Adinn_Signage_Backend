@@ -242,7 +242,8 @@ const itemReviewSchema = new Schema({
  */
 export const UNIT_STATUSES = ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REWORK', 'REJECTED'] as const;
 export type UnitStatus = (typeof UNIT_STATUSES)[number];
-export const UNIT_DECISIONS = ['PENDING', 'APPROVED', 'REJECTED', 'VOID'] as const;
+/** REVERTED: an approval taken back by a reviewer (a separate entry: the approval itself stays in the history). */
+export const UNIT_DECISIONS = ['PENDING', 'APPROVED', 'REJECTED', 'VOID', 'REVERTED'] as const;
 export const MEASURE_FIELDS = ['width', 'height', 'both'] as const;
 export const SIDE_TYPES = ['SINGLE', 'DOUBLE'] as const;
 export const INSTALLATION_TYPES = ['WALL_MOUNT', 'PROJECTION_MOUNT', 'ROOF_TOP', 'GLASS_PASTING', 'WALL_PASTING', 'POLE_MOUNT', 'OTHER'] as const;
@@ -281,8 +282,10 @@ const unitReviewSchema = new Schema(
     comment: { type: String, default: '', maxlength: 2000 },
     checklist: [{ _id: false, key: String, label: String, passed: Boolean }],
     rejectMode: { type: String, enum: ['PHOTO', 'MEASUREMENT', 'BOTH'] },
-    /** The rework this rejection opened (reworks[].reworkId). */
+    /** The rework this rejection / revert opened (reworks[].reworkId). */
     reworkId: String,
+    /** Revert only: why the approval was taken back. */
+    revertReason: { type: String, maxlength: 200 },
     voiceNote: { type: storedFileSchema },
     override: { type: new Schema({ by: { type: Schema.Types.ObjectId, ref: 'User' }, reason: String }, { _id: false }) },
   },
