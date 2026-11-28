@@ -11,6 +11,9 @@ import * as r from './recceReview.review';
 import { fieldDashboard, performance, performanceQuery } from './recceReview.dashboard';
 import { threadQuery } from './recceReview.thread';
 import { compareQuery } from './recceReview.versions';
+import * as pa from './recceReview.approval';
+import * as pt from './recceReview.tracking';
+import * as un from './recceReview.units';
 
 const upload = multer({ storage: multer.memoryStorage(), defParamCharset: 'utf8', limits: { fileSize: env.MAX_IMAGE_SIZE, files: 10 } });
 const one = (req: Request) => (req.file ? { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size, buffer: req.file.buffer } : undefined);
@@ -71,6 +74,21 @@ recceReviewRouter.get('/monitor', asyncHandler(async (req, res) => ok(res, await
 recceReviewRouter.get('/reviewers', asyncHandler(async (req, res) => ok(res, await r.reviewerChoices(A(req)))));
 recceReviewRouter.get('/config', asyncHandler(async (req, res) => { if (req.auth!.role === 'VENDOR' || req.auth!.role === 'RECCE_EXECUTIVE') throw AppError.forbidden(); ok(res, await r.readConfig()); }));
 recceReviewRouter.put('/config', asyncHandler(async (req, res) => ok(res, await r.saveConfig(A(req), r.configBody.parse(req.body)))));
+// Project Approval (Client Servicing / Recce Operations): project-wise and shop-wise views, and photo / measurement decisions.
+recceReviewRouter.get('/approval/projects', asyncHandler(async (req, res) => { const out = await pa.approvalProjects(A(req), pa.projectsQuery.parse(req.query)); ok(res, out.items, out.meta); }));
+recceReviewRouter.get('/approval/projects/:projectId', asyncHandler(async (req, res) => ok(res, await pa.approvalOverview(A(req), pa.projectParam.parse(req.params).projectId))));
+recceReviewRouter.get('/approval/projects/:projectId/shops', asyncHandler(async (req, res) => { const out = await pa.approvalShops(A(req), pa.projectParam.parse(req.params).projectId, pa.shopsQuery.parse(req.query)); ok(res, out); }));
+recceReviewRouter.get('/approval/shops/:siteId', asyncHandler(async (req, res) => ok(res, await pa.approvalShopRef(A(req), pa.siteParam.parse(req.params).siteId))));
+// Project Tracking (Client Servicing): allocation mind map, shop-wise progress and activity of one project (read-only).
+// Operations see only the projects assigned to them (visibleProject → reviewProjectFilter).
+const trackers = requireRole('OPERATIONS', 'RECCE_COORDINATOR', 'CLIENT_SERVICING', 'SUPER_ADMIN');
+recceReviewRouter.get('/tracking/projects/:projectId', trackers, asyncHandler(async (req, res) => ok(res, await pt.trackingOverview(A(req), pa.projectParam.parse(req.params).projectId))));
+recceReviewRouter.get('/tracking/projects/:projectId/shops', trackers, asyncHandler(async (req, res) => { const out = await pt.trackingShops(A(req), pa.projectParam.parse(req.params).projectId, pt.trackingShopsQuery.parse(req.query)); ok(res, out); }));
+recceReviewRouter.get('/tracking/projects/:projectId/activity', trackers, asyncHandler(async (req, res) => { const out = await pt.trackingActivity(A(req), pa.projectParam.parse(req.params).projectId, pt.activityQuery.parse(req.query)); ok(res, out.items, out.meta); }));
+// Unit-wise review: approve / reject units for the reviewer's own stage, and the voice note on their unit rejection (multipart: file, boardKey, unitKey, versionNo).
+recceReviewRouter.post('/submissions/:id/units/decision', asyncHandler(async (req, res) => ok(res, await un.decideUnits(A(req), un.submissionParam.parse(req.params).id, un.unitDecisionBody.parse(req.body)))));
+recceReviewRouter.post('/submissions/:id/units/voice-note', upload.single('file'), asyncHandler(async (req, res) => ok(res, await un.addUnitVoiceNote(A(req), un.submissionParam.parse(req.params).id, un.voiceBody.parse(req.body), one(req)), undefined, 201)));
+recceReviewRouter.post('/submissions/:id/items', asyncHandler(async (req, res) => ok(res, await pa.decideItem(A(req), r.idParam.parse(req.params).id, pa.itemBody.parse(req.body)))));
 recceReviewRouter.get('/submissions/:id', asyncHandler(async (req, res) => ok(res, await r.workspace(A(req), r.idParam.parse(req.params).id))));
 recceReviewRouter.get('/submissions/:id/versions/compare', asyncHandler(async (req, res) => ok(res, await r.reviewCompare(A(req), r.idParam.parse(req.params).id, compareQuery.parse(req.query)))));
 recceReviewRouter.get('/submissions/:id/versions', asyncHandler(async (req, res) => ok(res, await r.reviewVersions(A(req), r.idParam.parse(req.params).id))));

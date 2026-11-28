@@ -12,8 +12,9 @@ import { Vendor } from '../vendors/vendor.model';
 import { Site } from '../sites/site.model';
 import { User } from '../users/user.model';
 import {
-  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, logEvent, MONITOR_ROLES, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, timeOf, type Config, type MediaItem,
+  assertCanSeeProject, assertProjectOpen, clientNameFor, CLOSED_PROJECT, EVENT_LABEL, getConfig, link, logEvent, MONITOR_ROLES, flatItems, nameMap, oid, OPS_ROLES, presentInstallation, presentPhoto, REVIEWABLE, roleMap, reviewPath, reviewProjectIds, siteLabel, stageOf, stageRecipients, timeOf, type Config, type MediaItem,
 } from './recceReview.common';
+import { hasUnits, overrideUnits, presentShopUnits, reopenUnits } from './recceReview.units';
 import { OPEN_STAGE, announceSubmitted } from './recceReview.field';
 import { listThread, markThreadRead, parsePost, postThread, unreadCount, type ThreadCtx, type threadQuery } from './recceReview.thread';
 import { byPhotoOrder, compareVersions, versionHistory, compareQuery } from './recceReview.versions';
@@ -33,7 +34,8 @@ export const decideBody = z.object({
   stage: z.enum(REVIEW_STAGES), decision: z.enum(['APPROVE', 'REJECT', 'REWORK', 'ADDITIONAL']), versionNo: z.coerce.number().int().min(1),
   comment: z.string().trim().max(2000).default(''), checklist: checklistBody,
   reason: z.string().trim().max(2000).optional(), // rejection reason or admin override reason
-  items: z.array(z.object({ type: z.enum(['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER']), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(20).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional() })).max(30).default([]),
+  rejectMode: z.enum(['PHOTO', 'MEASUREMENT', 'BOTH']).optional(), // Project Tracking: what was rejected
+  items: z.array(z.object({ type: z.enum(['REPLACE_PHOTO', 'ADDITIONAL_PHOTO', 'FIX_MEASUREMENT', 'OTHER']), category: z.enum(PHOTO_CATEGORIES).optional(), mediaKey: z.string().max(40).optional(), photo: objectId.optional(), note: z.string().trim().max(500).optional() })).max(30).default([]),
 });
 export const reopenBody = z.object({ reason: z.string().trim().min(5, 'Give a reason').max(500) });
 export const overrideBody = z.object({ action: z.enum(['APPROVE', 'REJECT']), reason: z.string().trim().min(5, 'Give a reason').max(500) });
@@ -78,7 +80,7 @@ function assertStageRights(actor: Actor, stage: ReviewStage) {
   if (mine !== stage) throw AppError.forbidden(`Only ${STAGE_LABEL[stage]} can decide this review stage`);
 }
 
-async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[]; refs?: { type: string; id: string }[] }) {
+export async function afterDecision(actor: Actor, sub: InstanceType<typeof RecceSubmission>, info: { versionNo: number; stage: ReviewStage; decision: string; comment: string; title: string; tone: string; extra?: { label: string; value: string }[]; refs?: { type: string; id: string }[] }) {
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();
   const who = (await User.findById(actor.id).select('name').lean())?.name ?? STAGE_LABEL[info.stage];
@@ -109,7 +111,7 @@ async function notifyNextStage(actor: Actor, sub: InstanceType<typeof RecceSubmi
  * Every required stage has approved: besides the recce person (told by afterDecision), the people of every stage hear that the shop is
  * complete. The person who made the last decision is never notified (notify skips the actor).
  */
-async function notifyFinalApproval(actor: Actor, sub: InstanceType<typeof RecceSubmission>, versionNo: number, stages: ReviewStage[]) {
+export async function notifyFinalApproval(actor: Actor, sub: InstanceType<typeof RecceSubmission>, versionNo: number, stages: ReviewStage[]) {
   const [site, p] = await Promise.all([Site.findById(sub.site).select('shopName siteCode').lean(), Project.findById(sub.project).select('code client clientDetails').lean()]);
   const people = (await Promise.all(REVIEW_STAGES.map((s) => stageRecipients(s, sub.project, sub.reviewers?.[s] ?? null)))).flat().filter((id) => String(id) !== String(sub.assignee));
   const clientName = p ? await clientNameFor(p) : null;
@@ -224,17 +226,20 @@ export async function workspace(actor: Actor, id: string) {
   const reworks = [...doc.reworks].sort(byTime);
   // Reviewers never see another person's drafts, only what was submitted (including photos later superseded or removed, with history).
   const photos = doc.photos.filter((p) => p.state !== 'DRAFT').sort(byPhotoOrder);
-  const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
+  const itemReviews = doc.itemReviews ?? [];
+  const names = await nameMap([...photos.flatMap((p) => [p.uploadedBy, p.removedBy]), ...reviews.map((r) => r.reviewer), ...versions.map((v) => v.submittedBy), ...reworks.map((r) => r.requestedBy), ...itemReviews.map((i) => i.reviewer), sub.assignee, sub.reviewers?.OPS, sub.reviewers?.CS]);
   const roles = await roleMap(photos.map((p) => p.uploadedBy));
   const mine = stageOf(actor.role);
   const cur = versions.at(-1);
   const curReviews = cur ? reviewsOfVersion(reviews, cur.version) : [];
   const open = cur && (REVIEWABLE as string[]).includes(sub.status) ? OPEN_STAGE(cur.stages as ReviewStage[], cur.sequential, decisionMap(curReviews)) : null;
-  const dec = (r: (typeof reviews)[number]) => ({ stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment, checklist: r.checklist, override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null });
+  // Rejection voice notes (Project Tracking): a short-lived link per review that has one.
+  const voice = new Map(await Promise.all(reviews.filter((r) => r.voiceNote?.key).map(async (r) => [String(r._id), (await link(r.voiceNote as never))?.url ?? null] as const)));
+  const dec = (r: (typeof reviews)[number]) => ({ rejectMode: r.rejectMode ?? null, voiceNoteUrl: voice.get(String(r._id)) ?? null, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], decision: r.decision, reviewer: r.reviewer ? (names.get(String(r.reviewer)) ?? null) : null, decidedAt: r.decidedAt ?? null, comment: r.comment, checklist: r.checklist, override: r.override?.reason ? { reason: r.override.reason, by: names.get(String(r.override.by)) ?? null } : null });
   return {
     id: String(sub._id), status: sub.status, currentVersion: sub.currentVersion, attempts: sub.attempts, priority: sub.priority, submittedAt: sub.submittedAt ?? null, dueAt: sub.dueAt ?? null,
     overdue: (REVIEWABLE as string[]).includes(sub.status) && !!sub.dueAt && sub.dueAt.getTime() < Date.now(), pendingStage: (REVIEWABLE as string[]).includes(sub.status) ? (sub.pendingStage ?? null) : null,
-    assignee: names.get(String(sub.assignee)) ?? null, channel: sub.channel ?? null, notes: sub.notes, mediaItems: sub.mediaItems, installation: presentInstallation(sub.installation as never),
+    assignee: names.get(String(sub.assignee)) ?? null, channel: sub.channel ?? null, notes: sub.notes, mediaItems: flatItems(sub.mediaItems), installation: presentInstallation(sub.installation as never),
     reviewers: { OPS: sub.reviewers?.OPS ? { id: String(sub.reviewers.OPS), name: names.get(String(sub.reviewers.OPS)) ?? '' } : null, CS: sub.reviewers?.CS ? { id: String(sub.reviewers.CS), name: names.get(String(sub.reviewers.CS)) ?? '' } : null },
     shop: { id: String(site._id), code: site.siteCode, name: site.shopName ?? null, dealer: site.dealerName ?? null, district: site.district ?? null, contactPerson: site.contactPerson ?? null, mobile: site.mobile ?? null, address: [site.address1, site.address2, site.address3, site.pincode].filter(Boolean).join(', '), lat: site.lat ?? null, lng: site.lng ?? null, boardType: site.boardType ?? null },
     project: { id: String(project._id), code: project.code, name: project.name, client: await clientNameFor(project), requirementType: project.requirementType ?? null, closed: CLOSED_PROJECT.includes(String(project.status)) },
@@ -244,8 +249,15 @@ export async function workspace(actor: Actor, id: string) {
     })),
     photos: await Promise.all(photos.map((p) => presentPhoto(p as never, names, { withHistory: true, roles }))),
     reworks: reworks.map((r) => ({ id: String(r._id), versionNo: r.versionNo, stage: r.stage, stageLabel: STAGE_LABEL[r.stage as ReviewStage], kind: r.kind, status: r.status, instructions: r.instructions, requestedBy: names.get(String(r.requestedBy)) ?? null, requestedAt: r.createdAt, items: r.items.map((i) => ({ id: String(i._id), type: i.type, category: i.category ?? null, categoryLabel: i.category ? CATEGORY_LABEL[i.category as keyof typeof CATEGORY_LABEL] : null, mediaKey: i.mediaKey ?? '', photo: i.photo ? String(i.photo) : null, note: i.note ?? '', resolved: i.resolved, resolvedInVersion: i.resolvedInVersion ?? null })) })),
-    checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps })),
+    // Project Approval: photo / measurement decisions of every stage and version (both stages see each other's).
+    itemReviews: itemReviews.map((i) => ({ id: String(i._id), versionNo: i.versionNo, stage: i.stage, stageLabel: STAGE_LABEL[i.stage as ReviewStage], kind: i.kind, ref: i.ref, decision: i.decision, reason: i.reason ?? '', reviewer: names.get(String(i.reviewer)) ?? null, decidedAt: i.decidedAt ?? null })),
+    checklist: cfg.checklist.filter((c) => c.stage === 'ALL' || c.stage === mine || actor.role === 'SUPER_ADMIN').map((c) => ({ key: c.key, label: c.label, stage: c.stage, gps: !!c.gps, required: !(c.gps && !cfg.requireGps) })),
     categories: PHOTO_CATEGORIES.map((c) => ({ key: c, label: CATEGORY_LABEL[c] })),
+    unitPhotoCategories: cfg.unitPhotoCategories ?? [],
+    // Unit-wise review record: every board unit with its photos, measurement, answers, versions and OPS / CS decisions.
+    boards: await presentShopUnits(doc),
+    summary: doc.summary ?? null,
+    unitQuestions: cfg.unitQuestions ?? [],
     me: { stage: mine, canDecide: !!mine && open === mine && !CLOSED_PROJECT.includes(String(project.status)), openStage: open, isAdmin: actor.role === 'SUPER_ADMIN', canReopen: (sub.status === 'REJECTED' && (cfg.allowRetryAfterReject ? !!mine || actor.role === 'SUPER_ADMIN' : actor.role === 'SUPER_ADMIN')) || (sub.status === 'APPROVED' && actor.role === 'SUPER_ADMIN') },
     viewedAt: new Date(),
   };
@@ -280,6 +292,7 @@ export async function markReviewStarted(actor: Actor, id: string) {
 export async function decide(actor: Actor, id: string, input: z.infer<typeof decideBody>) {
   assertStageRights(actor, input.stage);
   const sub = await loadSubmission(actor, id);
+  if (hasUnits(sub)) throw AppError.conflict('This shop is reviewed unit by unit. Approve or reject each unit.');
   await assertProjectOpen(sub.project);
   if (!(REVIEWABLE as string[]).includes(sub.status)) throw AppError.conflict('This submission is not waiting for review');
   if (input.versionNo !== sub.currentVersion) throw AppError.conflict(`Version ${sub.currentVersion} is current now. Reload before deciding.`);
@@ -302,6 +315,9 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
     const mandatory = cfg.checklist.filter((c) => (c.stage === 'ALL' || c.stage === input.stage) && !(c.gps && !cfg.requireGps));
     const failed = mandatory.filter((c) => !checklist.find((x) => x.key === c.key)?.passed);
     if (failed.length) throw AppError.badRequest(`Tick every checklist item before approving: ${failed.map((f) => f.label).join(', ')}`);
+    // Project Approval: this stage cannot approve a version while it still rejects a photo or a measurement of it.
+    const rejectedItems = (sub.itemReviews ?? []).filter((i) => i.versionNo === version.version && i.stage === input.stage && i.decision === 'REJECTED').length;
+    if (rejectedItems) throw AppError.conflict(`${rejectedItems} photo / measurement item${rejectedItems > 1 ? 's are' : ' is'} rejected by ${STAGE_LABEL[input.stage]}. Send the submission back for correction or clear the rejection before approving.`);
   }
 
   const decision = input.decision === 'APPROVE' ? 'APPROVED' : input.decision === 'REJECT' ? 'REJECTED' : 'REWORK';
@@ -309,7 +325,7 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   // Claim this stage's review entry with a compare-and-set on the shop's document: it must still be PENDING.
   const claimed = await RecceSubmission.updateOne(
     { _id: sub._id, reviews: { $elemMatch: { versionNo: version.version, stage: input.stage, decision: 'PENDING' } } },
-    { $set: { 'reviews.$.decision': decision, 'reviews.$.reviewer': actor.id, 'reviews.$.reviewerRole': actor.role, 'reviews.$.decidedAt': new Date(), 'reviews.$.comment': comment, 'reviews.$.checklist': checklist } },
+    { $set: { 'reviews.$.decision': decision, 'reviews.$.reviewer': actor.id, 'reviews.$.reviewerRole': actor.role, 'reviews.$.decidedAt': new Date(), 'reviews.$.comment': comment, 'reviews.$.checklist': checklist, ...(decision !== 'APPROVED' && input.rejectMode ? { 'reviews.$.rejectMode': input.rejectMode } : {}) } },
   );
   if (!claimed.modifiedCount) throw AppError.conflict('Another reviewer has already decided this stage');
 
@@ -343,7 +359,7 @@ export async function decide(actor: Actor, id: string, input: z.infer<typeof dec
   const pointed = input.items.map((i) => { const c = i.category ?? (i.photo ? catOf.get(i.photo) : undefined); return c ? `${CATEGORY_LABEL[c]}${i.note ? ` (${i.note})` : ''}` : null; }).filter((x): x is string => !!x);
   const cardRefs = [
     ...photoIds.map((id) => ({ type: 'PHOTO', id })),
-    ...[...new Set(input.items.filter((i) => !i.photo && i.mediaKey && sub.mediaItems.some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
+    ...[...new Set(input.items.filter((i) => !i.photo && i.mediaKey && flatItems(sub.mediaItems).some((m) => m.key === i.mediaKey)).map((i) => i.mediaKey!))].map((id) => ({ type: 'BOARD', id })),
   ];
   const titles: Record<string, string> = { APPROVE: status === 'APPROVED' ? 'Final approval' : `${STAGE_LABEL[input.stage]} approved`, REJECT: 'Rejected', REWORK: 'Rework required', ADDITIONAL: 'Additional photos requested' };
   await afterDecision(actor, fresh, { versionNo: version.version, stage: input.stage, decision: input.decision, comment, title: titles[input.decision]!, tone: decision === 'APPROVED' ? 'good' : decision === 'REJECTED' ? 'bad' : 'warn', refs: cardRefs, extra: input.decision === 'ADDITIONAL' ? [{ label: 'Needed', value: input.items.filter((i) => i.category).map((i) => CATEGORY_LABEL[i.category!]).join(', ') }] : input.decision === 'REWORK' && pointed.length ? [{ label: 'Rework items', value: pointed.join(', ') }] : [] });
@@ -376,6 +392,7 @@ export async function override(actor: Actor, id: string, input: z.infer<typeof o
     { arrayFilters: [{ 'r.versionNo': version.version, 'r.decision': 'PENDING' }] },
   );
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
+  await overrideUnits(sub._id, actor, input.action, input.reason);
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'ADMIN_OVERRIDE', version: version.version, reason: input.reason, visibility: 'REVIEW', changes: [{ field: 'status', oldValue: sub.status, newValue: status }] });
   const after = (await RecceSubmission.findById(sub._id))!;
   await afterDecision(actor, after, { versionNo: version.version, stage: 'OPS', decision: input.action, comment: input.reason, title: `Admin override: ${status.toLowerCase()}`, tone: input.action === 'APPROVE' ? 'good' : 'bad' });
@@ -399,6 +416,7 @@ export async function reopen(actor: Actor, id: string, input: z.infer<typeof reo
     { arrayFilters: [{ 'p.decision': 'PENDING' }, { 'o.status': 'OPEN' }] },
   );
   if (!moved.modifiedCount) throw AppError.conflict('The submission changed. Reload and try again.');
+  await reopenUnits(sub._id, sub.status);
   await logEvent(actor, { submission: sub._id, project: sub.project, site: sub.site, type: 'REOPENED', reason: input.reason, version: sub.currentVersion, changes: [{ field: 'status', oldValue: sub.status, newValue: 'IN_PROGRESS' }] });
   const site = await Site.findById(sub.site).select('shopName siteCode').lean();
   const p = await Project.findById(sub.project).select('code client clientDetails').lean();

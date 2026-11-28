@@ -42,6 +42,7 @@ export const EVENT_LABEL: Record<string, string> = {
   REVIEW_APPROVED: 'Review approved', REVIEW_REJECTED: 'Review rejected', REWORK_REQUESTED: 'Rework requested', ADDITIONAL_PHOTOS_REQUESTED: 'Additional photos requested',
   FINAL_APPROVAL: 'Final approval', ADMIN_OVERRIDE: 'Admin override', REOPENED: 'Reopened', COMMENT_ADDED: 'Comment added', REVIEWER_ASSIGNED: 'Reviewer assigned',
   REVIEW_STARTED: 'Review started', DOCUMENT_UPLOADED: 'Document uploaded', VOICE_NOTE_ADDED: 'Voice note added', INSTALLATION_UPDATED: 'Installation feasibility updated',
+  ITEM_APPROVED: 'Item approved', ITEM_REJECTED: 'Item rejected', ITEM_CLEARED: 'Item decision cleared', UNIT_APPROVED: 'Unit approved', UNIT_REJECTED: 'Unit rejected',
 };
 
 export type Visibility = 'ALL' | 'REVIEW' | 'ADMIN';
@@ -103,7 +104,7 @@ export async function assertProjectOpen(projectId: Types.ObjectId | string) {
 
 /* ------------------------------------------------ requirements & progress ------------------------------------------------ */
 
-export type MediaItem = { key: string; name: string; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined };
+export type MediaItem = { key: string; name: string; quantity?: number | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; notes?: string | null | undefined; sided?: string | null | undefined; condition?: string | null | undefined; position?: string | null | undefined; installationNotes?: string | null | undefined; units?: { key: string; unitNo: number; width?: number | null; height?: number | null }[] | null | undefined };
 
 /** Photo categories this media item needs. Configurable: the first config key contained in the media name wins, else the project rule, else default. */
 export function requiredCategories(cfg: Config, item: MediaItem, requirementType?: string | null): PhotoCategory[] {
@@ -175,21 +176,100 @@ export function seedItems(site: { boardType?: string | null; width?: number | nu
   return [{ key: 'm1', name: site.boardType?.trim() || 'Board', quantity: site.quantity ?? 1, ...(site.width ? { width: site.width } : {}), ...(site.height ? { height: site.height } : {}), unit: (site.unit as string) || 'FT' }];
 }
 
+/* ------------------------------------------------ media items: stored units ⇄ field app's flat lines ------------------------------------------------ */
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type AnyRow = any;
+
+/** Unit states in which the field person may still change the unit (never submitted, or sent back). */
+export const EDITABLE_UNIT = ['DRAFT', 'REWORK'];
+/** SS-01 / DS-02: side prefix + two-digit unit number. */
+export const unitIdOf = (sideType: string | null | undefined, unitNo: number) => `${sideType === 'DOUBLE' ? 'DS' : 'SS'}-${String(unitNo).padStart(2, '0')}`;
+/** GSP, VINYL, … from the board name the field app sends ("GSP Board" → GSP). */
+export function mediaTypeOf(name?: string | null) {
+  const n = (name ?? '').toUpperCase();
+  if (n.includes('VINYL') || n.includes('VINAYL')) return 'VINYL';
+  if (n.includes('GSP')) return 'GSP';
+  return n.replace(/\bBOARD\b/g, '').trim().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40) || 'BOARD';
+}
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+
+/**
+ * The field app's flat view of the stored media items (the mobile API is unchanged): key / name / size per line, and its
+ * own unit keys and answers when it sent units. Reads older records (key / name / sided) the same way.
+ */
+export function flatItems(items: AnyRow[] | null | undefined): MediaItem[] {
+  return (items ?? []).map((m: AnyRow) => {
+    const key = m.mediaKey ?? m.key;
+    const units: AnyRow[] = m.units ?? [];
+    const first = units[0];
+    const size = first?.measurement ?? (first ? { width: first.width, height: first.height, unit: first.unit } : { width: m.width, height: m.height, unit: m.unit });
+    const fieldUnits = units.some((u) => u.fieldKey || (u.key && !u.unitId));
+    return {
+      key, name: m.name ?? m.mediaType ?? key, quantity: m.quantity ?? 1, width: num(size?.width), height: num(size?.height), unit: size?.unit ?? 'FT',
+      notes: m.notes, sided: m.sideType ?? m.sided, condition: m.condition, position: m.position, installationNotes: m.installationNotes,
+      ...(fieldUnits
+        ? { units: units.map((u) => ({
+            key: u.fieldKey ?? u.key ?? `${key}-u${u.unitNo}`, unitNo: u.unitNo, width: num(u.measurement?.width ?? u.width), height: num(u.measurement?.height ?? u.height), unit: u.measurement?.unit ?? u.unit ?? 'FT',
+            answers: (u.answers ?? []).map((a: AnyRow) => ({ key: a.questionId ?? a.key, question: a.question, answer: a.answer })), notes: u.notes,
+          })) }
+        : {}),
+    } as MediaItem;
+  });
+}
+
+/**
+ * Merges the field app's flat lines into the stored media items: line fields are updated, and each unit's measurement and answers
+ * only while the unit is editable (DRAFT / REWORK). Units already submitted keep their record; a line or unit that was never
+ * submitted and is no longer sent is dropped. A line without units is one unit made of the line's own size.
+ */
+export function mergeFieldItems(existing: AnyRow[] | null | undefined, incoming: MediaItem[]): AnyRow[] {
+  const out: AnyRow[] = [];
+  const old = (existing ?? []).filter((m: AnyRow) => m.mediaKey);
+  for (const i of incoming) {
+    const ex = old.find((m: AnyRow) => m.mediaKey === i.key);
+    const sideType = i.sided === 'DOUBLE' ? 'DOUBLE' : i.sided === 'SINGLE' ? 'SINGLE' : (ex?.sideType ?? 'SINGLE');
+    const src: AnyRow[] = i.units?.length
+      ? i.units.map((u: AnyRow, n: number) => ({ ...u, unitNo: u.unitNo ?? n + 1 }))
+      : [{ unitNo: 1, key: null, width: i.width, height: i.height, unit: i.unit }];
+    const units: AnyRow[] = [];
+    for (const s of src) {
+      const u = ex?.units?.find((x: AnyRow) => x.unitNo === s.unitNo) ?? { unitId: unitIdOf(sideType, s.unitNo), unitNo: s.unitNo, status: 'DRAFT', currentVersion: 0, photos: [], versions: [], reviews: [], reworks: [] };
+      if (EDITABLE_UNIT.includes(u.status)) {
+        Object.assign(u, {
+          fieldKey: s.key ?? undefined, measurement: { width: num(s.width), height: num(s.height), unit: s.unit || i.unit || 'FT' },
+          answers: (s.answers ?? []).map((a: AnyRow) => ({ questionId: a.key, question: a.question, answer: a.answer })), notes: s.notes,
+        });
+      }
+      units.push(u);
+    }
+    // Submitted units the app no longer sends are kept (their history stays).
+    for (const u of ex?.units ?? []) if (!units.includes(u) && u.currentVersion > 0) units.push(u);
+    units.sort((a, b) => a.unitNo - b.unitNo);
+    out.push({
+      ...(ex ?? {}), mediaKey: i.key, mediaType: mediaTypeOf(i.name), sideType, quantity: i.quantity ?? 1, name: i.name,
+      condition: i.condition ?? undefined, position: i.position ?? undefined, notes: i.notes ?? undefined, installationNotes: i.installationNotes ?? undefined, units,
+    });
+  }
+  for (const m of old) if (!out.some((x) => x.mediaKey === m.mediaKey) && (m.units ?? []).some((u: AnyRow) => u.currentVersion > 0)) out.push(m);
+  return out;
+}
+
 /* ------------------------------------------------ presenting ------------------------------------------------ */
 
-const link = async (f: StoredFile | null | undefined) => {
+export const link = async (f: StoredFile | null | undefined) => {
   if (!f) return null;
   const l = await storedFileUrl(f).catch(() => null);
   return l ? { url: l.url, expiresAt: l.expiresAt } : null;
 };
 
-type PhotoRow = { _id: Types.ObjectId; category: string; mediaKey?: string | null; caption?: string | null; order?: number | null; state: string; original: StoredFile; edited?: StoredFile | null; annotations?: unknown; capturedAt?: Date | null; lat?: number | null; lng?: number | null; gpsAccuracy?: number | null; width?: number | null; height?: number | null; flags?: { code?: string | null; message?: string | null }[]; uploadedBy?: Types.ObjectId; createdAt?: Date; version?: number | null; replaces?: Types.ObjectId | null; supersededBy?: Types.ObjectId | null; removedAt?: Date | null; removedBy?: Types.ObjectId | null; removeReason?: string | null; source?: string | null; device?: string | null };
+type PhotoRow = { _id: Types.ObjectId; category: string; mediaKey?: string | null; unitKey?: string | null; caption?: string | null; order?: number | null; state: string; original: StoredFile; edited?: StoredFile | null; annotations?: unknown; capturedAt?: Date | null; lat?: number | null; lng?: number | null; gpsAccuracy?: number | null; width?: number | null; height?: number | null; flags?: { code?: string | null; message?: string | null }[]; uploadedBy?: Types.ObjectId; createdAt?: Date; version?: number | null; replaces?: Types.ObjectId | null; supersededBy?: Types.ObjectId | null; removedAt?: Date | null; removedBy?: Types.ObjectId | null; removeReason?: string | null; source?: string | null; device?: string | null };
 
 /** `withHistory` is for reviewers and admin: removal reason and flags. Field users get only the live photo data. */
 export async function presentPhoto(p: PhotoRow, names: Map<string, string>, opts: { withHistory: boolean; roles?: Map<string, string> }) {
   const [o, e] = await Promise.all([link(p.original), link(p.edited)]);
   return {
-    id: String(p._id), category: p.category, mediaKey: p.mediaKey ?? '', caption: p.caption ?? '', order: p.order ?? 0, state: p.state, version: p.version ?? null,
+    id: String(p._id), category: p.category, mediaKey: p.mediaKey ?? '', unitKey: p.unitKey ?? null, caption: p.caption ?? '', order: p.order ?? 0, state: p.state, version: p.version ?? null,
     url: o?.url ?? null, editedUrl: e?.url ?? null, hasEdited: !!p.edited, annotations: p.annotations ?? null,
     capturedAt: p.capturedAt ?? null, uploadedAt: p.createdAt ?? null, uploadedBy: p.uploadedBy ? (names.get(String(p.uploadedBy)) ?? null) : null,
     capturedByRole: p.uploadedBy ? (opts.roles?.get(String(p.uploadedBy)) ?? null) : null, source: p.source ?? null, device: p.device ?? null,

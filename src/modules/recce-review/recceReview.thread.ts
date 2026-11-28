@@ -19,7 +19,7 @@ import { RecceSubmission, RecceThreadRead, type ReviewStage } from './recceRevie
  */
 
 export type ThreadSite = { _id: Types.ObjectId; project: Types.ObjectId; shopName?: string | null | undefined; siteCode?: string | null | undefined; boardType?: string | null | undefined; width?: number | null | undefined; height?: number | null | undefined; unit?: string | null | undefined; quantity?: number | null | undefined; assignedTo?: Types.ObjectId | null | undefined };
-export type ThreadSub = { _id: Types.ObjectId; assignee?: Types.ObjectId | null | undefined; mediaItems?: { key: string }[] | undefined; reviewers?: { OPS?: Types.ObjectId | null | undefined; CS?: Types.ObjectId | null | undefined } | undefined; pendingStage?: string | null | undefined };
+export type ThreadSub = { _id: Types.ObjectId; assignee?: Types.ObjectId | null | undefined; mediaItems?: { key?: string | null; mediaKey?: string | null }[] | undefined; reviewers?: { OPS?: Types.ObjectId | null | undefined; CS?: Types.ObjectId | null | undefined } | undefined; pendingStage?: string | null | undefined };
 export type ThreadCtx = { site: ThreadSite; sub: ThreadSub | null; side: 'FIELD' | 'REVIEW' };
 
 /* ------------------------------------------------ validators ------------------------------------------------ */
@@ -100,7 +100,7 @@ async function checkRefs(ctx: ThreadCtx, refs: Ref[]): Promise<Ref[]> {
     if (photos.some((id) => !known.has(id.toLowerCase()))) throw bad('A referenced photo does not belong to this shop');
   }
   if (boards.length) {
-    const keys = new Set<string>(ctx.sub ? (ctx.sub.mediaItems ?? []).map((i) => i.key) : (seedItems(ctx.site) as MediaItem[]).map((i) => i.key));
+    const keys = new Set<string>(ctx.sub ? (ctx.sub.mediaItems ?? []).map((i) => i.mediaKey ?? i.key ?? '') : (seedItems(ctx.site) as MediaItem[]).map((i) => i.key));
     for (const v of own?.versions ?? []) for (const i of v.mediaItems ?? []) keys.add(i.key);
     if (boards.some((k) => !keys.has(k))) throw bad('A referenced board item does not exist in this shop');
   }
